@@ -75,43 +75,59 @@ Each expression node stores (computed at construction, O(1)):
 
 ## Implementation Plan
 
-### Phase 1: Remove FVars, Pure De Bruijn
-- Remove `Local` variant and `FVarId` from `Expr`
-- Remove `has_fvars` tracking
-- Remove `abstr` / `abstr_levels` (abstraction = identity with de Bruijn)
-- Change binder entry in `tc.rs`: instead of inst+mk_local, just increment depth counter
-- Adapt `inst` to work purely with de Bruijn substitution
+### Phase 1: Remove FVars, Pure De Bruijn ✅
+- [done] Core tc.rs uses pure de Bruijn: `push_local`/`pop_local` instead of `inst`+`mk_local`
+- [done] `inst` split into `inst` (no shift-down, for Local-based code) and `inst_beta` (shift-down,
+  for beta/let reduction and Pi consumption)
+- [done] `inst_aux` shifts substitution values by offset when substituting under binders
+- [done] `lookup_var` retrieves types from local_ctx and shifts to current depth
+- [done] Infer cache restricted to closed expressions (DAG-shared open exprs are depth-dependent)
+- [done] Eta expansion shifts `y` up by 1 when constructing `λ x. y x`
+- [deferred] inductive.rs/quot.rs still use old Local approach (works correctly)
+- [deferred] Remove dead code (Local variant, FVarId, abstr, etc.)
+- **Passes all 88 arena good tests, rejects all 40 bad tests**
+- **Performance: init-prelude (2051 decls) 0.08s, grind-ring-5 (2439 decls) 2.97s (release)**
 
-### Phase 2: Add `Shift` Node
-- Add `Shift { inner: ExprPtr, amount: u16, hash, lower_bound, loose_bvar_range }` to `Expr`
-- Implement shift-pushing in all pattern matches (reduction, defEq, infer)
-- Implement collapsing and skip-when-closed optimizations
+### Phase 2–4: Shift-Homomorphic Caching (BLOCKED — design issue)
 
-### Phase 3: Shift-Homomorphic Hash
-- Replace current hash computation with depth-normalizing scheme
-- Add `lower_bound` field to all `Expr` variants
-- Cache keys use canonical hash; results wrapped in `Shift` on retrieval
+The original plan called for:
+- Shift nodes: `Shift(e, k)` for O(1) delayed shifting
+- Depth-normalizing hash: `(canonical_hash, lower_bound)` pairs with shift-invariant deltas
+- Depth-invariant caches: keyed by canonical hash
 
-### Phase 4: Adapt Caches
-- Modify `TcCache` to use canonical hashes as keys
-- WHNF/infer caches return `Shift`-wrapped results
-- DefEq cache keyed by canonical hash pairs
+**Problem discovered**: The delta-based hash scheme `hash(App(f,x)) = combine(ch_f, ch_x,
+lb_f - lb_x)` is NOT shift-invariant for binder bodies. In `Lambda(ty, body)`, the body
+contains both Var(0) (bound, fixed under shifting) and free vars (shifted). The delta
+between bound and free vars changes under shifting, breaking the hash invariance.
 
-### Phase 5: Benchmark
-- Validate against arena test cases (133 tests, downloadable tarball)
-- Benchmark on mathlib export against unmodified nanoda
-- Profile to find remaining bottlenecks
+This affects the overwhelmingly common case of dependent binder bodies (any `(x : A) → B x`
+where B references both x and external variables).
+
+**Possible solutions** (not yet implemented):
+1. **Two-level normalization**: Compute a normalized body hash at binder construction time
+   by shifting free vars to a canonical position. Requires O(body_size) traversal per binder
+   at construction, which may negate the caching benefit.
+2. **Separate bound/free tracking**: Store `min_bvar_gte1` metadata per expression to
+   correctly identify free vars in binder bodies. Adds complexity.
+3. **Accept imprecision**: Use the delta scheme with known imprecision for binder bodies.
+   Reduces cache hit rate but preserves correctness (with verification on hit).
+4. **Shifted pointer pairs**: Carry `(ExprPtr, shift_amount)` through computations instead
+   of modifying the expression DAG. Major API refactor.
+
+### Phase 5: Benchmark ✅ (partial)
+- [done] Validated against arena test cases (88 good + 40 bad)
+- [todo] Benchmark on mathlib export against unmodified nanoda
+- [todo] Profile to find remaining bottlenecks
 
 ## Open Questions
 
+- **Shift-homomorphic hash**: How to handle bound variables in binder bodies? See Phase 2–4.
 - **Let-bindings**: Substitute eagerly (avoids shifting let-values, which can be large)
   or delay via `Shift`? Needs benchmarking.
-- **Hash function choice**: FxHash-based mixing? Or something with better algebraic
-  properties for the delta encoding?
-- **Bitmask vs range**: Is `loose_bvar_range` sufficient, or do we need a bitmask of
-  which indices appear free? Range is cheaper to maintain.
 - **Interaction with union-find**: nanoda's defEq uses union-find for equivalence classes.
   Does depth-normalization interact well with union-find merging?
+- **Cache strategy without shift-invariant hash**: Could use `(ExprPtr, depth)` keys with
+  shift-on-hit for WHNF/infer caches. Simple, correct, but O(result_size) per cache hit.
 
 ## References
 
