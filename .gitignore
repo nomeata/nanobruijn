@@ -1,0 +1,20 @@
+/target/
+/_tmp/
+.direnv/
+.bash_profile
+.bashrc
+.zshrc
+.zprofile
+.profile
+.gitconfig
+.gitmodules
+.idea/
+.vscode/
+.mcp.json
+.ripgreprc
+# bare git repo artifacts from container setup
+/HEAD
+/objects/
+/refs/
+/hooks/
+/config
