@@ -475,7 +475,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             ctor_ty = self.whnf(ctor_ty);
             match self.ctx.read_expr(ctor_ty) {
                 Pi { body, .. } => {
-                    ctor_ty = self.ctx.inst(body, &[struct_ty_args[i as usize]]);
+                    ctor_ty = self.ctx.inst_beta(body, &[struct_ty_args[i as usize]]);
                 }
                 _ => panic!("Ran out of param telescope"),
             }
@@ -489,7 +489,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                           panic!("infer_proj prop")
                       }
                       let arg = self.ctx.mk_proj(inductive_info.name, i, structure);
-                      ctor_ty = self.ctx.inst(body, &[arg]);
+                      ctor_ty = self.ctx.inst_beta(body, &[arg]);
                     } else {
                       ctor_ty = body;
                     }
@@ -574,7 +574,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                     let arg = args.pop().unwrap();
                     if flag == Check {
                         let arg_type = self.infer(arg, flag);
-                        let binder_type_instd = self.ctx.inst(binder_type, ctx.as_slice());
+                        let binder_type_instd = self.ctx.inst_beta(binder_type, ctx.as_slice());
                         let outer_scope_eager_setting = self.ctx.eager_mode;
                         if self.ctx.is_eager_reduce_app(arg) {
                             self.ctx.eager_mode = true;
@@ -589,7 +589,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                     fun = body;
                 }
                 _ => {
-                    let as_pi = self.ctx.inst(fun, ctx.as_slice());
+                    let as_pi = self.ctx.inst_beta(fun, ctx.as_slice());
                     let as_pi = self.ensure_pi(as_pi);
                     match self.ctx.read_expr(as_pi) {
                         Pi { .. } => {
@@ -602,7 +602,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                 }
             }
         }
-        self.ctx.inst(fun, ctx.as_slice())
+        self.ctx.inst_beta(fun, ctx.as_slice())
     }
 
     //fn infer_app(&mut self, e: ExprPtr<'t>, flag: InferFlag) -> ExprPtr<'t> {
@@ -1327,8 +1327,10 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         if let Lambda { .. } = self.ctx.read_expr(x) {
             let y_ty = self.infer_then_whnf(y, InferOnly);
             if let Pi { binder_name, binder_type, binder_style, .. } = self.ctx.read_expr(y_ty) {
+                // Shift y up by 1 since it will be placed inside a new lambda body
+                let y_shifted = self.ctx.shift_expr(y, 1, 0);
                 let v0 = self.ctx.mk_var(0);
-                let new_body = self.ctx.mk_app(y, v0);
+                let new_body = self.ctx.mk_app(y_shifted, v0);
                 let new_lambda = self.ctx.mk_lambda(binder_name, binder_style, binder_type, new_body);
                 return self.def_eq(x, new_lambda)
             }

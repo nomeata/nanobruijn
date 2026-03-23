@@ -158,13 +158,13 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
                 panic!()
             }
         }
-        self.inst(e, &all_args[0..n])
+        self.inst_beta(e, &all_args[0..n])
     }
 
     /// Instantiate `e` with the substitutions in `substs`.
     /// Replaces Var(offset + i) with substs[rev(i)] for i < substs.len().
     /// Vars beyond the substitution range are left unchanged (no shifting).
-    /// Used for type-level substitution (e.g. infer_app Pi parameter accumulation).
+    /// Used for local-to-local replacement (e.g. replace_params, inductive.rs).
     pub fn inst(&mut self, e: ExprPtr<'t>, substs: &[ExprPtr<'t>]) -> ExprPtr<'t> {
         if substs.is_empty() {
             return e
@@ -197,8 +197,14 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
                     debug_assert!(dbj_idx >= offset);
                     let rel_idx = dbj_idx - offset;
                     if rel_idx < n_substs {
-                        // Within substitution range: replace with subst (in reverse order)
-                        substs[substs.len() - 1 - rel_idx as usize]
+                        // Within substitution range: replace with subst (in reverse order).
+                        // Shift the value up by `offset` to account for binders we traversed.
+                        let val = substs[substs.len() - 1 - rel_idx as usize];
+                        if offset > 0 {
+                            self.shift_expr(val, offset, 0)
+                        } else {
+                            val
+                        }
                     } else if shift_down {
                         // Beyond substitution range: shift down by n_substs (for beta reduction)
                         self.mk_var(dbj_idx - n_substs)
