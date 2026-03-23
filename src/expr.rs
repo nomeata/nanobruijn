@@ -161,54 +161,136 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         self.inst(e, &all_args[0..n])
     }
 
-    /// Instantiate `e` with the substitutions in `substs`
+    /// Instantiate `e` with the substitutions in `substs`.
+    /// Replaces Var(offset + i) with substs[rev(i)] for i < substs.len().
+    /// Vars beyond the substitution range are left unchanged (no shifting).
+    /// Used for type-level substitution (e.g. infer_app Pi parameter accumulation).
     pub fn inst(&mut self, e: ExprPtr<'t>, substs: &[ExprPtr<'t>]) -> ExprPtr<'t> {
+        if substs.is_empty() {
+            return e
+        }
         self.expr_cache.inst_cache.clear();
-        self.inst_aux(e, substs, 0)
+        self.inst_aux(e, substs, 0, false)
     }
 
-    fn inst_aux(&mut self, e: ExprPtr<'t>, substs: &[ExprPtr<'t>], offset: u16) -> ExprPtr<'t> {
+    /// Like `inst`, but also shifts down Var indices beyond the substitution range.
+    /// Used for beta reduction and let-substitution where binders are being removed.
+    pub fn inst_beta(&mut self, e: ExprPtr<'t>, substs: &[ExprPtr<'t>]) -> ExprPtr<'t> {
+        if substs.is_empty() {
+            return e
+        }
+        self.expr_cache.inst_cache.clear();
+        self.inst_aux(e, substs, 0, true)
+    }
+
+    fn inst_aux(&mut self, e: ExprPtr<'t>, substs: &[ExprPtr<'t>], offset: u16, shift_down: bool) -> ExprPtr<'t> {
         if self.num_loose_bvars(e) <= offset {
             e
         } else if let Some(cached) = self.expr_cache.inst_cache.get(&(e, offset)) {
             *cached
         } else {
+            let n_substs = substs.len() as u16;
             let calcd = match self.read_expr(e) {
                 // These expressions should be unreachable since they return `n_loose_bvars() == 0`
                 Sort { .. } | Const { .. } | Local { .. } | StringLit { .. } | NatLit { .. } => panic!(),
                 Var { dbj_idx, .. } => {
                     debug_assert!(dbj_idx >= offset);
-                    substs.iter().rev().nth((dbj_idx - offset) as usize).copied().unwrap_or(e)
+                    let rel_idx = dbj_idx - offset;
+                    if rel_idx < n_substs {
+                        // Within substitution range: replace with subst (in reverse order)
+                        substs[substs.len() - 1 - rel_idx as usize]
+                    } else if shift_down {
+                        // Beyond substitution range: shift down by n_substs (for beta reduction)
+                        self.mk_var(dbj_idx - n_substs)
+                    } else {
+                        // Beyond substitution range: leave unchanged (for type-level substitution)
+                        e
+                    }
                 }
                 App { fun, arg, .. } => {
-                    let fun = self.inst_aux(fun, substs, offset);
-                    let arg = self.inst_aux(arg, substs, offset);
+                    let fun = self.inst_aux(fun, substs, offset, shift_down);
+                    let arg = self.inst_aux(arg, substs, offset, shift_down);
                     self.mk_app(fun, arg)
                 }
                 Pi { binder_name, binder_style, binder_type, body, .. } => {
-                    let binder_type = self.inst_aux(binder_type, substs, offset);
-                    let body = self.inst_aux(body, substs, offset + 1);
+                    let binder_type = self.inst_aux(binder_type, substs, offset, shift_down);
+                    let body = self.inst_aux(body, substs, offset + 1, shift_down);
                     self.mk_pi(binder_name, binder_style, binder_type, body)
                 }
                 Lambda { binder_name, binder_style, binder_type, body, .. } => {
-                    let binder_type = self.inst_aux(binder_type, substs, offset);
-                    let body = self.inst_aux(body, substs, offset + 1);
+                    let binder_type = self.inst_aux(binder_type, substs, offset, shift_down);
+                    let body = self.inst_aux(body, substs, offset + 1, shift_down);
                     self.mk_lambda(binder_name, binder_style, binder_type, body)
                 }
                 Let { binder_name, binder_type, val, body, nondep, .. } => {
-                    let binder_type = self.inst_aux(binder_type, substs, offset);
-                    let val = self.inst_aux(val, substs, offset);
-                    let body = self.inst_aux(body, substs, offset + 1);
+                    let binder_type = self.inst_aux(binder_type, substs, offset, shift_down);
+                    let val = self.inst_aux(val, substs, offset, shift_down);
+                    let body = self.inst_aux(body, substs, offset + 1, shift_down);
                     self.mk_let(binder_name, binder_type, val, body, nondep)
                 }
                 Proj { ty_name, idx, structure, .. } => {
-                    let structure = self.inst_aux(structure, substs, offset);
+                    let structure = self.inst_aux(structure, substs, offset, shift_down);
                     self.mk_proj(ty_name, idx, structure)
                 }
             };
             self.expr_cache.inst_cache.insert((e, offset), calcd);
             calcd
         }
+    }
+
+    /// Shift all free variables in `e` (those with index >= cutoff) up by `amount`.
+    pub fn shift_expr(&mut self, e: ExprPtr<'t>, amount: u16, cutoff: u16) -> ExprPtr<'t> {
+        if amount == 0 || self.num_loose_bvars(e) <= cutoff {
+            return e
+        }
+        self.expr_cache.shift_cache.clear();
+        self.shift_expr_aux(e, amount, cutoff)
+    }
+
+    fn shift_expr_aux(&mut self, e: ExprPtr<'t>, amount: u16, cutoff: u16) -> ExprPtr<'t> {
+        if self.num_loose_bvars(e) <= cutoff {
+            return e
+        }
+        if let Some(cached) = self.expr_cache.shift_cache.get(&(e, amount, cutoff)) {
+            return *cached
+        }
+        let calcd = match self.read_expr(e) {
+            Sort { .. } | Const { .. } | Local { .. } | StringLit { .. } | NatLit { .. } => panic!(),
+            Var { dbj_idx, .. } => {
+                if dbj_idx >= cutoff {
+                    self.mk_var(dbj_idx + amount)
+                } else {
+                    e
+                }
+            }
+            App { fun, arg, .. } => {
+                let fun = self.shift_expr_aux(fun, amount, cutoff);
+                let arg = self.shift_expr_aux(arg, amount, cutoff);
+                self.mk_app(fun, arg)
+            }
+            Pi { binder_name, binder_style, binder_type, body, .. } => {
+                let binder_type = self.shift_expr_aux(binder_type, amount, cutoff);
+                let body = self.shift_expr_aux(body, amount, cutoff + 1);
+                self.mk_pi(binder_name, binder_style, binder_type, body)
+            }
+            Lambda { binder_name, binder_style, binder_type, body, .. } => {
+                let binder_type = self.shift_expr_aux(binder_type, amount, cutoff);
+                let body = self.shift_expr_aux(body, amount, cutoff + 1);
+                self.mk_lambda(binder_name, binder_style, binder_type, body)
+            }
+            Let { binder_name, binder_type, val, body, nondep, .. } => {
+                let binder_type = self.shift_expr_aux(binder_type, amount, cutoff);
+                let val = self.shift_expr_aux(val, amount, cutoff);
+                let body = self.shift_expr_aux(body, amount, cutoff + 1);
+                self.mk_let(binder_name, binder_type, val, body, nondep)
+            }
+            Proj { ty_name, idx, structure, .. } => {
+                let structure = self.shift_expr_aux(structure, amount, cutoff);
+                self.mk_proj(ty_name, idx, structure)
+            }
+        };
+        self.expr_cache.shift_cache.insert((e, amount, cutoff), calcd);
+        calcd
     }
 
     /// From `e[x_1..x_n/v_1..v_n]`, abstract and re-inst, creating `e[y_1..y_n/v_1..v_n]`.

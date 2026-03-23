@@ -76,6 +76,11 @@ pub struct TypeChecker<'x, 't, 'p> {
     /// to make sure that all of the universe paramters actually used in a declaration `d` are
     /// properly represented in the declaration's uparams info.
     pub(crate) declar_info: Option<DeclarInfo<'t>>,
+    /// Local typing context for de Bruijn variables.
+    /// `local_ctx[0]` is the type of `Var(0)` (most recently bound variable).
+    /// Types are stored as they appear in the binder (valid at the depth before the binder).
+    /// When looking up `Var(k)`, we shift `local_ctx[k]` up by `k+1`.
+    pub(crate) local_ctx: Vec<ExprPtr<'t>>,
 }
 
 impl<'p> ExportFile<'p> {
@@ -156,7 +161,28 @@ impl<'p> ExportFile<'p> {
 impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
     pub fn new(dag: &'x mut TcCtx<'t, 'p>, env: &'x Env<'x, 't>, declar_info: Option<DeclarInfo<'t>>) -> Self {
         assert_eq!(dag.dbj_level_counter, 0);
-        Self { ctx: dag, env, tc_cache: TcCache::new(), declar_info } 
+        Self { ctx: dag, env, tc_cache: TcCache::new(), declar_info, local_ctx: Vec::new() }
+    }
+
+    /// Look up the type of Var(k) in the local context, shifting it to be valid at
+    /// the current depth.
+    fn lookup_var(&mut self, dbj_idx: u16) -> ExprPtr<'t> {
+        let depth = self.local_ctx.len();
+        let ty = self.local_ctx[depth - 1 - dbj_idx as usize];
+        // ty was valid at depth (depth - 1 - dbj_idx), i.e., before the
+        // binder that introduced Var(dbj_idx). To make it valid at current depth,
+        // we shift up by dbj_idx + 1.
+        self.ctx.shift_expr(ty, dbj_idx + 1, 0)
+    }
+
+    /// Push a binder type onto the local context (entering a binder).
+    fn push_local(&mut self, ty: ExprPtr<'t>) {
+        self.local_ctx.push(ty);
+    }
+
+    /// Pop a binder type from the local context (exiting a binder).
+    fn pop_local(&mut self) {
+        self.local_ctx.pop().expect("pop_local: empty context");
     }
 
     /// Conduct the preliminary checks done on all declarations; a declaration
@@ -166,7 +192,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
     pub(crate) fn check_declar_info(&mut self, d: &Declar<'t>) -> Result<(), Box<dyn Error>> {
         let info = d.info();
         assert!(self.ctx.no_dupes_all_params(info.uparams));
-        assert!(!self.ctx.has_fvars(info.ty));
+        assert!(self.ctx.num_loose_bvars(info.ty) == 0);
         let inferred_type = self.infer(info.ty, Check);
         let sort = self.ensure_sort(inferred_type);
 
@@ -366,7 +392,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         if !self.ctx.export_file.config.nat_extension {
             return None
         }
-        if self.ctx.has_fvars(e) {
+        if self.ctx.num_loose_bvars(e) > 0 {
             return None
         }
         let (f, args) = self.ctx.unfold_apps(e);
@@ -484,17 +510,23 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
     }
 
     pub(crate) fn infer(&mut self, e: ExprPtr<'t>, flag: InferFlag) -> ExprPtr<'t> {
-        if let Some(cached) = self.tc_cache.infer_cache_check.get(&e).copied() {
-            return cached
-        }
-        if flag == InferFlag::InferOnly {
-            if let Some(cached) = self.tc_cache.infer_cache_no_check.get(&e).copied() {
+        // Only use cache for closed expressions (no loose bvars), since
+        // the result of inferring an expression with free Vars depends on
+        // the local context depth.
+        let cacheable = self.ctx.num_loose_bvars(e) == 0;
+        if cacheable {
+            if let Some(cached) = self.tc_cache.infer_cache_check.get(&e).copied() {
                 return cached
+            }
+            if flag == InferFlag::InferOnly {
+                if let Some(cached) = self.tc_cache.infer_cache_no_check.get(&e).copied() {
+                    return cached
+                }
             }
         }
         let r = match self.ctx.read_expr(e) {
             Local { binder_type, .. } => binder_type,
-            Var { .. } => panic!("no loose bvars allowed in infer"),
+            Var { dbj_idx, .. } => self.lookup_var(dbj_idx),
             Sort { level, .. } => self.infer_sort(level, flag),
             App { .. } => self.infer_app(e, flag),
             Pi { .. } => self.infer_pi(e, flag),
@@ -511,12 +543,14 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                 self.ctx.string_type().unwrap()
             }
         };
-        match flag {
-            InferFlag::InferOnly => {
-                self.tc_cache.infer_cache_no_check.insert(e, r);
-            }
-            InferFlag::Check => {
-                self.tc_cache.infer_cache_check.insert(e, r);
+        if cacheable {
+            match flag {
+                InferFlag::InferOnly => {
+                    self.tc_cache.infer_cache_no_check.insert(e, r);
+                }
+                InferFlag::Check => {
+                    self.tc_cache.infer_cache_check.insert(e, r);
+                }
             }
         }
         r
@@ -540,14 +574,14 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                     let arg = args.pop().unwrap();
                     if flag == Check {
                         let arg_type = self.infer(arg, flag);
-                        let binder_type = self.ctx.inst(binder_type, ctx.as_slice());
+                        let binder_type_instd = self.ctx.inst(binder_type, ctx.as_slice());
                         let outer_scope_eager_setting = self.ctx.eager_mode;
                         if self.ctx.is_eager_reduce_app(arg) {
                             self.ctx.eager_mode = true;
                         }
-                        // `arg_type` and `binder_type` get swapped here to accommodate the 
+                        // `arg_type` and `binder_type` get swapped here to accommodate the
                         // eager reduction branch in `def_eq` being focused on reducing the lhs.
-                        self.assert_def_eq(binder_type, arg_type);
+                        self.assert_def_eq(binder_type_instd, arg_type);
                         // replace the outer scope's setting before next iteration
                         self.ctx.eager_mode = outer_scope_eager_setting;
                     }
@@ -596,53 +630,46 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
     //}
 
     fn infer_lambda(&mut self, mut e: ExprPtr<'t>, flag: InferFlag) -> ExprPtr<'t> {
-        let mut locals = Vec::new();
-        let start_pos = self.ctx.dbj_level_counter;
+        // Collect binder info while descending into nested lambdas
+        let mut binders: Vec<(NamePtr<'t>, crate::expr::BinderStyle, ExprPtr<'t>)> = Vec::new();
         while let Lambda { binder_name, binder_style, binder_type, body, .. } = self.ctx.read_expr(e) {
-            let binder_type = self.ctx.inst(binder_type, locals.as_slice());
             if let Check = flag {
                 self.infer_sort_of(binder_type, flag);
             }
-
-            let local = self.ctx.mk_dbj_level(binder_name, binder_style, binder_type);
-            locals.push(local);
+            self.push_local(binder_type);
+            binders.push((binder_name, binder_style, binder_type));
             e = body;
         }
 
-        let instd = self.ctx.inst(e, locals.as_slice());
-        let infd = self.infer(instd, flag);
-        let mut abstrd = self.ctx.abstr_levels(infd, start_pos);
-        while let Some(local) = locals.pop() {
-            match self.ctx.read_expr(local) {
-                Local { binder_name, binder_style, binder_type, .. } => {
-                    self.ctx.replace_dbj_level(local);
-                    let t = self.ctx.abstr_levels(binder_type, start_pos);
-                    abstrd = self.ctx.mk_pi(binder_name, binder_style, t, abstrd);
-                }
-                _ => panic!(),
-            }
+        // Infer the type of the body (which has Var(0)..Var(n-1) for bound vars)
+        let mut result_ty = self.infer(e, flag);
+
+        // Build the Pi type by popping binders in reverse
+        for (binder_name, binder_style, binder_type) in binders.into_iter().rev() {
+            self.pop_local();
+            // result_ty has Var(0) referring to this binder; wrap in Pi
+            result_ty = self.ctx.mk_pi(binder_name, binder_style, binder_type, result_ty);
         }
-        abstrd
+        result_ty
     }
 
     fn infer_pi(&mut self, mut e: ExprPtr<'t>, flag: InferFlag) -> ExprPtr<'t> {
         let mut universes = Vec::new();
-        let mut locals = Vec::new();
-        let c0 = self.ctx.dbj_level_counter;
-        while let Pi { binder_name, binder_style, binder_type, body, .. } = self.ctx.read_expr(e) {
-            let binder_type = self.ctx.inst(binder_type, locals.as_slice());
+        let depth0 = self.local_ctx.len();
+        while let Pi { binder_type, body, .. } = self.ctx.read_expr(e) {
             let dom_univ = self.infer_sort_of(binder_type, flag);
             universes.push(dom_univ);
-            locals.push(self.ctx.mk_dbj_level(binder_name, binder_style, binder_type));
+            self.push_local(binder_type);
             e = body;
         }
-        let instd = self.ctx.inst(e, locals.as_slice());
-        let mut infd = self.infer_sort_of(instd, flag);
-        while let (Some(universe), Some(local)) = (universes.pop(), locals.pop()) {
+        // e is now the body of the innermost Pi; infer its sort
+        let mut infd = self.infer_sort_of(e, flag);
+        // Pop binders in reverse, combining universe levels
+        while let Some(universe) = universes.pop() {
             infd = self.ctx.imax(universe, infd);
-            self.ctx.replace_dbj_level(local);
+            self.pop_local();
         }
-        assert_eq!(c0, self.ctx.dbj_level_counter);
+        assert_eq!(depth0, self.local_ctx.len());
         self.ctx.mk_sort(infd)
     }
 
@@ -660,7 +687,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             // assert that the type annotation of the let value is appropriate.
             self.assert_def_eq(val_ty, binder_type);
         }
-        let body = self.ctx.inst(body, &[val]);
+        let body = self.ctx.inst_beta(body, &[val]);
         self.infer(body, flag)
     }
     
@@ -688,34 +715,18 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                 self.ctx.mk_app(f, arg)
             }
             Expr::Lambda {binder_name, binder_style, binder_type, body, ..} => {
-                let start_pos = self.ctx.dbj_level_counter;
-                let local = self.ctx.mk_dbj_level(binder_name, binder_style, binder_type);
-                let instd = self.ctx.inst(body, &[local]);
-                let body = self.strong_reduce(instd, reduce_types, reduce_proofs);
-                let abstrd = self.ctx.abstr_levels(body, start_pos);
-                match self.ctx.read_expr(local) {
-                    Local {binder_name, binder_style, binder_type, ..} => {
-                        self.ctx.replace_dbj_level(local);
-                        let t = self.ctx.abstr_levels(binder_type, start_pos);
-                        self.ctx.mk_lambda(binder_name, binder_style, t, abstrd)
-                    },
-                    _ => panic!()
-                }
+                let binder_type_r = self.strong_reduce(binder_type, reduce_types, reduce_proofs);
+                self.push_local(binder_type_r);
+                let body_r = self.strong_reduce(body, reduce_types, reduce_proofs);
+                self.pop_local();
+                self.ctx.mk_lambda(binder_name, binder_style, binder_type_r, body_r)
             }
             Expr::Pi {binder_name, binder_style, binder_type, body, ..} => {
-                let start_pos = self.ctx.dbj_level_counter;
-                let local = self.ctx.mk_dbj_level(binder_name, binder_style, binder_type);
-                let instd = self.ctx.inst(body, &[local]);
-                let body = self.strong_reduce(instd, reduce_types, reduce_proofs);
-                let abstrd = self.ctx.abstr_levels(body, start_pos);
-                match self.ctx.read_expr(local) {
-                    Local {binder_name, binder_style, binder_type, ..} => {
-                        self.ctx.replace_dbj_level(local);
-                        let t = self.ctx.abstr_levels(binder_type, start_pos);
-                        self.ctx.mk_pi(binder_name, binder_style, t, abstrd)
-                    },
-                    _ => panic!()
-                }
+                let binder_type_r = self.strong_reduce(binder_type, reduce_types, reduce_proofs);
+                self.push_local(binder_type_r);
+                let body_r = self.strong_reduce(body, reduce_types, reduce_proofs);
+                self.pop_local();
+                self.ctx.mk_pi(binder_name, binder_style, binder_type_r, body_r)
             }
             Expr::Proj {ty_name, idx, structure, ..} => {
                 let structure = self.strong_reduce(structure, reduce_types, reduce_proofs);
@@ -784,7 +795,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                     n_args += 1;
                     e = body;
                 }
-                e = self.ctx.inst(e, &args[..n_args]);
+                e = self.ctx.inst_beta(e, &args[..n_args]);
                 e = self.ctx.foldl_apps(e, args.into_iter().skip(n_args));
                 (true, self.whnf_no_unfolding_aux(e, cheap_proj))
             }
@@ -793,7 +804,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                 (false, self.ctx.foldl_apps(e_fun, args.into_iter()))
             }
             Let { val, body, .. } => {
-                let e = self.ctx.inst(body, &[val]);
+                let e = self.ctx.inst_beta(body, &[val]);
                 let e = self.ctx.foldl_apps(e, args.into_iter());
                 (true, self.whnf_no_unfolding_aux(e, cheap_proj))
             }
@@ -805,7 +816,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                 } else {
                     (false, self.ctx.foldl_apps(e_fun, args.into_iter()))
                 },
-            Var { .. } => panic!("Loose bvars are not allowed"),
+            Var { .. } => (false, self.ctx.foldl_apps(e_fun, args.into_iter())),
             Pi { .. } => {
                 debug_assert!(args.is_empty());
                 (false, e_fun)
@@ -842,34 +853,30 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         }
     }
 
-    #[allow(unused_parens)]
     fn def_eq_binder_aux(&mut self, mut x: ExprPtr<'t>, mut y: ExprPtr<'t>) -> Option<bool> {
-        let mut locals = Vec::new();
+        let depth0 = self.local_ctx.len();
         while let (
-            Pi { binder_name, binder_style, binder_type: t1, body: body1, .. },
+            Pi { binder_type: t1, body: body1, .. },
             Pi { binder_type: t2, body: body2, .. },
         )
         | (
-            Lambda { binder_name, binder_style, binder_type: t1, body: body1, .. },
+            Lambda { binder_type: t1, body: body1, .. },
             Lambda { binder_type: t2, body: body2, .. },
         ) = self.ctx.read_expr_pair(x, y)
         {
-            let t1 = self.ctx.inst(t1, locals.as_slice());
-            let t2 = self.ctx.inst(t2, locals.as_slice());
             if self.def_eq(t1, t2) {
-                locals.push(self.ctx.mk_dbj_level(binder_name, binder_style, t1));
+                self.push_local(t1);
                 x = body1;
                 y = body2;
             } else {
-                self.ctx.dbj_level_counter -= (locals.len() as u16);
+                // Restore context depth on failure
+                self.local_ctx.truncate(depth0);
                 return Some(false)
             }
         }
 
-        let x = self.ctx.inst(x, locals.as_slice());
-        let y = self.ctx.inst(y, locals.as_slice());
         let r = self.def_eq(x, y);
-        self.ctx.dbj_level_counter -= (locals.len() as u16);
+        self.local_ctx.truncate(depth0);
         Some(r)
     }
 
@@ -883,6 +890,9 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
 
     fn def_eq_local(&mut self, x: ExprPtr<'t>, y: ExprPtr<'t>) -> bool {
         match self.ctx.read_expr_pair(x, y) {
+            // Pure de Bruijn: two Vars are equal iff same index
+            (Var { dbj_idx: x_idx, .. }, Var { dbj_idx: y_idx, .. }) =>
+                x_idx == y_idx,
             (Local { id: x_id, binder_type: tx, .. }, Local { id: y_id, binder_type: ty, .. }) =>
                 x_id == y_id && self.def_eq(tx, ty),
             _ => false,
@@ -933,7 +943,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         let x_n = self.whnf_no_unfolding_cheap_proj(x);
         let y_n = self.whnf_no_unfolding_cheap_proj(y);
 
-        if ((!self.ctx.has_fvars(x_n)) || self.ctx.eager_mode) && Some(y_n) == self.ctx.c_bool_true() {
+        if (self.ctx.num_loose_bvars(x_n) == 0 || self.ctx.eager_mode) && Some(y_n) == self.ctx.c_bool_true() {
             let x_nn = self.whnf(x_n);
             if Some(x_nn) == self.ctx.c_bool_true() {
                 return true
@@ -1225,7 +1235,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         if let Some(short) = self.def_eq_nat(x, y) {
             return Some(DeltaResult::FoundEqResult(short))
         }
-        if (!self.ctx.has_fvars(x) && !self.ctx.has_fvars(y)) || self.ctx.eager_mode {
+        if (self.ctx.num_loose_bvars(x) == 0 && self.ctx.num_loose_bvars(y) == 0) || self.ctx.eager_mode {
             if let Some(xprime) = self.try_reduce_nat(x) {
                 return Some(DeltaResult::FoundEqResult(self.def_eq(xprime, y)))
             } else if let Some(yprime) = self.try_reduce_nat(y) {
