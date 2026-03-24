@@ -282,7 +282,7 @@ enum ExportJsonVal<'a> {
     ExprProj {
         #[serde(rename = "typeName")]
         type_name: u32,
-        idx: usize,
+        idx: u32,
         #[serde(rename = "struct")]
         structure: u32,
     },

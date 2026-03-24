@@ -37,7 +37,7 @@ pub enum Expr<'a> {
         /// The 0-based position of the constructor argument, not considering the
         /// parameters. For some struct Foo A B, and a constructor Foo.mk A B p q r s,
         /// `q` will have idx 1.
-        idx: usize,
+        idx: u32,
         structure: ExprPtr<'a>,
         num_loose_bvars: u16,
         has_fvars: bool,

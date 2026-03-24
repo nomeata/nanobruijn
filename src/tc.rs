@@ -256,7 +256,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         // for (a : A) and (b : B),
         // `Proj {idx := 0, struct := e}`
         // `Point.mk A B (Point.0 e) (Point.1 e)`
-        for i in 0..((*num_fields) as usize) {
+        for i in 0..((*num_fields) as u32) {
             let proj = self.ctx.mk_proj(c_name, i, e);
             out = self.ctx.mk_app(out, proj);
         }
@@ -309,7 +309,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             let (x_type, y_type) = (self.infer(x, InferOnly), self.infer(y, InferOnly));
             if self.def_eq(x_type, y_type) {
                 for i in (*num_params as usize)..args.len() {
-                    let proj = self.ctx.mk_proj(*inductive_name, i - *num_params as usize, x);
+                    let proj = self.ctx.mk_proj(*inductive_name, (i - *num_params as usize) as u32, x);
                     let rhs = args[i];
                     if !self.def_eq(proj, rhs) {
                         return None
@@ -440,7 +440,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         out
     }
 
-    fn reduce_proj(&mut self, idx: usize, structure: ExprPtr<'t>, cheap: bool) -> Option<ExprPtr<'t>> {
+    fn reduce_proj(&mut self, idx: u32, structure: ExprPtr<'t>, cheap: bool) -> Option<ExprPtr<'t>> {
         let mut structure = if cheap { self.whnf_no_unfolding_cheap_proj(structure) } else { self.whnf(structure) };
         if let StringLit { ptr, .. } = self.ctx.read_expr(structure) {
             if let Some(s) = self.str_lit_to_ctor_reducing(ptr) {
@@ -449,7 +449,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         }
         let (_, name, _, args) = self.ctx.unfold_const_apps(structure)?;
         let ConstructorData { num_params, .. } = self.env.get_constructor(&name)?;
-        let i = (*num_params as usize) + idx;
+        let i = (*num_params as usize) + idx as usize;
         Some(args.get(i).copied().unwrap())
     }
 
@@ -459,7 +459,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
     }
 
     #[allow(non_snake_case)]
-    fn infer_proj(&mut self, _ty_name: NamePtr<'t>, idx: usize, structure: ExprPtr<'t>) -> ExprPtr<'t> {
+    fn infer_proj(&mut self, _ty_name: NamePtr<'t>, idx: u32, structure: ExprPtr<'t>) -> ExprPtr<'t> {
         let (structure_ty_is_prop, structure_ty) = {
             let (is_proof, t) = self.is_proof(structure);
             (is_proof, self.whnf(t))
