@@ -612,6 +612,13 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
     /// in `inner` are shifted up by `amount`. O(1) — no traversal.
     /// Collapses nested shifts and elides shifts on closed expressions.
     pub fn mk_shift(&mut self, inner: ExprPtr<'t>, amount: u16) -> ExprPtr<'t> {
+        // TODO: For now, always force shifts eagerly. Re-enable lazy shifts
+        // when we have shift-invariant caching.
+        self.force_shift_aux(inner, amount, 0)
+    }
+
+    #[allow(dead_code)]
+    pub fn mk_shift_lazy(&mut self, inner: ExprPtr<'t>, amount: u16) -> ExprPtr<'t> {
         if amount == 0 {
             return inner;
         }
@@ -622,7 +629,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         }
         // Collapse nested shifts: Shift(Shift(e, j), k) → Shift(e, j+k)
         if let Expr::Shift { inner: inner2, amount: prev, .. } = inner_expr {
-            return self.mk_shift(inner2, prev + amount);
+            return self.mk_shift_lazy(inner2, prev + amount);
         }
         let has_fvars = inner_expr.has_fvars();
         let hash = hash64!(crate::expr::SHIFT_HASH, inner, amount);
