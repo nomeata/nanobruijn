@@ -160,7 +160,6 @@ impl<'p> ExportFile<'p> {
 
 impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
     pub fn new(dag: &'x mut TcCtx<'t, 'p>, env: &'x Env<'x, 't>, declar_info: Option<DeclarInfo<'t>>) -> Self {
-        assert_eq!(dag.dbj_level_counter, 0);
         Self { ctx: dag, env, tc_cache: TcCache::new(), declar_info, local_ctx: Vec::new() }
     }
 

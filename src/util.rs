@@ -182,8 +182,6 @@ pub struct ExprCache<'t> {
     /// This cache is reset before every new call to `inst`, so there's no need to
     /// cache the sequence of free variables.
     pub(crate) abstr_cache: FxHashMap<(ExprPtr<'t>, u16), ExprPtr<'t>>,
-    /// A cache for (expr, starting deBruijn level, current deBruijn level)
-    pub(crate) abstr_cache_levels: FxHashMap<(ExprPtr<'t>, u16, u16), ExprPtr<'t>>,
     /// Caches (e, amount, cutoff) |-> output for shifting. Reset before each shift_expr call.
     pub(crate) shift_cache: FxHashMap<(ExprPtr<'t>, u16, u16), ExprPtr<'t>>,
 }
@@ -195,7 +193,6 @@ impl<'t> ExprCache<'t> {
             abstr_cache: new_fx_hash_map(),
             subst_cache: new_fx_hash_map(),
             dsubst_cache: new_fx_hash_map(),
-            abstr_cache_levels: new_fx_hash_map(),
             shift_cache: new_fx_hash_map(),
         }
     }
@@ -263,10 +260,6 @@ pub struct TcCtx<'t, 'p> {
     /// type checking a declaration. These are dropped once the declaration is verified, since
     /// they are no longer needed.
     pub(crate) dag: &'t mut LeanDag<'t>,
-    /// Non-monotonic counter showing the current deBruijn level (which is also the number
-    /// of binders that are open above us). When a binder is opened and traversed under, this
-    /// counter is incremented. When the binder is closed again, this counter is decremented.
-    pub(crate) dbj_level_counter: u16,
     /// Monotonically increasing counter for unique free variables. Any two free variables created
     /// with the `mk_unique` constructor are unique within their `(ExportFile, TcCtx)` pair.
     pub(crate) unique_counter: u32,
@@ -277,10 +270,9 @@ pub struct TcCtx<'t, 'p> {
 
 impl<'t, 'p: 't> TcCtx<'t, 'p> {
     pub fn new(export_file: &'t ExportFile<'p>, tdag: &'t mut LeanDag<'t>) -> Self {
-        Self { 
+        Self {
             export_file,
             dag: tdag,
-            dbj_level_counter: 0u16,
             unique_counter: 0u32,
             expr_cache: ExprCache::new(),
             eager_mode: false
@@ -601,36 +593,6 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         self.mk_nat_lit(num_ptr)
     }
 
-    /// Construct a free variable expression representing a deBruijn level, and
-    /// increment the context's counter.
-    pub fn mk_dbj_level(
-        &mut self,
-        binder_name: NamePtr<'t>,
-        binder_style: BinderStyle,
-        binder_type: ExprPtr<'t>,
-    ) -> ExprPtr<'t> {
-        let level = self.dbj_level_counter;
-        self.dbj_level_counter += 1;
-        let id = FVarId::DbjLevel(level);
-        let hash = hash64!(crate::expr::LOCAL_HASH, binder_name, binder_style, binder_type, id);
-        self.alloc_expr(Expr::Local { binder_name, binder_style, binder_type, id, hash })
-    }
-
-    /// Construct a free variable expression representing a deBruijn level, reusing
-    /// a particular level counter, and without incrementing the context's counter for
-    /// open binders.
-    pub fn remake_dbj_level(
-        &mut self,
-        binder_name: NamePtr<'t>,
-        binder_style: BinderStyle,
-        binder_type: ExprPtr<'t>,
-        level: u16,
-    ) -> ExprPtr<'t> {
-        let id = FVarId::DbjLevel(level);
-        let hash = hash64!(crate::expr::LOCAL_HASH, binder_name, binder_style, binder_type, id);
-        self.alloc_expr(Expr::Local { binder_name, binder_style, binder_type, id, hash })
-    }
-
     /// Construct a free variable with a unique ID, incrementing the monotonic counter
     /// for unique free variable identifiers.
     pub fn mk_unique(
@@ -646,25 +608,6 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         self.alloc_expr(Expr::Local { binder_name, binder_style, binder_type, id, hash })
     }
 
-    /// "replace" a free variable when closing a binder, decrementing the deBruijn level
-    /// counter, so that level can be reused as appropriate.
-    pub(crate) fn replace_dbj_level(&mut self, e: ExprPtr<'t>) {
-        match self.read_expr(e) {
-            Expr::Local { id: FVarId::DbjLevel(level), .. } => {
-                debug_assert_eq!(level + 1, self.dbj_level_counter);
-                self.dbj_level_counter -= 1;
-            }
-            _ => panic!("replace_dbj_level didn't get a Local, got {:?}", self.debug_print(e)),
-        }
-    }
-
-    /// Convert the deBruijn level of a free variable to a deBruijn index for a bound
-    /// variable. This is the same thing as asking "if this element is the `nth` element
-    /// when counting from the front of a sequence of length `m`, what is its position
-    /// when counting from the back?"
-    pub(crate) fn fvar_to_bvar(&mut self, num_open_binders: u16, dbj_level: u16) -> ExprPtr<'t> {
-        self.mk_var((num_open_binders - dbj_level) - 1)
-    }
 }
 
 #[derive(Debug)]
