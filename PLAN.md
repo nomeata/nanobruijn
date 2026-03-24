@@ -131,12 +131,14 @@ where B references both x and external variables).
 
 ### Phase 5: Benchmark ✅ (partial)
 - [done] Validated against arena test cases (88 good + 45 bad)
-- [done] Init export (54,475 decls, 310MB ndjson): **27s** single-threaded (release)
-  - Baseline (original nanoda, locally-nameless): **21s** (1.29x slower)
-  - Before scope-local cache: 39s → 27s (31% speedup from open-expr caching)
-- [done] init-prelude (2,051 decls): 0.08s, grind-ring-5 (2,439 decls): 2.97s (release)
+- [done] Init export (54,475 decls, 310MB ndjson): **26s** total (2s parse + 24.5s check)
+  - Baseline (original nanoda, locally-nameless): **21s** (2s parse + 18s check)
+  - Checking overhead: 36% slower than locally-nameless baseline
+  - Key optimization: scope-local infer cache for open exprs (39s → 26s)
+  - Lazy Shift nodes slightly slower than eager shifts (no shift-invariant cache yet)
+- [done] grind-ring-5 (2,439 decls): 0.93s (was 2.97s before scope-local cache)
 - [todo] Benchmark on mathlib export (requires building mathlib with lean4export)
-- [todo] Profile remaining 29% gap vs baseline
+- [todo] Profile remaining 36% checking overhead vs baseline
 
 ## Open Questions
 
