@@ -850,6 +850,12 @@ pub(crate) struct TcCache<'t> {
     pub(crate) failure_cache: FxHashSet<(ExprPtr<'t>, ExprPtr<'t>)>,
     /// Strong reduction is not used during type-checking, this is more of a library/inspection feature.
     pub(crate) strong_cache: UniqueHashMap<(ExprPtr<'t>, bool, bool), ExprPtr<'t>>,
+    /// Scope-local infer cache for open expressions (with loose bvars).
+    /// Keyed by ExprPtr, valid only at the depth where they were stored.
+    /// Cleared on push_local/pop_local.
+    pub(crate) infer_open_cache: UniqueHashMap<ExprPtr<'t>, ExprPtr<'t>>,
+    /// The local_ctx depth at which `infer_open_cache` entries are valid.
+    pub(crate) infer_open_depth: u16,
 }
 
 impl<'t> TcCache<'t> {
@@ -862,6 +868,8 @@ impl<'t> TcCache<'t> {
             eq_cache: UnionFind::new(),
             failure_cache: new_fx_hash_set(),
             strong_cache: new_unique_hash_map(),
+            infer_open_cache: new_unique_hash_map(),
+            infer_open_depth: 0,
         }
     }
 

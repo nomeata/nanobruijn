@@ -177,11 +177,24 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
     /// Push a binder type onto the local context (entering a binder).
     fn push_local(&mut self, ty: ExprPtr<'t>) {
         self.local_ctx.push(ty);
+        self.tc_cache.infer_open_cache.clear();
+        self.tc_cache.infer_open_depth = self.local_ctx.len() as u16;
     }
 
     /// Pop a binder type from the local context (exiting a binder).
     fn pop_local(&mut self) {
         self.local_ctx.pop().expect("pop_local: empty context");
+        self.tc_cache.infer_open_cache.clear();
+        self.tc_cache.infer_open_depth = self.local_ctx.len() as u16;
+    }
+
+    /// Restore local context to a previous depth, clearing open caches.
+    fn restore_depth(&mut self, depth: usize) {
+        if self.local_ctx.len() != depth {
+            self.local_ctx.truncate(depth);
+            self.tc_cache.infer_open_cache.clear();
+            self.tc_cache.infer_open_depth = depth as u16;
+        }
     }
 
     /// Conduct the preliminary checks done on all declarations; a declaration
@@ -509,18 +522,28 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
     }
 
     pub(crate) fn infer(&mut self, e: ExprPtr<'t>, flag: InferFlag) -> ExprPtr<'t> {
+
         // Only use cache for closed expressions (no loose bvars), since
         // the result of inferring an expression with free Vars depends on
         // the local context depth.
         let cacheable = self.ctx.num_loose_bvars(e) == 0;
         if cacheable {
             if let Some(cached) = self.tc_cache.infer_cache_check.get(&e).copied() {
+
                 return cached
             }
             if flag == InferFlag::InferOnly {
                 if let Some(cached) = self.tc_cache.infer_cache_no_check.get(&e).copied() {
+    
                     return cached
                 }
+            }
+        } else {
+
+            // Scope-local cache for open expressions, valid at current depth
+            if let Some(cached) = self.tc_cache.infer_open_cache.get(&e).copied() {
+
+                return cached
             }
         }
         let r = match self.ctx.read_expr(e) {
@@ -555,6 +578,8 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                     self.tc_cache.infer_cache_check.insert(e, r);
                 }
             }
+        } else {
+            self.tc_cache.infer_open_cache.insert(e, r);
         }
         r
     }
@@ -749,6 +774,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
     }
 
     pub fn whnf(&mut self, e: ExprPtr<'t>) -> ExprPtr<'t> {
+
         if matches!(self.ctx.read_expr(e), NatLit { .. } | StringLit { .. }) {
             return e
         }
@@ -758,6 +784,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             return self.ctx.force_shift_aux(r, amount, 0)
         }
         if let Some(cached) = self.tc_cache.whnf_cache.get(&e).copied() {
+
             return cached
         }
         let mut cursor = e;
@@ -882,14 +909,13 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                 x = body1;
                 y = body2;
             } else {
-                // Restore context depth on failure
-                self.local_ctx.truncate(depth0);
+                self.restore_depth(depth0);
                 return Some(false)
             }
         }
 
         let r = self.def_eq(x, y);
-        self.local_ctx.truncate(depth0);
+        self.restore_depth(depth0);
         Some(r)
     }
 
@@ -949,6 +975,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
     pub fn assert_def_eq(&mut self, u: ExprPtr<'t>, v: ExprPtr<'t>) { assert!(self.def_eq(u, v)) }
 
     pub fn def_eq(&mut self, x: ExprPtr<'t>, y: ExprPtr<'t>) -> bool {
+
         if let Some(easy) = self.def_eq_quick_check(x, y) {
             return easy
         }
@@ -1166,6 +1193,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
 
     fn def_eq_quick_check(&mut self, x: ExprPtr<'t>, y: ExprPtr<'t>) -> Option<bool> {
         if x == y {
+
             return Some(true)
         }
         // Strip matching Shift wrappers: Shift(a, k) == Shift(b, k) iff a == b
@@ -1177,6 +1205,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             }
         }
         if self.tc_cache.eq_cache.check_uf_eq(x, y) {
+
             return Some(true)
         }
         if let Some(r) = self.def_eq_sort(x, y) {
