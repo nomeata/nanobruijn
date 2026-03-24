@@ -88,10 +88,25 @@ Each expression node stores (computed at construction, O(1)):
 - **Passes all 88 arena good tests, rejects all 40 bad tests**
 - **Performance: init-prelude (2051 decls) 0.08s, grind-ring-5 (2439 decls) 2.97s (release)**
 
-### Phase 2–4: Shift-Homomorphic Caching (BLOCKED — design issue)
+### Phase 2: Shift Nodes ✅
+- [done] `Shift { inner, amount }` variant in Expr for delayed shifting
+- [done] `mk_shift` creates O(1) wrappers (collapses nested, elides on closed)
+- [done] `force_shift` / `force_shift_aux` for full traversal when needed
+- [done] `shift_expr` with cutoff=0 creates lazy Shift (cutoff>0 traverses)
+- [done] All pattern-matching sites handle Shift: whnf, infer, def_eq, inductive, etc.
+- [done] `inst_aux` uses `force_shift_aux` (not `mk_shift`) for substitution values
+  under binders — prevents Shift nodes inside Pi/Lambda bodies where pattern-matching
+  code expects bare constructors
+- [done] `def_eq_quick_check` strips matching Shift wrappers
+- **Passes all 88 arena good tests + 5 bad tests**
+
+**Key design constraint**: Lazy Shift nodes should only wrap top-level expressions
+(e.g. `lookup_var` results), not appear inside expression trees. Code that pattern-matches
+on Pi/Lambda/etc. breaks if those are wrapped in Shift.
+
+### Phase 3–4: Shift-Homomorphic Caching (BLOCKED — design issue)
 
 The original plan called for:
-- Shift nodes: `Shift(e, k)` for O(1) delayed shifting
 - Depth-normalizing hash: `(canonical_hash, lower_bound)` pairs with shift-invariant deltas
 - Depth-invariant caches: keyed by canonical hash
 
@@ -115,9 +130,12 @@ where B references both x and external variables).
    of modifying the expression DAG. Major API refactor.
 
 ### Phase 5: Benchmark ✅ (partial)
-- [done] Validated against arena test cases (88 good + 40 bad)
-- [todo] Benchmark on mathlib export against unmodified nanoda
+- [done] Validated against arena test cases (88 good + 45 bad)
+- [done] Init export (54,475 decls, 310MB ndjson): **37s** single-threaded (release)
+- [done] init-prelude (2,051 decls): 0.08s, grind-ring-5 (2,439 decls): 2.97s (release)
+- [todo] Benchmark on mathlib export (requires building mathlib with lean4export)
 - [todo] Profile to find remaining bottlenecks
+- [todo] Compare against unmodified nanoda baseline
 
 ## Open Questions
 
