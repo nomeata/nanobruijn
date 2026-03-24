@@ -170,6 +170,7 @@ impl<'x, 't, 'p> std::fmt::Debug for DebugPrinter<'x, 't, 'p, ExprPtr<'t>> {
             }
             NatLit { ptr, .. } => write!(f, "NLit({})", self.ctx.read_bignum(ptr).unwrap()),
             StringLit { ptr, .. } => write!(f, "SLit({})", self.ctx.read_string(ptr)),
+            Shift { inner, amount, .. } => write!(f, "Shift({:?}, {})", self.ctx.debug_print(inner), amount),
         }
     }
 }

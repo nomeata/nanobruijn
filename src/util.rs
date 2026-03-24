@@ -608,6 +608,88 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         self.alloc_expr(Expr::Local { binder_name, binder_style, binder_type, id, hash })
     }
 
+    /// Create a delayed shift node: Shift(inner, amount) means all free Var indices
+    /// in `inner` are shifted up by `amount`. O(1) — no traversal.
+    /// Collapses nested shifts and elides shifts on closed expressions.
+    pub fn mk_shift(&mut self, inner: ExprPtr<'t>, amount: u16) -> ExprPtr<'t> {
+        if amount == 0 {
+            return inner;
+        }
+        let inner_expr = self.read_expr(inner);
+        let nlbv = inner_expr.num_loose_bvars();
+        if nlbv == 0 {
+            return inner;
+        }
+        // Collapse nested shifts: Shift(Shift(e, j), k) → Shift(e, j+k)
+        if let Expr::Shift { inner: inner2, amount: prev, .. } = inner_expr {
+            return self.mk_shift(inner2, prev + amount);
+        }
+        let has_fvars = inner_expr.has_fvars();
+        let hash = hash64!(crate::expr::SHIFT_HASH, inner, amount);
+        self.alloc_expr(Expr::Shift { hash, inner, amount, num_loose_bvars: nlbv + amount, has_fvars })
+    }
+
+    /// Force a Shift node: eagerly apply the shift via full traversal.
+    /// If `e` is not a Shift node, returns it unchanged.
+    pub fn force_shift(&mut self, e: ExprPtr<'t>) -> ExprPtr<'t> {
+        match self.read_expr(e) {
+            Expr::Shift { inner, amount, .. } => {
+                self.force_shift_aux(inner, amount, 0)
+            }
+            _ => e
+        }
+    }
+
+    /// Full shift traversal that never creates Shift nodes.
+    pub(crate) fn force_shift_aux(&mut self, e: ExprPtr<'t>, amount: u16, cutoff: u16) -> ExprPtr<'t> {
+        if amount == 0 || self.num_loose_bvars(e) <= cutoff {
+            return e
+        }
+        if let Some(cached) = self.expr_cache.shift_cache.get(&(e, amount, cutoff)) {
+            return *cached
+        }
+        let calcd = match self.read_expr(e) {
+            Expr::Sort { .. } | Expr::Const { .. } | Expr::Local { .. } | Expr::StringLit { .. } | Expr::NatLit { .. } => panic!(),
+            Expr::Shift { inner, amount: prev, .. } => {
+                let forced = self.force_shift_aux(inner, prev, 0);
+                self.force_shift_aux(forced, amount, cutoff)
+            }
+            Expr::Var { dbj_idx, .. } => {
+                if dbj_idx >= cutoff {
+                    self.mk_var(dbj_idx + amount)
+                } else {
+                    e
+                }
+            }
+            Expr::App { fun, arg, .. } => {
+                let fun = self.force_shift_aux(fun, amount, cutoff);
+                let arg = self.force_shift_aux(arg, amount, cutoff);
+                self.mk_app(fun, arg)
+            }
+            Expr::Pi { binder_name, binder_style, binder_type, body, .. } => {
+                let binder_type = self.force_shift_aux(binder_type, amount, cutoff);
+                let body = self.force_shift_aux(body, amount, cutoff + 1);
+                self.mk_pi(binder_name, binder_style, binder_type, body)
+            }
+            Expr::Lambda { binder_name, binder_style, binder_type, body, .. } => {
+                let binder_type = self.force_shift_aux(binder_type, amount, cutoff);
+                let body = self.force_shift_aux(body, amount, cutoff + 1);
+                self.mk_lambda(binder_name, binder_style, binder_type, body)
+            }
+            Expr::Let { binder_name, binder_type, val, body, nondep, .. } => {
+                let binder_type = self.force_shift_aux(binder_type, amount, cutoff);
+                let val = self.force_shift_aux(val, amount, cutoff);
+                let body = self.force_shift_aux(body, amount, cutoff + 1);
+                self.mk_let(binder_name, binder_type, val, body, nondep)
+            }
+            Expr::Proj { ty_name, idx, structure, .. } => {
+                let structure = self.force_shift_aux(structure, amount, cutoff);
+                self.mk_proj(ty_name, idx, structure)
+            }
+        };
+        self.expr_cache.shift_cache.insert((e, amount, cutoff), calcd);
+        calcd
+    }
 }
 
 #[derive(Debug)]

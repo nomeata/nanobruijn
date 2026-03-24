@@ -643,6 +643,10 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                     let structure = self.replace_all_nested(structure, st, outgoing_params);
                     self.ctx.mk_proj(ty_name, idx, structure)
                 }
+                Shift { .. } => {
+                    let forced = self.ctx.force_shift(e);
+                    self.replace_all_nested(forced, st, outgoing_params)
+                }
             }
         }
     }
@@ -1443,6 +1447,10 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                     let arg =
                         self.restore_replace(arg, local_params, st, specialized_rec_names_to_unspecialized_rec_names);
                     self.ctx.mk_app(fun, arg)
+                }
+                Shift { .. } => {
+                    let forced = self.ctx.force_shift(e);
+                    self.restore_replace(forced, local_params, st, specialized_rec_names_to_unspecialized_rec_names)
                 }
             },
         }

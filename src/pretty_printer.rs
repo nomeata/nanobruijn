@@ -758,6 +758,12 @@ impl<'x, 't, 'p> PrettyPrinter<'x, 't, 'p> {
                         .concat(DocPtr::from((idx + 1).to_string()))
                         .as_unparenable()
                 }
+                Shift { inner, amount, .. } => {
+                    DocPtr::from(format!("⇑{}(", amount))
+                        .concat(self.pp_expr_aux(inner).parens(MAX_LEVEL))
+                        .concat(DocPtr::from(")"))
+                        .as_unparenable()
+                }
                 NatLit { ptr, .. } => DocPtr::from(self.ctx.read_bignum(ptr).unwrap().to_string()).as_unparenable(),
                 StringLit { ptr, .. } => {
                     DocPtr::from("\"")
@@ -909,6 +915,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
             Let { binder_type, val, body, .. } =>
                 self.has_var(binder_type, i) || self.has_var(val, i) || self.has_var(body, i + 1),
             Proj { structure, .. } => self.has_var(structure, i),
+            Shift { inner, .. } => self.has_var(inner, i),
             Sort { .. } | Const { .. } | NatLit { .. } | StringLit { .. } => false,
             Local { .. } => panic!(),
         }

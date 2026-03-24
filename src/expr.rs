@@ -16,6 +16,7 @@ pub(crate) const APP_HASH: u64 = 233;
 pub(crate) const LOCAL_HASH: u64 = 211;
 pub(crate) const STRING_LIT_HASH: u64 = 1493;
 pub(crate) const NAT_LIT_HASH: u64 = 1583;
+pub(crate) const SHIFT_HASH: u64 = 1699;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Expr<'a> {
@@ -91,14 +92,23 @@ pub enum Expr<'a> {
         has_fvars: bool,
         nondep: bool
     },
-    /// A free variable with binder information, and either a unique
-    /// identifier, or a deBruijn level.
+    /// A free variable with binder information and a unique identifier.
     Local {
         hash: u64,
         binder_name: NamePtr<'a>,
         binder_style: BinderStyle,
         binder_type: ExprPtr<'a>,
         id: FVarId,
+    },
+    /// Delayed shift: all free Var indices in `inner` are shifted up by `amount`.
+    /// Created by mk_shift, collapsed on nesting: Shift(Shift(e, j), k) → Shift(e, j+k).
+    /// Elided when inner has no free bvars.
+    Shift {
+        hash: u64,
+        inner: ExprPtr<'a>,
+        amount: u16,
+        num_loose_bvars: u16,
+        has_fvars: bool,
     },
 }
 
@@ -121,7 +131,8 @@ impl<'a> Expr<'a> {
             | Local { hash, .. }
             | StringLit { hash, .. }
             | NatLit { hash, .. }
-            | Proj { hash, .. } => *hash,
+            | Proj { hash, .. }
+            | Shift { hash, .. } => *hash,
         }
     }
 }
@@ -150,7 +161,8 @@ pub enum BinderStyle {
 impl<'t, 'p: 't> TcCtx<'t, 'p> {
     pub(crate) fn inst_forall_params(&mut self, mut e: ExprPtr<'t>, n: usize, all_args: &[ExprPtr<'t>]) -> ExprPtr<'t> {
         for _ in 0..n {
-            if let Pi { body, .. } = self.read_expr(e) {
+            let e2 = self.force_shift(e);
+            if let Pi { body, .. } = self.read_expr(e2) {
                 e = body
             } else {
                 panic!()
@@ -191,6 +203,11 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
             let calcd = match self.read_expr(e) {
                 // These expressions should be unreachable since they return `n_loose_bvars() == 0`
                 Sort { .. } | Const { .. } | Local { .. } | StringLit { .. } | NatLit { .. } => panic!(),
+                Shift { inner, amount, .. } => {
+                    // Force the shift, then substitute on the result.
+                    let forced = self.force_shift_aux(inner, amount, 0);
+                    self.inst_aux(forced, substs, offset, shift_down)
+                }
                 Var { dbj_idx, .. } => {
                     debug_assert!(dbj_idx >= offset);
                     let rel_idx = dbj_idx - offset;
@@ -199,7 +216,8 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
                         // Shift the value up by `offset` to account for binders we traversed.
                         let val = substs[substs.len() - 1 - rel_idx as usize];
                         if offset > 0 {
-                            self.shift_expr(val, offset, 0)
+                            // Use full traversal to avoid creating Shift nodes in inst results
+                            self.force_shift_aux(val, offset, 0)
                         } else {
                             val
                         }
@@ -243,11 +261,15 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
     }
 
     /// Shift all free variables in `e` (those with index >= cutoff) up by `amount`.
+    /// For cutoff=0, creates a lazy Shift node (O(1)).
+    /// For cutoff>0, traverses and rebuilds.
     pub fn shift_expr(&mut self, e: ExprPtr<'t>, amount: u16, cutoff: u16) -> ExprPtr<'t> {
         if amount == 0 || self.num_loose_bvars(e) <= cutoff {
             return e
         }
-        self.expr_cache.shift_cache.clear();
+        if cutoff == 0 {
+            return self.mk_shift(e, amount);
+        }
         self.shift_expr_aux(e, amount, cutoff)
     }
 
@@ -260,6 +282,11 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         }
         let calcd = match self.read_expr(e) {
             Sort { .. } | Const { .. } | Local { .. } | StringLit { .. } | NatLit { .. } => panic!(),
+            Shift { inner, amount: prev, .. } => {
+                // Force the inner shift first, then apply the outer shift.
+                let forced = self.force_shift_aux(inner, prev, 0);
+                self.shift_expr_aux(forced, amount, cutoff)
+            }
             Var { dbj_idx, .. } => {
                 if dbj_idx >= cutoff {
                     self.mk_var(dbj_idx + amount)
@@ -343,6 +370,10 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
                     let structure = self.abstr_aux(structure, locals, offset);
                     self.mk_proj(ty_name, idx, structure)
                 }
+                Shift { .. } => {
+                    let forced = self.force_shift(e);
+                    self.abstr_aux(forced, locals, offset)
+                }
                 Var { .. } | Sort { .. } | Const { .. } => panic!("should flag as no locals"),
             };
 
@@ -397,6 +428,10 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
                 // in both cases you're substituting in expressions that were just pulled out of the
                 // environment, so they should have no locals.
                 Local { .. } => panic!("level substitution should not find locals"),
+                Shift { .. } => {
+                    let forced = self.force_shift(e);
+                    self.subst_aux(forced, ks, vs)
+                }
                 Proj { ty_name, idx, structure, .. } => {
                     let structure = self.subst_aux(structure, ks, vs);
                     self.mk_proj(ty_name, idx, structure)
@@ -728,6 +763,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
                         || self.find_const_aux(body, pred, cache),
                 Local { binder_type, .. } => self.find_const_aux(binder_type, pred, cache),
                 Proj { structure, .. } => self.find_const_aux(structure, pred, cache),
+                Shift { inner, .. } => self.find_const_aux(inner, pred, cache),
             };
             cache.insert(e, r);
             r
@@ -787,7 +823,8 @@ impl<'t> Expr<'t> {
             | Pi { num_loose_bvars, .. }
             | Lambda { num_loose_bvars, .. }
             | Let { num_loose_bvars, .. }
-            | Proj { num_loose_bvars, .. } => *num_loose_bvars,
+            | Proj { num_loose_bvars, .. }
+            | Shift { num_loose_bvars, .. } => *num_loose_bvars,
         }
     }
 
@@ -799,7 +836,8 @@ impl<'t> Expr<'t> {
             | Pi { has_fvars, .. }
             | Lambda { has_fvars, .. }
             | Let { has_fvars, .. }
-            | Proj { has_fvars, .. } => *has_fvars,
+            | Proj { has_fvars, .. }
+            | Shift { has_fvars, .. } => *has_fvars,
         }
     }
 }

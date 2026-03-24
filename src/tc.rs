@@ -504,7 +504,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                 }
                 binder_type
             }
-            _ => panic!("Ran out of constructor telescope getting field"),
+            _ => panic!("Ran out of constructor telescope getting field")
         }
     }
 
@@ -540,6 +540,10 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             StringLit { .. } => {
                 assert!(self.ctx.export_file.config.string_extension);
                 self.ctx.string_type().unwrap()
+            }
+            Shift { .. } => {
+                let forced = self.ctx.force_shift(e);
+                return self.infer(forced, flag)
             }
         };
         if cacheable {
@@ -748,6 +752,11 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         if matches!(self.ctx.read_expr(e), NatLit { .. } | StringLit { .. }) {
             return e
         }
+        // whnf is context-free: whnf(Shift(e, k)) = shift(whnf(e), k)
+        if let Shift { inner, amount, .. } = self.ctx.read_expr(e) {
+            let r = self.whnf(inner);
+            return self.ctx.force_shift_aux(r, amount, 0)
+        }
         if let Some(cached) = self.tc_cache.whnf_cache.get(&e).copied() {
             return cached
         }
@@ -822,6 +831,11 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             }
             App { .. } => panic!(),
             Local { .. } | NatLit { .. } | StringLit { .. } => (false, self.ctx.foldl_apps(e_fun, args.into_iter())),
+            Shift { .. } => {
+                let forced = self.ctx.force_shift(e_fun);
+                let e2 = self.ctx.foldl_apps(forced, args.into_iter());
+                (true, self.whnf_no_unfolding_aux(e2, cheap_proj))
+            }
         };
         if should_cache && !cheap_proj {
             self.tc_cache.whnf_no_unfolding_cache.insert(e, eprime);
@@ -1153,6 +1167,14 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
     fn def_eq_quick_check(&mut self, x: ExprPtr<'t>, y: ExprPtr<'t>) -> Option<bool> {
         if x == y {
             return Some(true)
+        }
+        // Strip matching Shift wrappers: Shift(a, k) == Shift(b, k) iff a == b
+        if let (Shift { inner: ix, amount: kx, .. }, Shift { inner: iy, amount: ky, .. }) =
+            (self.ctx.read_expr(x), self.ctx.read_expr(y))
+        {
+            if kx == ky {
+                return Some(self.def_eq(ix, iy))
+            }
         }
         if self.tc_cache.eq_cache.check_uf_eq(x, y) {
             return Some(true)
