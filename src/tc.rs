@@ -178,14 +178,12 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
     fn push_local(&mut self, ty: ExprPtr<'t>) {
         self.local_ctx.push(ty);
         self.tc_cache.infer_open_cache.clear();
-        self.tc_cache.infer_open_depth = self.local_ctx.len() as u16;
     }
 
     /// Pop a binder type from the local context (exiting a binder).
     fn pop_local(&mut self) {
         self.local_ctx.pop().expect("pop_local: empty context");
         self.tc_cache.infer_open_cache.clear();
-        self.tc_cache.infer_open_depth = self.local_ctx.len() as u16;
     }
 
     /// Restore local context to a previous depth, clearing open caches.
@@ -193,7 +191,6 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         if self.local_ctx.len() != depth {
             self.local_ctx.truncate(depth);
             self.tc_cache.infer_open_cache.clear();
-            self.tc_cache.infer_open_depth = depth as u16;
         }
     }
 

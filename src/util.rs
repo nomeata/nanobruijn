@@ -851,11 +851,10 @@ pub(crate) struct TcCache<'t> {
     /// Strong reduction is not used during type-checking, this is more of a library/inspection feature.
     pub(crate) strong_cache: UniqueHashMap<(ExprPtr<'t>, bool, bool), ExprPtr<'t>>,
     /// Scope-local infer cache for open expressions (with loose bvars).
-    /// Keyed by ExprPtr, valid only at the depth where they were stored.
-    /// Cleared on push_local/pop_local.
+    /// Keyed by (ExprPtr, depth), entries are only valid when local_ctx matches.
+    /// Cleared on pop_local/restore_depth (going to a shallower depth invalidates).
+    /// NOT cleared on push_local (deeper entries are still valid since local_ctx is extended).
     pub(crate) infer_open_cache: UniqueHashMap<ExprPtr<'t>, ExprPtr<'t>>,
-    /// The local_ctx depth at which `infer_open_cache` entries are valid.
-    pub(crate) infer_open_depth: u16,
 }
 
 impl<'t> TcCache<'t> {
@@ -869,7 +868,6 @@ impl<'t> TcCache<'t> {
             failure_cache: new_fx_hash_set(),
             strong_cache: new_unique_hash_map(),
             infer_open_cache: new_unique_hash_map(),
-            infer_open_depth: 0,
         }
     }
 
