@@ -131,11 +131,12 @@ where B references both x and external variables).
 
 ### Phase 5: Benchmark ✅ (partial)
 - [done] Validated against arena test cases (88 good + 45 bad)
-- [done] Init export (54,475 decls, 310MB ndjson): **37s** single-threaded (release)
+- [done] Init export (54,475 decls, 310MB ndjson): **27s** single-threaded (release)
+  - Baseline (original nanoda, locally-nameless): **21s** (1.29x slower)
+  - Before scope-local cache: 39s → 27s (31% speedup from open-expr caching)
 - [done] init-prelude (2,051 decls): 0.08s, grind-ring-5 (2,439 decls): 2.97s (release)
 - [todo] Benchmark on mathlib export (requires building mathlib with lean4export)
-- [todo] Profile to find remaining bottlenecks
-- [todo] Compare against unmodified nanoda baseline
+- [todo] Profile remaining 29% gap vs baseline
 
 ## Open Questions
 
