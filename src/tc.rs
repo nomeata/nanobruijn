@@ -177,20 +177,23 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
     /// Push a binder type onto the local context (entering a binder).
     fn push_local(&mut self, ty: ExprPtr<'t>) {
         self.local_ctx.push(ty);
-        self.tc_cache.infer_open_cache.clear();
+        // No need to clear infer_open_cache: entries are keyed by (ExprPtr, depth),
+        // so stale entries from shallower depths won't be returned at the new depth.
     }
 
     /// Pop a binder type from the local context (exiting a binder).
     fn pop_local(&mut self) {
+        let popped_depth = self.local_ctx.len() as u16;
         self.local_ctx.pop().expect("pop_local: empty context");
-        self.tc_cache.infer_open_cache.clear();
+        self.tc_cache.infer_open_cache.retain(|&(_, d), _| d < popped_depth);
     }
 
-    /// Restore local context to a previous depth, clearing open caches.
+    /// Restore local context to a previous depth.
     fn restore_depth(&mut self, depth: usize) {
-        if self.local_ctx.len() != depth {
+        if self.local_ctx.len() > depth {
+            let depth16 = depth as u16;
             self.local_ctx.truncate(depth);
-            self.tc_cache.infer_open_cache.clear();
+            self.tc_cache.infer_open_cache.retain(|&(_, d), _| d <= depth16);
         }
     }
 
@@ -519,27 +522,27 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
     }
 
     pub(crate) fn infer(&mut self, e: ExprPtr<'t>, flag: InferFlag) -> ExprPtr<'t> {
+        stacker::maybe_grow(64 * 1024, 2 * 1024 * 1024, || self.infer_inner(e, flag))
+    }
 
+    fn infer_inner(&mut self, e: ExprPtr<'t>, flag: InferFlag) -> ExprPtr<'t> {
         // Only use cache for closed expressions (no loose bvars), since
         // the result of inferring an expression with free Vars depends on
         // the local context depth.
         let cacheable = self.ctx.num_loose_bvars(e) == 0;
+        let depth = self.local_ctx.len() as u16;
         if cacheable {
             if let Some(cached) = self.tc_cache.infer_cache_check.get(&e).copied() {
-
                 return cached
             }
             if flag == InferFlag::InferOnly {
                 if let Some(cached) = self.tc_cache.infer_cache_no_check.get(&e).copied() {
-    
                     return cached
                 }
             }
         } else {
-
-            // Scope-local cache for open expressions, valid at current depth
-            if let Some(cached) = self.tc_cache.infer_open_cache.get(&e).copied() {
-
+            // Scope-local cache for open expressions, keyed by (ExprPtr, depth)
+            if let Some(cached) = self.tc_cache.infer_open_cache.get(&(e, depth)).copied() {
                 return cached
             }
         }
@@ -576,7 +579,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                 }
             }
         } else {
-            self.tc_cache.infer_open_cache.insert(e, r);
+            self.tc_cache.infer_open_cache.insert((e, depth), r);
         }
         r
     }
@@ -771,18 +774,43 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
     }
 
     pub fn whnf(&mut self, e: ExprPtr<'t>) -> ExprPtr<'t> {
+        stacker::maybe_grow(64 * 1024, 2 * 1024 * 1024, || self.whnf_inner(e))
+    }
+
+    fn whnf_inner(&mut self, e: ExprPtr<'t>) -> ExprPtr<'t> {
 
         if matches!(self.ctx.read_expr(e), NatLit { .. } | StringLit { .. }) {
             return e
         }
-        // whnf is context-free: whnf(Shift(e, k)) = shift(whnf(e), k)
-        if let Shift { inner, amount, .. } = self.ctx.read_expr(e) {
-            let r = self.whnf(inner);
-            return self.ctx.force_shift_aux(r, amount, 0)
+        // whnf is shift-equivariant: whnf(Shift(e, k)) = shift(whnf(e), k)
+        // Peel off Shift (iteratively to avoid stack overflow on deep chains).
+        // Note: mk_shift collapses Shift(Shift(e,j),k) → Shift(e,j+k), so in
+        // practice this loop runs at most once, but we use a loop for safety.
+        let mut total_shift: u16 = 0;
+        let mut e = e;
+        while let Shift { inner, amount, .. } = self.ctx.read_expr(e) {
+            total_shift += amount;
+            e = inner;
         }
-        if let Some(cached) = self.tc_cache.whnf_cache.get(&e).copied() {
-
-            return cached
+        if total_shift > 0 {
+            let r = self.whnf(e);
+            return self.ctx.force_shift_aux(r, total_shift, 0)
+        }
+        // Shift-invariant cache: keyed by canonical hash.
+        // On hit, verify structural equality up to shift, then apply delta.
+        let canon = self.ctx.canonical_hash(e);
+        let e_nl = self.ctx.num_loose_bvars(e);
+        if let Some(&(stored_input, stored_result, stored_nl)) = self.tc_cache.whnf_cache.get(&canon) {
+            // Fast path: exact pointer match (no shift_eq needed)
+            if stored_input == e {
+                return stored_result;
+            }
+            if e_nl >= stored_nl {
+                let delta = e_nl - stored_nl;
+                if delta > 0 && self.ctx.shift_eq(stored_input, e, delta) {
+                    return self.ctx.force_shift_aux(stored_result, delta, 0);
+                }
+            }
         }
         let mut cursor = e;
         loop {
@@ -792,7 +820,10 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             } else if let Some(next_term) = self.unfold_def(whnfd) {
                 cursor = next_term;
             } else {
-                self.tc_cache.whnf_cache.insert(e, whnfd);
+                // Only store if no entry exists or if this nl is smaller (better for future shift hits)
+                if self.tc_cache.whnf_cache.get(&canon).map_or(true, |&(_, _, stored_nl)| e_nl < stored_nl) {
+                    self.tc_cache.whnf_cache.insert(canon, (e, whnfd, e_nl));
+                }
                 return whnfd
             }
         }
@@ -803,68 +834,86 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
     pub fn whnf_no_unfolding(&mut self, e: ExprPtr<'t>) -> ExprPtr<'t> { self.whnf_no_unfolding_aux(e, false) }
 
     fn whnf_no_unfolding_aux(&mut self, e: ExprPtr<'t>, cheap_proj: bool) -> ExprPtr<'t> {
-        if let Some(cached) = self.tc_cache.whnf_no_unfolding_cache.get(&e).copied() {
-            return cached
-        }
-        let (e_fun, args) = self.ctx.unfold_apps(e);
-        let (should_cache, eprime) = match self.ctx.read_expr(e_fun) {
-            Proj { idx, structure, .. } =>
-                if let Some(e) = self.reduce_proj(idx, structure, cheap_proj) {
-                    let e = self.ctx.foldl_apps(e, args.into_iter());
-                    let e = self.whnf_no_unfolding_aux(e, cheap_proj);
-                    (true, e)
-                } else {
-                    (false, self.ctx.foldl_apps(e_fun, args.into_iter()))
-                },
-            Sort { level, .. } => {
-                debug_assert!(args.is_empty());
-                let level = self.ctx.simplify(level);
-                (false, self.ctx.mk_sort(level))
+        // Iterative version: tail-recursive calls become loop iterations.
+        // We track original inputs to cache on exit.
+        let mut cache_entries: Vec<ExprPtr<'t>> = Vec::new();
+        let mut cur = e;
+        let result = loop {
+            if let Some(cached) = self.tc_cache.whnf_no_unfolding_cache.get(&cur).copied() {
+                break cached;
             }
-            Lambda { .. } if !args.is_empty() => {
-                let (mut e, mut n_args) = (e_fun, 0usize);
-                while let (Lambda { body, .. }, [_arg, _rest @ ..]) = (self.ctx.read_expr(e), &args[n_args..]) {
-                    n_args += 1;
-                    e = body;
+            let (e_fun, args) = self.ctx.unfold_apps(cur);
+            match self.ctx.read_expr(e_fun) {
+                Proj { idx, structure, .. } =>
+                    if let Some(e) = self.reduce_proj(idx, structure, cheap_proj) {
+                        let next = self.ctx.foldl_apps(e, args.into_iter());
+                        if !cheap_proj { cache_entries.push(cur); }
+                        cur = next;
+                        continue;
+                    } else {
+                        break self.ctx.foldl_apps(e_fun, args.into_iter());
+                    },
+                Sort { level, .. } => {
+                    debug_assert!(args.is_empty());
+                    let level = self.ctx.simplify(level);
+                    break self.ctx.mk_sort(level);
                 }
-                e = self.ctx.inst_beta(e, &args[..n_args]);
-                e = self.ctx.foldl_apps(e, args.into_iter().skip(n_args));
-                (true, self.whnf_no_unfolding_aux(e, cheap_proj))
-            }
-            Lambda { .. } => {
-                debug_assert!(args.is_empty());
-                (false, self.ctx.foldl_apps(e_fun, args.into_iter()))
-            }
-            Let { val, body, .. } => {
-                let e = self.ctx.inst_beta(body, &[val]);
-                let e = self.ctx.foldl_apps(e, args.into_iter());
-                (true, self.whnf_no_unfolding_aux(e, cheap_proj))
-            }
-            Const { name, levels, .. } =>
-                if let Some(reduced) = self.reduce_quot(name, &args) {
-                    (true, self.whnf_no_unfolding_aux(reduced, cheap_proj))
-                } else if let Some(reduced) = self.reduce_rec(name, levels, &args) {
-                    (true, self.whnf_no_unfolding_aux(reduced, cheap_proj))
-                } else {
-                    (false, self.ctx.foldl_apps(e_fun, args.into_iter()))
-                },
-            Var { .. } => (false, self.ctx.foldl_apps(e_fun, args.into_iter())),
-            Pi { .. } => {
-                debug_assert!(args.is_empty());
-                (false, e_fun)
-            }
-            App { .. } => panic!(),
-            Local { .. } | NatLit { .. } | StringLit { .. } => (false, self.ctx.foldl_apps(e_fun, args.into_iter())),
-            Shift { .. } => {
-                let forced = self.ctx.force_shift(e_fun);
-                let e2 = self.ctx.foldl_apps(forced, args.into_iter());
-                (true, self.whnf_no_unfolding_aux(e2, cheap_proj))
+                Lambda { .. } if !args.is_empty() => {
+                    let (mut e, mut n_args) = (e_fun, 0usize);
+                    while let (Lambda { body, .. }, [_arg, _rest @ ..]) = (self.ctx.read_expr(e), &args[n_args..]) {
+                        n_args += 1;
+                        e = body;
+                    }
+                    e = self.ctx.inst_beta(e, &args[..n_args]);
+                    let next = self.ctx.foldl_apps(e, args.into_iter().skip(n_args));
+                    if !cheap_proj { cache_entries.push(cur); }
+                    cur = next;
+                    continue;
+                }
+                Lambda { .. } => {
+                    debug_assert!(args.is_empty());
+                    break self.ctx.foldl_apps(e_fun, args.into_iter());
+                }
+                Let { val, body, .. } => {
+                    let e = self.ctx.inst_beta(body, &[val]);
+                    let next = self.ctx.foldl_apps(e, args.into_iter());
+                    if !cheap_proj { cache_entries.push(cur); }
+                    cur = next;
+                    continue;
+                }
+                Const { name, levels, .. } =>
+                    if let Some(reduced) = self.reduce_quot(name, &args) {
+                        if !cheap_proj { cache_entries.push(cur); }
+                        cur = reduced;
+                        continue;
+                    } else if let Some(reduced) = self.reduce_rec(name, levels, &args) {
+                        if !cheap_proj { cache_entries.push(cur); }
+                        cur = reduced;
+                        continue;
+                    } else {
+                        break self.ctx.foldl_apps(e_fun, args.into_iter());
+                    },
+                Var { .. } => break self.ctx.foldl_apps(e_fun, args.into_iter()),
+                Pi { .. } => {
+                    debug_assert!(args.is_empty());
+                    break e_fun;
+                }
+                App { .. } => panic!(),
+                Local { .. } | NatLit { .. } | StringLit { .. } => break self.ctx.foldl_apps(e_fun, args.into_iter()),
+                Shift { .. } => {
+                    let forced = self.ctx.force_shift(e_fun);
+                    let next = self.ctx.foldl_apps(forced, args.into_iter());
+                    if !cheap_proj { cache_entries.push(cur); }
+                    cur = next;
+                    continue;
+                }
             }
         };
-        if should_cache && !cheap_proj {
-            self.tc_cache.whnf_no_unfolding_cache.insert(e, eprime);
+        // Cache all intermediate inputs that led to this result
+        for entry in cache_entries {
+            self.tc_cache.whnf_no_unfolding_cache.insert(entry, result);
         }
-        eprime
+        result
     }
 
     fn def_eq_nat(&mut self, x: ExprPtr<'t>, y: ExprPtr<'t>) -> Option<bool> {
@@ -972,6 +1021,10 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
     pub fn assert_def_eq(&mut self, u: ExprPtr<'t>, v: ExprPtr<'t>) { assert!(self.def_eq(u, v)) }
 
     pub fn def_eq(&mut self, x: ExprPtr<'t>, y: ExprPtr<'t>) -> bool {
+        stacker::maybe_grow(64 * 1024, 2 * 1024 * 1024, || self.def_eq_inner(x, y))
+    }
+
+    fn def_eq_inner(&mut self, x: ExprPtr<'t>, y: ExprPtr<'t>) -> bool {
 
         if let Some(easy) = self.def_eq_quick_check(x, y) {
             return easy

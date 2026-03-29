@@ -1,7 +1,7 @@
 use crate::env::{
     ConstructorData, Declar, DeclarInfo, InductiveData, Notation, RecursorData, ReducibilityHint,
 };
-use crate::expr::{BinderStyle, Expr};
+use crate::expr::{norm_mask, shift_inv_deltas, unbind_mask, BinderStyle, Expr};
 use crate::hash64;
 use crate::level::Level;
 use crate::name::Name;
@@ -426,6 +426,14 @@ impl<'a, R: BufRead> Parser<'a, R> {
 
     fn has_fvars(&self, e: ExprPtr<'a>) -> bool { self.dag.exprs.get_index(e.idx as usize).unwrap().has_fvars() }
 
+    fn struct_hash(&self, e: ExprPtr<'a>) -> u64 {
+        self.dag.exprs.get_index(e.idx as usize).unwrap().get_struct_hash()
+    }
+
+    fn bvar_mask(&self, e: ExprPtr<'a>) -> u64 {
+        self.dag.exprs.get_index(e.idx as usize).unwrap().get_bvar_mask()
+    }
+
     fn get_name_ptr(&self, idx: u32) -> NamePtr<'a> {
         let out = crate::util::Ptr { idx, dag_marker: DagMarker::ExportFile, ph: std::marker::PhantomData };
         assert!((idx as usize) < self.dag.names.len());
@@ -531,7 +539,7 @@ impl<'a, R: BufRead> Parser<'a, R> {
                 let num_ptr = BigUintPtr::from(DagMarker::ExportFile, self.dag.bignums.as_mut().unwrap().insert_full(big_uint).0);
                 let insert_result = {
                     let hash = hash64!(crate::expr::NAT_LIT_HASH, num_ptr);
-                    self.dag.exprs.insert_full(Expr::NatLit { ptr: num_ptr, hash })
+                    self.dag.exprs.insert_full(Expr::NatLit { ptr: num_ptr, hash, struct_hash: hash, bvar_mask: 0 })
                 };
                 if !self.config.nat_extension {
                     return Err(Box::<dyn Error>::from(
@@ -553,7 +561,7 @@ impl<'a, R: BufRead> Parser<'a, R> {
                 );
                 let insert_result = {
                     let hash = hash64!(crate::expr::STRING_LIT_HASH, string_ptr);
-                    self.dag.exprs.insert_full(Expr::StringLit { ptr: string_ptr, hash })
+                    self.dag.exprs.insert_full(Expr::StringLit { ptr: string_ptr, hash, struct_hash: hash, bvar_mask: 0 })
                 };
                 assigned_idx.unwrap().assert_ie(insert_result);
             }
@@ -595,7 +603,7 @@ impl<'a, R: BufRead> Parser<'a, R> {
                 let level = self.get_level_ptr(level);
                 let insert_result = {
                     let hash = hash64!(crate::expr::SORT_HASH, level);
-                    self.dag.exprs.insert_full(Expr::Sort { level, hash })
+                    self.dag.exprs.insert_full(Expr::Sort { level, hash, struct_hash: hash, bvar_mask: 0 })
                 };
                 assigned_idx.unwrap().assert_ie(insert_result);
             }
@@ -607,7 +615,7 @@ impl<'a, R: BufRead> Parser<'a, R> {
                 let levels = self.get_levels_ptr(&levels);
                 let insert_result = {
                     let hash = hash64!(crate::expr::CONST_HASH, name, levels);
-                    self.dag.exprs.insert_full(Expr::Const { name, levels, hash })
+                    self.dag.exprs.insert_full(Expr::Const { name, levels, hash, struct_hash: hash, bvar_mask: 0 })
                 };
                 assigned_idx.unwrap().assert_ie(insert_result);
             }
@@ -618,14 +626,25 @@ impl<'a, R: BufRead> Parser<'a, R> {
                     let hash = hash64!(crate::expr::APP_HASH, fun, arg);
                     let num_bvars = self.num_loose_bvars(fun).max(self.num_loose_bvars(arg));
                     let locals = self.has_fvars(fun) || self.has_fvars(arg);
-                    self.dag.exprs.insert_full(Expr::App { fun, arg, num_loose_bvars: num_bvars, has_fvars: locals, hash })
+                    let fun_sh = self.struct_hash(fun);
+                    let arg_sh = self.struct_hash(arg);
+                    let fun_mask = self.bvar_mask(fun);
+                    let arg_mask = self.bvar_mask(arg);
+                    let fun_nl = self.num_loose_bvars(fun);
+                    let arg_nl = self.num_loose_bvars(arg);
+                    let fun_nm = norm_mask(fun_mask, fun_nl);
+                    let arg_nm = norm_mask(arg_mask, arg_nl);
+                    let (lb_delta, nl_delta) = shift_inv_deltas(fun_mask, fun_nl, arg_mask, arg_nl);
+                    let struct_hash = hash64!(crate::expr::APP_HASH, fun_sh, arg_sh, fun_nm, arg_nm, lb_delta, nl_delta);
+                    let bvar_mask = fun_mask | arg_mask;
+                    self.dag.exprs.insert_full(Expr::App { fun, arg, num_loose_bvars: num_bvars, has_fvars: locals, hash, struct_hash, bvar_mask })
                 };
                 assigned_idx.unwrap().assert_ie(insert_result);
             }
             ExprBVar(dbj_idx) => {
                 let insert_result = {
                     let hash = hash64!(crate::expr::VAR_HASH, dbj_idx);
-                    self.dag.exprs.insert_full(Expr::Var { dbj_idx, hash })
+                    self.dag.exprs.insert_full(Expr::Var { dbj_idx, hash, struct_hash: crate::expr::VAR_HASH, bvar_mask: 1u64 << (dbj_idx as u32 % 64) })
                 };
                 assigned_idx.unwrap().assert_ie(insert_result);
             }
@@ -637,6 +656,19 @@ impl<'a, R: BufRead> Parser<'a, R> {
                     let hash = hash64!(crate::expr::LAMBDA_HASH, binder_name, binder_info, binder_type, body);
                     let num_bvars = self.num_loose_bvars(binder_type).max(self.num_loose_bvars(body).saturating_sub(1));
                     let locals = self.has_fvars(binder_type) || self.has_fvars(body);
+                    let ty_sh = self.struct_hash(binder_type);
+                    let body_sh = self.struct_hash(body);
+                    let ty_mask = self.bvar_mask(binder_type);
+                    let body_mask = self.bvar_mask(body);
+                    let ty_nl = self.num_loose_bvars(binder_type);
+                    let body_nl = self.num_loose_bvars(body);
+                    let body_free_mask = unbind_mask(body_mask);
+                    let body_free_nl = body_nl.saturating_sub(1);
+                    let ty_nm = norm_mask(ty_mask, ty_nl);
+                    let body_free_nm = norm_mask(body_free_mask, body_free_nl);
+                    let (lb_delta, nl_delta) = shift_inv_deltas(ty_mask, ty_nl, body_free_mask, body_free_nl);
+                    let struct_hash = hash64!(crate::expr::LAMBDA_HASH, binder_name, binder_info, ty_sh, body_sh, ty_nm, body_free_nm, lb_delta, nl_delta);
+                    let bvar_mask = ty_mask | body_free_mask;
                     self.dag.exprs.insert_full(Expr::Lambda {
                         binder_name,
                         binder_style: binder_info,
@@ -645,6 +677,8 @@ impl<'a, R: BufRead> Parser<'a, R> {
                         num_loose_bvars: num_bvars,
                         has_fvars: locals,
                         hash,
+                        struct_hash,
+                        bvar_mask,
                     })
                 };
                 assigned_idx.unwrap().assert_ie(insert_result);
@@ -657,6 +691,19 @@ impl<'a, R: BufRead> Parser<'a, R> {
                     let hash = hash64!(crate::expr::PI_HASH, binder_name, binder_info, binder_type, body);
                     let num_bvars = self.num_loose_bvars(binder_type).max(self.num_loose_bvars(body).saturating_sub(1));
                     let locals = self.has_fvars(binder_type) || self.has_fvars(body);
+                    let ty_sh = self.struct_hash(binder_type);
+                    let body_sh = self.struct_hash(body);
+                    let ty_mask = self.bvar_mask(binder_type);
+                    let body_mask = self.bvar_mask(body);
+                    let ty_nl = self.num_loose_bvars(binder_type);
+                    let body_nl = self.num_loose_bvars(body);
+                    let body_free_mask = unbind_mask(body_mask);
+                    let body_free_nl = body_nl.saturating_sub(1);
+                    let ty_nm = norm_mask(ty_mask, ty_nl);
+                    let body_free_nm = norm_mask(body_free_mask, body_free_nl);
+                    let (lb_delta, nl_delta) = shift_inv_deltas(ty_mask, ty_nl, body_free_mask, body_free_nl);
+                    let struct_hash = hash64!(crate::expr::PI_HASH, binder_name, binder_info, ty_sh, body_sh, ty_nm, body_free_nm, lb_delta, nl_delta);
+                    let bvar_mask = ty_mask | body_free_mask;
                     self.dag.exprs.insert_full(Expr::Pi {
                         binder_name,
                         binder_style: binder_info,
@@ -665,6 +712,8 @@ impl<'a, R: BufRead> Parser<'a, R> {
                         num_loose_bvars: num_bvars,
                         has_fvars: locals,
                         hash,
+                        struct_hash,
+                        bvar_mask,
                     })
                 };
                 assigned_idx.unwrap().assert_ie(insert_result);
@@ -680,6 +729,24 @@ impl<'a, R: BufRead> Parser<'a, R> {
                         .num_loose_bvars(binder_type)
                         .max(self.num_loose_bvars(val).max(self.num_loose_bvars(body).saturating_sub(1)));
                     let locals = self.has_fvars(binder_type) || self.has_fvars(val) || self.has_fvars(body);
+                    let ty_sh = self.struct_hash(binder_type);
+                    let val_sh = self.struct_hash(val);
+                    let body_sh = self.struct_hash(body);
+                    let ty_mask = self.bvar_mask(binder_type);
+                    let val_mask = self.bvar_mask(val);
+                    let body_mask = self.bvar_mask(body);
+                    let ty_nl = self.num_loose_bvars(binder_type);
+                    let val_nl = self.num_loose_bvars(val);
+                    let body_nl = self.num_loose_bvars(body);
+                    let body_free_mask = unbind_mask(body_mask);
+                    let body_free_nl = body_nl.saturating_sub(1);
+                    let ty_nm = norm_mask(ty_mask, ty_nl);
+                    let val_nm = norm_mask(val_mask, val_nl);
+                    let body_free_nm = norm_mask(body_free_mask, body_free_nl);
+                    let (lb_delta_tv, nl_delta_tv) = shift_inv_deltas(ty_mask, ty_nl, val_mask, val_nl);
+                    let (lb_delta_vb, nl_delta_vb) = shift_inv_deltas(val_mask, val_nl, body_free_mask, body_free_nl);
+                    let struct_hash = hash64!(crate::expr::LET_HASH, binder_name, ty_sh, val_sh, body_sh, nondep, ty_nm, val_nm, body_free_nm, lb_delta_tv, nl_delta_tv, lb_delta_vb, nl_delta_vb);
+                    let bvar_mask = ty_mask | val_mask | body_free_mask;
                     self.dag.exprs.insert_full(Expr::Let {
                         binder_name,
                         binder_type,
@@ -688,7 +755,9 @@ impl<'a, R: BufRead> Parser<'a, R> {
                         num_loose_bvars: num_bvars,
                         has_fvars: locals,
                         hash,
-                        nondep
+                        nondep,
+                        struct_hash,
+                        bvar_mask,
                     })
                 };
                 assigned_idx.unwrap().assert_ie(insert_result);
@@ -700,6 +769,12 @@ impl<'a, R: BufRead> Parser<'a, R> {
                     let hash = hash64!(crate::expr::PROJ_HASH, ty_name, idx, structure);
                     let num_bvars = self.num_loose_bvars(structure);
                     let locals = self.has_fvars(structure);
+                    let s_sh = self.struct_hash(structure);
+                    let s_mask = self.bvar_mask(structure);
+                    let s_nl = self.num_loose_bvars(structure);
+                    let s_nm = norm_mask(s_mask, s_nl);
+                    let struct_hash = hash64!(crate::expr::PROJ_HASH, ty_name, idx, s_sh, s_nm);
+                    let bvar_mask = s_mask;
                     self.dag.exprs.insert_full(Expr::Proj {
                         ty_name,
                         idx,
@@ -707,6 +782,8 @@ impl<'a, R: BufRead> Parser<'a, R> {
                         num_loose_bvars: num_bvars,
                         has_fvars: locals,
                         hash,
+                        struct_hash,
+                        bvar_mask,
                     })
                 };
                 assigned_idx.unwrap().assert_ie(insert_result);

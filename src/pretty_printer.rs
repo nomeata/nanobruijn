@@ -925,7 +925,9 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         match self.read_expr(e) {
             Local { binder_style, binder_type, id: id @ FVarId::Unique(_), .. } => {
                 let hash = hash64!(crate::expr::LOCAL_HASH, new_name, binder_style, binder_type, id);
-                self.alloc_expr(Local { binder_name: new_name, binder_style, binder_type, id, hash })
+                let struct_hash = hash;
+                let bvar_mask = 0u64;
+                self.alloc_expr(Local { binder_name: new_name, binder_style, binder_type, id, hash, struct_hash, bvar_mask })
             }
             _ => panic!(),
         }

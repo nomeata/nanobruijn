@@ -1,5 +1,5 @@
 use crate::env::{DeclarMap, Env, NotationMap, EnvLimit};
-use crate::expr::{BinderStyle, Expr, FVarId};
+use crate::expr::{BinderStyle, Expr, FVarId, norm_mask, shift_inv_deltas, unbind_mask};
 use crate::level::Level;
 use crate::name::Name;
 use crate::pretty_printer::{PpOptions, PrettyPrinter};
@@ -493,24 +493,43 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
 
     pub fn mk_var(&mut self, dbj_idx: u16) -> ExprPtr<'t> {
         let hash = hash64!(crate::expr::VAR_HASH, dbj_idx);
-        self.alloc_expr(Expr::Var { dbj_idx, hash })
+        let struct_hash = crate::expr::VAR_HASH;
+        let bvar_mask = 1u64 << (dbj_idx as u32 % 64);
+        self.alloc_expr(Expr::Var { dbj_idx, hash, struct_hash, bvar_mask })
     }
 
     pub fn mk_sort(&mut self, level: LevelPtr<'t>) -> ExprPtr<'t> {
         let hash = hash64!(crate::expr::SORT_HASH, level);
-        self.alloc_expr(Expr::Sort { level, hash })
+        let struct_hash = hash;
+        let bvar_mask = 0u64;
+        self.alloc_expr(Expr::Sort { level, hash, struct_hash, bvar_mask })
     }
 
     pub fn mk_const(&mut self, name: NamePtr<'t>, levels: LevelsPtr<'t>) -> ExprPtr<'t> {
         let hash = hash64!(crate::expr::CONST_HASH, name, levels);
-        self.alloc_expr(Expr::Const { name, levels, hash })
+        let struct_hash = hash;
+        let bvar_mask = 0u64;
+        self.alloc_expr(Expr::Const { name, levels, hash, struct_hash, bvar_mask })
     }
 
     pub fn mk_app(&mut self, fun: ExprPtr<'t>, arg: ExprPtr<'t>) -> ExprPtr<'t> {
         let hash = hash64!(crate::expr::APP_HASH, fun, arg);
-        let num_loose_bvars = self.num_loose_bvars(fun).max(self.num_loose_bvars(arg));
-        let has_fvars = self.has_fvars(fun) || self.has_fvars(arg);
-        self.alloc_expr(Expr::App { fun, arg, num_loose_bvars, has_fvars, hash })
+        let fun_e = self.read_expr(fun);
+        let arg_e = self.read_expr(arg);
+        let fun_nl = fun_e.num_loose_bvars();
+        let arg_nl = arg_e.num_loose_bvars();
+        let num_loose_bvars = fun_nl.max(arg_nl);
+        let has_fvars = fun_e.has_fvars() || arg_e.has_fvars();
+        let fun_sh = fun_e.get_struct_hash();
+        let arg_sh = arg_e.get_struct_hash();
+        let fun_mask = fun_e.get_bvar_mask();
+        let arg_mask = arg_e.get_bvar_mask();
+        let fun_nm = norm_mask(fun_mask, fun_nl);
+        let arg_nm = norm_mask(arg_mask, arg_nl);
+        let (lb_delta, nl_delta) = shift_inv_deltas(fun_mask, fun_nl, arg_mask, arg_nl);
+        let struct_hash = hash64!(crate::expr::APP_HASH, fun_sh, arg_sh, fun_nm, arg_nm, lb_delta, nl_delta);
+        let bvar_mask = fun_mask | arg_mask;
+        self.alloc_expr(Expr::App { fun, arg, num_loose_bvars, has_fvars, hash, struct_hash, bvar_mask })
     }
 
     pub fn mk_lambda(
@@ -521,9 +540,24 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         body: ExprPtr<'t>,
     ) -> ExprPtr<'t> {
         let hash = hash64!(crate::expr::LAMBDA_HASH, binder_name, binder_style, binder_type, body);
-        let num_loose_bvars = self.num_loose_bvars(binder_type).max(self.num_loose_bvars(body).saturating_sub(1));
-        let has_fvars = self.has_fvars(binder_type) || self.has_fvars(body);
-        self.alloc_expr(Expr::Lambda { binder_name, binder_style, binder_type, body, num_loose_bvars, has_fvars, hash })
+        let ty_e = self.read_expr(binder_type);
+        let body_e = self.read_expr(body);
+        let ty_nl = ty_e.num_loose_bvars();
+        let body_nl = body_e.num_loose_bvars();
+        let num_loose_bvars = ty_nl.max(body_nl.saturating_sub(1));
+        let has_fvars = ty_e.has_fvars() || body_e.has_fvars();
+        let ty_sh = ty_e.get_struct_hash();
+        let body_sh = body_e.get_struct_hash();
+        let ty_mask = ty_e.get_bvar_mask();
+        let body_mask = body_e.get_bvar_mask();
+        let body_free_mask = unbind_mask(body_mask);
+        let body_free_nl = body_nl.saturating_sub(1);
+        let ty_nm = norm_mask(ty_mask, ty_nl);
+        let body_free_nm = norm_mask(body_free_mask, body_free_nl);
+        let (lb_delta, nl_delta) = shift_inv_deltas(ty_mask, ty_nl, body_free_mask, body_free_nl);
+        let struct_hash = hash64!(crate::expr::LAMBDA_HASH, binder_name, binder_style, ty_sh, body_sh, ty_nm, body_free_nm, lb_delta, nl_delta);
+        let bvar_mask = ty_mask | body_free_mask;
+        self.alloc_expr(Expr::Lambda { binder_name, binder_style, binder_type, body, num_loose_bvars, has_fvars, hash, struct_hash, bvar_mask })
     }
 
     pub fn mk_pi(
@@ -534,9 +568,24 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         body: ExprPtr<'t>,
     ) -> ExprPtr<'t> {
         let hash = hash64!(crate::expr::PI_HASH, binder_name, binder_style, binder_type, body);
-        let num_loose_bvars = self.num_loose_bvars(binder_type).max(self.num_loose_bvars(body).saturating_sub(1));
-        let has_fvars = self.has_fvars(binder_type) || self.has_fvars(body);
-        self.alloc_expr(Expr::Pi { binder_name, binder_style, binder_type, body, num_loose_bvars, has_fvars, hash })
+        let ty_e = self.read_expr(binder_type);
+        let body_e = self.read_expr(body);
+        let ty_nl = ty_e.num_loose_bvars();
+        let body_nl = body_e.num_loose_bvars();
+        let num_loose_bvars = ty_nl.max(body_nl.saturating_sub(1));
+        let has_fvars = ty_e.has_fvars() || body_e.has_fvars();
+        let ty_sh = ty_e.get_struct_hash();
+        let body_sh = body_e.get_struct_hash();
+        let ty_mask = ty_e.get_bvar_mask();
+        let body_mask = body_e.get_bvar_mask();
+        let body_free_mask = unbind_mask(body_mask);
+        let body_free_nl = body_nl.saturating_sub(1);
+        let ty_nm = norm_mask(ty_mask, ty_nl);
+        let body_free_nm = norm_mask(body_free_mask, body_free_nl);
+        let (lb_delta, nl_delta) = shift_inv_deltas(ty_mask, ty_nl, body_free_mask, body_free_nl);
+        let struct_hash = hash64!(crate::expr::PI_HASH, binder_name, binder_style, ty_sh, body_sh, ty_nm, body_free_nm, lb_delta, nl_delta);
+        let bvar_mask = ty_mask | body_free_mask;
+        self.alloc_expr(Expr::Pi { binder_name, binder_style, binder_type, body, num_loose_bvars, has_fvars, hash, struct_hash, bvar_mask })
     }
 
     pub fn mk_let(
@@ -548,18 +597,43 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         nondep: bool
     ) -> ExprPtr<'t> {
         let hash = hash64!(crate::expr::LET_HASH, binder_name, binder_type, val, body, nondep);
-        let num_loose_bvars = self
-            .num_loose_bvars(binder_type)
-            .max(self.num_loose_bvars(val).max(self.num_loose_bvars(body).saturating_sub(1)));
-        let has_fvars = self.has_fvars(binder_type) || self.has_fvars(val) || self.has_fvars(body);
-        self.alloc_expr(Expr::Let { binder_name, binder_type, val, body, num_loose_bvars, has_fvars, hash, nondep })
+        let ty_e = self.read_expr(binder_type);
+        let val_e = self.read_expr(val);
+        let body_e = self.read_expr(body);
+        let ty_nl = ty_e.num_loose_bvars();
+        let val_nl = val_e.num_loose_bvars();
+        let body_nl = body_e.num_loose_bvars();
+        let num_loose_bvars = ty_nl.max(val_nl.max(body_nl.saturating_sub(1)));
+        let has_fvars = ty_e.has_fvars() || val_e.has_fvars() || body_e.has_fvars();
+        let ty_sh = ty_e.get_struct_hash();
+        let val_sh = val_e.get_struct_hash();
+        let body_sh = body_e.get_struct_hash();
+        let ty_mask = ty_e.get_bvar_mask();
+        let val_mask = val_e.get_bvar_mask();
+        let body_mask = body_e.get_bvar_mask();
+        let body_free_mask = unbind_mask(body_mask);
+        let body_free_nl = body_nl.saturating_sub(1);
+        let ty_nm = norm_mask(ty_mask, ty_nl);
+        let val_nm = norm_mask(val_mask, val_nl);
+        let body_free_nm = norm_mask(body_free_mask, body_free_nl);
+        let (lb_delta_tv, nl_delta_tv) = shift_inv_deltas(ty_mask, ty_nl, val_mask, val_nl);
+        let (lb_delta_vb, nl_delta_vb) = shift_inv_deltas(val_mask, val_nl, body_free_mask, body_free_nl);
+        let struct_hash = hash64!(crate::expr::LET_HASH, binder_name, ty_sh, val_sh, body_sh, nondep, ty_nm, val_nm, body_free_nm, lb_delta_tv, nl_delta_tv, lb_delta_vb, nl_delta_vb);
+        let bvar_mask = ty_mask | val_mask | body_free_mask;
+        self.alloc_expr(Expr::Let { binder_name, binder_type, val, body, num_loose_bvars, has_fvars, hash, nondep, struct_hash, bvar_mask })
     }
 
     pub fn mk_proj(&mut self, ty_name: NamePtr<'t>, idx: u32, structure: ExprPtr<'t>) -> ExprPtr<'t> {
         let hash = hash64!(crate::expr::PROJ_HASH, ty_name, idx, structure);
-        let num_loose_bvars = self.num_loose_bvars(structure);
-        let has_fvars = self.has_fvars(structure);
-        self.alloc_expr(Expr::Proj { ty_name, idx, structure, num_loose_bvars, has_fvars, hash })
+        let s_e = self.read_expr(structure);
+        let num_loose_bvars = s_e.num_loose_bvars();
+        let has_fvars = s_e.has_fvars();
+        let s_sh = s_e.get_struct_hash();
+        let s_mask = s_e.get_bvar_mask();
+        let s_nm = norm_mask(s_mask, num_loose_bvars);
+        let struct_hash = hash64!(crate::expr::PROJ_HASH, ty_name, idx, s_sh, s_nm);
+        let bvar_mask = s_mask;
+        self.alloc_expr(Expr::Proj { ty_name, idx, structure, num_loose_bvars, has_fvars, hash, struct_hash, bvar_mask })
     }
 
     pub fn mk_string_lit(&mut self, string_ptr: StringPtr<'t>) -> Option<ExprPtr<'t>> {
@@ -567,7 +641,9 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
             return None
         }
         let hash = hash64!(crate::expr::STRING_LIT_HASH, string_ptr);
-        Some(self.alloc_expr(Expr::StringLit { ptr: string_ptr, hash }))
+        let struct_hash = hash;
+        let bvar_mask = 0u64;
+        Some(self.alloc_expr(Expr::StringLit { ptr: string_ptr, hash, struct_hash, bvar_mask }))
     }
 
     pub fn mk_string_lit_quick(&mut self, s: CowStr<'t>) -> Option<ExprPtr<'t>> {
@@ -583,7 +659,9 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
             return None
         }
         let hash = hash64!(crate::expr::NAT_LIT_HASH, num_ptr);
-        Some(self.alloc_expr(Expr::NatLit { ptr: num_ptr, hash }))
+        let struct_hash = hash;
+        let bvar_mask = 0u64;
+        Some(self.alloc_expr(Expr::NatLit { ptr: num_ptr, hash, struct_hash, bvar_mask }))
     }
 
     /// Shortcut to make an `Expr::NatLit` directly from a `BigUint`, rather than
@@ -605,19 +683,20 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         self.unique_counter += 1;
         let id = FVarId::Unique(unique_id);
         let hash = hash64!(crate::expr::LOCAL_HASH, binder_name, binder_style, binder_type, id);
-        self.alloc_expr(Expr::Local { binder_name, binder_style, binder_type, id, hash })
+        let struct_hash = hash;
+        let bvar_mask = 0u64;
+        self.alloc_expr(Expr::Local { binder_name, binder_style, binder_type, id, hash, struct_hash, bvar_mask })
     }
 
     /// Create a delayed shift node: Shift(inner, amount) means all free Var indices
     /// in `inner` are shifted up by `amount`. O(1) — no traversal.
     /// Collapses nested shifts and elides shifts on closed expressions.
     pub fn mk_shift(&mut self, inner: ExprPtr<'t>, amount: u16) -> ExprPtr<'t> {
-        // TODO: For now, always force shifts eagerly. Re-enable lazy shifts
-        // when we have shift-invariant caching.
-        self.force_shift_aux(inner, amount, 0)
+        // Lazy shifts: create Shift wrapper nodes instead of traversing.
+        // Combined with shift-invariant WHNF cache (canonical hash + shift_eq verification).
+        self.mk_shift_lazy(inner, amount)
     }
 
-    #[allow(dead_code)]
     pub fn mk_shift_lazy(&mut self, inner: ExprPtr<'t>, amount: u16) -> ExprPtr<'t> {
         if amount == 0 {
             return inner;
@@ -633,7 +712,9 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         }
         let has_fvars = inner_expr.has_fvars();
         let hash = hash64!(crate::expr::SHIFT_HASH, inner, amount);
-        self.alloc_expr(Expr::Shift { hash, inner, amount, num_loose_bvars: nlbv + amount, has_fvars })
+        let struct_hash = inner_expr.get_struct_hash();
+        let bvar_mask = inner_expr.get_bvar_mask().rotate_left(amount as u32 % 64);
+        self.alloc_expr(Expr::Shift { hash, struct_hash, bvar_mask, inner, amount, num_loose_bvars: nlbv + amount, has_fvars })
     }
 
     /// Force a Shift node: eagerly apply the shift via full traversal.
@@ -649,6 +730,10 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
 
     /// Full shift traversal that never creates Shift nodes.
     pub(crate) fn force_shift_aux(&mut self, e: ExprPtr<'t>, amount: u16, cutoff: u16) -> ExprPtr<'t> {
+        stacker::maybe_grow(64 * 1024, 2 * 1024 * 1024, || self.force_shift_aux_inner(e, amount, cutoff))
+    }
+
+    fn force_shift_aux_inner(&mut self, e: ExprPtr<'t>, amount: u16, cutoff: u16) -> ExprPtr<'t> {
         if amount == 0 || self.num_loose_bvars(e) <= cutoff {
             return e
         }
@@ -850,7 +935,10 @@ pub struct NameCache<'p> {
 pub(crate) struct TcCache<'t> {
     pub(crate) infer_cache_check: UniqueHashMap<ExprPtr<'t>, ExprPtr<'t>>,
     pub(crate) infer_cache_no_check: UniqueHashMap<ExprPtr<'t>, ExprPtr<'t>>,
-    pub(crate) whnf_cache: UniqueHashMap<ExprPtr<'t>, ExprPtr<'t>>,
+    /// Shift-invariant WHNF cache: keyed by canonical hash (struct_hash, norm_mask),
+    /// stores (input_expr, result_expr, nl). On hit, verify with shift_eq, then
+    /// force_shift_aux(result, delta) where delta = query_nl - stored_nl.
+    pub(crate) whnf_cache: FxHashMap<(u64, u64), (ExprPtr<'t>, ExprPtr<'t>, u16)>,
     pub(crate) whnf_no_unfolding_cache: UniqueHashMap<ExprPtr<'t>, ExprPtr<'t>>,
     pub(crate) eq_cache: UnionFind<ExprPtr<'t>>,
     /// A cache of congruence failures during the lazy delta step procedure.
@@ -858,10 +946,9 @@ pub(crate) struct TcCache<'t> {
     /// Strong reduction is not used during type-checking, this is more of a library/inspection feature.
     pub(crate) strong_cache: UniqueHashMap<(ExprPtr<'t>, bool, bool), ExprPtr<'t>>,
     /// Scope-local infer cache for open expressions (with loose bvars).
-    /// Keyed by (ExprPtr, depth), entries are only valid when local_ctx matches.
-    /// Cleared on pop_local/restore_depth (going to a shallower depth invalidates).
-    /// NOT cleared on push_local (deeper entries are still valid since local_ctx is extended).
-    pub(crate) infer_open_cache: UniqueHashMap<ExprPtr<'t>, ExprPtr<'t>>,
+    /// Keyed by (ExprPtr, depth). An entry at depth d is valid at depth d
+    /// (the local_ctx[0..d] must match). NOT cleared on push/pop_local.
+    pub(crate) infer_open_cache: FxHashMap<(ExprPtr<'t>, u16), ExprPtr<'t>>,
 }
 
 impl<'t> TcCache<'t> {
@@ -869,12 +956,12 @@ impl<'t> TcCache<'t> {
         Self {
             infer_cache_check: new_unique_hash_map(),
             infer_cache_no_check: new_unique_hash_map(),
-            whnf_cache: new_unique_hash_map(),
+            whnf_cache: new_fx_hash_map(),
             whnf_no_unfolding_cache: new_unique_hash_map(),
             eq_cache: UnionFind::new(),
             failure_cache: new_fx_hash_set(),
             strong_cache: new_unique_hash_map(),
-            infer_open_cache: new_unique_hash_map(),
+            infer_open_cache: new_fx_hash_map(),
         }
     }
 

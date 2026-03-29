@@ -2,20 +2,31 @@ use nanoda_lib::util::Config;
 use std::error::Error;
 use std::path::Path;
 
-fn main() -> Result<(), MainError> {
+fn main() {
+    // Run on a thread with a large stack to avoid stack overflow on deep expressions (e.g. mathlib).
+    let builder = std::thread::Builder::new()
+        .name("main-worker".into())
+        .stack_size(nanoda_lib::STACK_SIZE);
+    let handler = builder.spawn(main_inner).unwrap();
+    handler.join().unwrap();
+}
+
+fn main_inner() {
     let mut args = std::env::args();
     let _ = args.next();
     let out = match args.next().as_ref() {
         None => Err(Box::from("This program expects a path to a configuration file.".to_string())),
-        Some(p) if p == "-h" || p == "--help" => return Ok(println!("{}", HELP_LONG)),
+        Some(p) if p == "-h" || p == "--help" => { println!("{}", HELP_LONG); return; },
         Some(p) => use_config(&Path::new(p)),
+    };
+    match out {
+        Ok(Some(msg)) => println!("{}", msg),
+        Ok(None) => {}
+        Err(e) => {
+            eprintln!("{}\n\n{}", e, HELP_SHORT);
+            std::process::exit(1);
+        }
     }
-    .map_err(|e| MainError(e))?;
-
-    if let Some(msg) = out {
-        println!("{}", msg);
-    }
-    Ok(())
 }
 
 // Returns an optional success message.

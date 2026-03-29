@@ -23,15 +23,21 @@ pub enum Expr<'a> {
     /// A string literal with a pointer to a utf-8 string.
     StringLit {
         hash: u64,
+        struct_hash: u64,
+        bvar_mask: u64,
         ptr: StringPtr<'a>,
     },
     /// A nat literal, holds a pointer to an arbitrary precision bignum.
     NatLit {
         hash: u64,
+        struct_hash: u64,
+        bvar_mask: u64,
         ptr: BigUintPtr<'a>,
     },
     Proj {
         hash: u64,
+        struct_hash: u64,
+        bvar_mask: u64,
         /// The name of the structure being projected. E.g. `Prod` if this is
         /// projection 0 of `Prod.mk ..`
         ty_name: NamePtr<'a>,
@@ -46,19 +52,27 @@ pub enum Expr<'a> {
     /// A bound variable represented by a deBruijn index.
     Var {
         hash: u64,
+        struct_hash: u64,
+        bvar_mask: u64,
         dbj_idx: u16,
     },
     Sort {
         hash: u64,
+        struct_hash: u64,
+        bvar_mask: u64,
         level: LevelPtr<'a>,
     },
     Const {
         hash: u64,
+        struct_hash: u64,
+        bvar_mask: u64,
         name: NamePtr<'a>,
         levels: LevelsPtr<'a>,
     },
     App {
         hash: u64,
+        struct_hash: u64,
+        bvar_mask: u64,
         fun: ExprPtr<'a>,
         arg: ExprPtr<'a>,
         num_loose_bvars: u16,
@@ -66,6 +80,8 @@ pub enum Expr<'a> {
     },
     Pi {
         hash: u64,
+        struct_hash: u64,
+        bvar_mask: u64,
         binder_name: NamePtr<'a>,
         binder_style: BinderStyle,
         binder_type: ExprPtr<'a>,
@@ -75,6 +91,8 @@ pub enum Expr<'a> {
     },
     Lambda {
         hash: u64,
+        struct_hash: u64,
+        bvar_mask: u64,
         binder_name: NamePtr<'a>,
         binder_style: BinderStyle,
         binder_type: ExprPtr<'a>,
@@ -84,6 +102,8 @@ pub enum Expr<'a> {
     },
     Let {
         hash: u64,
+        struct_hash: u64,
+        bvar_mask: u64,
         binder_name: NamePtr<'a>,
         binder_type: ExprPtr<'a>,
         val: ExprPtr<'a>,
@@ -95,6 +115,8 @@ pub enum Expr<'a> {
     /// A free variable with binder information and a unique identifier.
     Local {
         hash: u64,
+        struct_hash: u64,
+        bvar_mask: u64,
         binder_name: NamePtr<'a>,
         binder_style: BinderStyle,
         binder_type: ExprPtr<'a>,
@@ -105,6 +127,8 @@ pub enum Expr<'a> {
     /// Elided when inner has no free bvars.
     Shift {
         hash: u64,
+        struct_hash: u64,
+        bvar_mask: u64,
         inner: ExprPtr<'a>,
         amount: u16,
         num_loose_bvars: u16,
@@ -116,6 +140,38 @@ pub enum Expr<'a> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum FVarId {
     Unique(u32),
+}
+
+/// Normalize a bvar_mask by anchoring at num_loose_bvars.
+/// Shift-invariant: shifting by k rotates mask left by k and adds k to nl, cancelling.
+#[inline]
+pub(crate) fn norm_mask(mask: u64, nl: u16) -> u64 {
+    if mask == 0 { 0 } else { mask.rotate_right(nl as u32 % 64) }
+}
+
+/// "Unbind" a body's bvar_mask when constructing a binder (Lambda/Pi/Let).
+/// Clears bit 0 (the bound variable's bit) before rotating, so that bound
+/// variables don't contribute "ghost bits" to the canonical hash. This makes
+/// norm_mask exactly shift-invariant for binder depths < 64. At depth >= 64,
+/// a free bvar(64) aliases with bvar(0) and gets incorrectly cleared, but
+/// this only causes hash collisions (caught by verify), not correctness issues.
+#[inline]
+pub(crate) fn unbind_mask(mask: u64) -> u64 {
+    (mask & !1).rotate_right(1)
+}
+
+/// Compute a shift-invariant delta between two children for mixing into struct_hash.
+/// Returns (lb_delta, nl_delta). Both are 0 when either child is closed (mask == 0),
+/// since shifting a closed expression doesn't change its nl/lb, breaking invariance.
+#[inline]
+pub(crate) fn shift_inv_deltas(mask_a: u64, nl_a: u16, mask_b: u64, nl_b: u16) -> (i32, i32) {
+    if mask_a == 0 || mask_b == 0 {
+        (0, 0)
+    } else {
+        let lb_a = mask_a.trailing_zeros() as i32;
+        let lb_b = mask_b.trailing_zeros() as i32;
+        (lb_a - lb_b, nl_a as i32 - nl_b as i32)
+    }
 }
 
 impl<'a> Expr<'a> {
@@ -134,6 +190,46 @@ impl<'a> Expr<'a> {
             | Proj { hash, .. }
             | Shift { hash, .. } => *hash,
         }
+    }
+
+    pub(crate) fn get_struct_hash(&self) -> u64 {
+        match self {
+            Var { struct_hash, .. }
+            | Sort { struct_hash, .. }
+            | Const { struct_hash, .. }
+            | App { struct_hash, .. }
+            | Pi { struct_hash, .. }
+            | Lambda { struct_hash, .. }
+            | Let { struct_hash, .. }
+            | Local { struct_hash, .. }
+            | StringLit { struct_hash, .. }
+            | NatLit { struct_hash, .. }
+            | Proj { struct_hash, .. }
+            | Shift { struct_hash, .. } => *struct_hash,
+        }
+    }
+
+    pub(crate) fn get_bvar_mask(&self) -> u64 {
+        match self {
+            Var { bvar_mask, .. }
+            | Sort { bvar_mask, .. }
+            | Const { bvar_mask, .. }
+            | App { bvar_mask, .. }
+            | Pi { bvar_mask, .. }
+            | Lambda { bvar_mask, .. }
+            | Let { bvar_mask, .. }
+            | Local { bvar_mask, .. }
+            | StringLit { bvar_mask, .. }
+            | NatLit { bvar_mask, .. }
+            | Proj { bvar_mask, .. }
+            | Shift { bvar_mask, .. } => *bvar_mask,
+        }
+    }
+
+    /// Compute the shift-invariant canonical hash for cache keys.
+    /// Returns (struct_hash, normalized_bvar_mask).
+    pub(crate) fn canonical_hash(&self) -> (u64, u64) {
+        (self.get_struct_hash(), norm_mask(self.get_bvar_mask(), self.num_loose_bvars()))
     }
 }
 impl<'a> std::hash::Hash for Expr<'a> {
@@ -810,6 +906,47 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
     pub(crate) fn num_loose_bvars(&self, e: ExprPtr<'t>) -> u16 { self.read_expr(e).num_loose_bvars() }
 
     pub(crate) fn has_fvars(&self, e: ExprPtr<'t>) -> bool { self.read_expr(e).has_fvars() }
+
+    pub(crate) fn struct_hash(&self, e: ExprPtr<'t>) -> u64 { self.read_expr(e).get_struct_hash() }
+
+    pub(crate) fn bvar_mask(&self, e: ExprPtr<'t>) -> u64 { self.read_expr(e).get_bvar_mask() }
+
+    pub(crate) fn canonical_hash(&self, e: ExprPtr<'t>) -> (u64, u64) { self.read_expr(e).canonical_hash() }
+
+    /// Check if `b` equals `shift(a, delta)` without allocating new expression nodes.
+    /// Used to verify shift-invariant cache hits.
+    pub(crate) fn shift_eq(&self, a: ExprPtr<'t>, b: ExprPtr<'t>, delta: u16) -> bool {
+        use crate::expr::Expr::*;
+        if delta == 0 { return a == b; }
+        if self.num_loose_bvars(a) == 0 { return a == b; }
+        match (self.read_expr(a), self.read_expr(b)) {
+            (Var { dbj_idx: i, .. }, Var { dbj_idx: j, .. }) => j == i + delta,
+            (App { fun: f1, arg: a1, .. }, App { fun: f2, arg: a2, .. }) =>
+                self.shift_eq(f1, f2, delta) && self.shift_eq(a1, a2, delta),
+            (Pi { binder_name: n1, binder_style: s1, binder_type: t1, body: b1, .. },
+             Pi { binder_name: n2, binder_style: s2, binder_type: t2, body: b2, .. }) =>
+                n1 == n2 && s1 == s2 && self.shift_eq(t1, t2, delta) && self.shift_eq(b1, b2, delta),
+            (Lambda { binder_name: n1, binder_style: s1, binder_type: t1, body: b1, .. },
+             Lambda { binder_name: n2, binder_style: s2, binder_type: t2, body: b2, .. }) =>
+                n1 == n2 && s1 == s2 && self.shift_eq(t1, t2, delta) && self.shift_eq(b1, b2, delta),
+            (Let { binder_name: n1, binder_type: t1, val: v1, body: b1, nondep: nd1, .. },
+             Let { binder_name: n2, binder_type: t2, val: v2, body: b2, nondep: nd2, .. }) =>
+                n1 == n2 && nd1 == nd2 && self.shift_eq(t1, t2, delta)
+                && self.shift_eq(v1, v2, delta) && self.shift_eq(b1, b2, delta),
+            (Proj { ty_name: tn1, idx: i1, structure: s1, .. },
+             Proj { ty_name: tn2, idx: i2, structure: s2, .. }) =>
+                tn1 == tn2 && i1 == i2 && self.shift_eq(s1, s2, delta),
+            (Sort { level: l1, .. }, Sort { level: l2, .. }) => l1 == l2,
+            (Const { name: n1, levels: l1, .. }, Const { name: n2, levels: l2, .. }) =>
+                n1 == n2 && l1 == l2,
+            (NatLit { ptr: p1, .. }, NatLit { ptr: p2, .. }) => p1 == p2,
+            (StringLit { ptr: p1, .. }, StringLit { ptr: p2, .. }) => p1 == p2,
+            (Shift { inner, amount, .. }, _) => self.shift_eq(inner, b, delta + amount),
+            (_, Shift { inner, amount, .. }) if amount <= delta =>
+                self.shift_eq(a, inner, delta - amount),
+            _ => false,
+        }
+    }
 }
 
 impl<'t> Expr<'t> {

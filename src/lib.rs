@@ -20,4 +20,4 @@ pub mod union_find;
 pub mod unique_hasher;
 pub mod util;
 
-pub(crate) const STACK_SIZE: usize = 16_777_216;
+pub const STACK_SIZE: usize = 256_000_000;
