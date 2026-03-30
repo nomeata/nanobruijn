@@ -285,14 +285,10 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
             *cached
         } else {
             let n_substs = substs.len() as u16;
-            let calcd = match self.read_expr(e) {
+            let calcd = match self.view_expr(e) {
                 // These expressions should be unreachable since they return `n_loose_bvars() == 0`
                 Sort { .. } | Const { .. } | Local { .. } | StringLit { .. } | NatLit { .. } => panic!(),
-                Shift { inner, amount, cutoff, .. } => {
-                    // Force the shift, then substitute on the result.
-                    let forced = self.force_shift_aux(inner, amount, cutoff);
-                    self.inst_aux(forced, substs, offset, shift_down)
-                }
+                Shift { .. } => unreachable!("view_expr never returns Shift"),
                 Var { dbj_idx, .. } => {
                     debug_assert!(dbj_idx >= offset);
                     let rel_idx = dbj_idx - offset;
@@ -366,13 +362,9 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         if let Some(&cached) = self.expr_cache.shift_cache.get(&(e, amount, cutoff)) {
             return cached;
         }
-        let calcd = match self.read_expr(e) {
+        let calcd = match self.view_expr(e) {
             Sort { .. } | Const { .. } | Local { .. } | StringLit { .. } | NatLit { .. } => panic!(),
-            Shift { inner, amount: prev, cutoff: prev_cutoff, .. } => {
-                // Force the inner shift first, then apply the outer shift.
-                let forced = self.force_shift_aux(inner, prev, prev_cutoff);
-                self.shift_expr_aux(forced, amount, cutoff)
-            }
+            Shift { .. } => unreachable!("view_expr never returns Shift"),
             Var { dbj_idx, .. } => {
                 if dbj_idx >= cutoff {
                     self.mk_var(dbj_idx + amount)
