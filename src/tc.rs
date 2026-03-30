@@ -838,7 +838,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         }
         if total_shift > 0 {
             let r = self.whnf(e);
-            return self.ctx.force_shift_aux(r, total_shift, 0);
+            return self.ctx.force_shift_shallow(r, total_shift, 0);
         }
         // Shift-invariant cache: keyed by canonical hash.
         // On hit, verify structural equality up to shift, then apply delta.
@@ -852,7 +852,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             if e_bvar_ub >= stored_bvar_ub {
                 let delta = e_bvar_ub - stored_bvar_ub;
                 if delta > 0 && self.ctx.shift_eq(stored_input, e, delta) {
-                    return self.ctx.force_shift_aux(stored_result, delta, 0);
+                    return self.ctx.force_shift_shallow(stored_result, delta, 0);
                 }
             }
         }
