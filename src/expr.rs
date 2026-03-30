@@ -558,26 +558,65 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
 
     /// From `f a_0 .. a_N`, return `f`
     pub fn unfold_apps_fun(&mut self, mut e: ExprPtr<'t>) -> ExprPtr<'t> {
+        let mut pending_shift: u16 = 0;
         loop {
-            e = self.force_shift(e);
             match self.read_expr(e) {
+                Shift { inner, amount, cutoff: 0, .. } => {
+                    pending_shift += amount;
+                    e = inner;
+                }
+                Shift { inner, amount, cutoff, .. } => {
+                    e = self.force_shift_aux(inner, amount, cutoff);
+                    // force_shift_aux result is Shift-free; accumulated shift still applies
+                    if pending_shift > 0 {
+                        e = self.force_shift_aux(e, pending_shift, 0);
+                        pending_shift = 0;
+                    }
+                }
                 App { fun, .. } => e = fun,
-                _ => return e,
+                _ => {
+                    if pending_shift > 0 {
+                        e = self.force_shift_aux(e, pending_shift, 0);
+                    }
+                    return e;
+                }
             }
         }
     }
 
     /// From `f a_0 .. a_N`, return `(f, [a_0, ..a_N])`
+    /// Accumulates Shift through the App spine to avoid creating intermediate shifted App nodes.
     pub fn unfold_apps(&mut self, mut e: ExprPtr<'t>) -> (ExprPtr<'t>, Vec<ExprPtr<'t>>) {
         let mut args = Vec::new();
+        let mut pending_shift: u16 = 0;
         loop {
-            e = self.force_shift(e);
             match self.read_expr(e) {
+                Shift { inner, amount, cutoff: 0, .. } => {
+                    pending_shift += amount;
+                    e = inner;
+                }
+                Shift { inner, amount, cutoff, .. } => {
+                    e = self.force_shift_aux(inner, amount, cutoff);
+                    if pending_shift > 0 {
+                        e = self.force_shift_aux(e, pending_shift, 0);
+                        pending_shift = 0;
+                    }
+                }
                 App { fun, arg, .. } => {
                     e = fun;
+                    let arg = if pending_shift > 0 {
+                        self.force_shift_aux(arg, pending_shift, 0)
+                    } else {
+                        arg
+                    };
                     args.push(arg);
                 },
-                _ => break
+                _ => {
+                    if pending_shift > 0 {
+                        e = self.force_shift_aux(e, pending_shift, 0);
+                    }
+                    break;
+                }
             }
         }
         args.reverse();
@@ -605,14 +644,35 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
 
     pub(crate) fn unfold_apps_stack(&mut self, mut e: ExprPtr<'t>) -> (ExprPtr<'t>, Vec<ExprPtr<'t>>) {
         let mut args = Vec::new();
+        let mut pending_shift: u16 = 0;
         loop {
-            e = self.force_shift(e);
             match self.read_expr(e) {
+                Shift { inner, amount, cutoff: 0, .. } => {
+                    pending_shift += amount;
+                    e = inner;
+                }
+                Shift { inner, amount, cutoff, .. } => {
+                    e = self.force_shift_aux(inner, amount, cutoff);
+                    if pending_shift > 0 {
+                        e = self.force_shift_aux(e, pending_shift, 0);
+                        pending_shift = 0;
+                    }
+                }
                 App { fun, arg, .. } => {
+                    let arg = if pending_shift > 0 {
+                        self.force_shift_aux(arg, pending_shift, 0)
+                    } else {
+                        arg
+                    };
                     args.push(arg);
                     e = fun;
                 }
-                _ => break
+                _ => {
+                    if pending_shift > 0 {
+                        e = self.force_shift_aux(e, pending_shift, 0);
+                    }
+                    break;
+                }
             }
         }
         (e, args)
