@@ -42,12 +42,21 @@ This is exactly a deferred `force_shift_aux(inner, amount, cutoff)`.
 - whnf peels cutoff=0 Shifts iteratively; forces cutoff>0 Shifts.
 - `shift_eq` handles cutoff=0 Shift nodes; returns false for cutoff>0 (conservative).
 
-**Current state**: whnf uses `force_shift_shallow` on results (both direct and cache-hit paths),
-so whnf returns expressions with the top-level constructor preserved (Pi/Lambda/App/etc.) but
-children may be lazy Shift nodes. `unfold_apps` accumulates cutoff=0 shifts through the App
-spine and forces each component individually, avoiding intermediate shifted App allocations.
-All other consumers still force Shift fully. Making unfold_apps return Shift-wrapped args
-(instead of forcing them) breaks downstream code (infer_sort_of, Proj reduction, etc.).
+**Current state**: whnf uses `force_shift_shallow` on results from the direct Shift-peeling path.
+The shift-invariant whnf cache uses `force_shift_aux` (full traversal) on hits — `force_shift_shallow`
+here causes embedded Shift wrappers in whnf results that break downstream consumers (def_eq,
+infer_proj, etc.).
+
+`unfold_apps` returns lazy (Shift-wrapped) args: accumulates cutoff=0 shifts through the App
+spine and wraps each arg with `mk_shift` instead of `force_shift_aux`. O(n_args) instead of
+O(n_args × expr_size). Two companion fixes ensure correctness:
+1. `inst_aux` forces substitution values with `force_shift` at offset=0, preventing cascading
+   Shift wrappers in inst_beta results.
+2. The whnf shift-invariant cache uses `force_shift_aux` (not `force_shift_shallow`) to
+   produce fully-forced results that downstream code can safely consume.
+
+`unfold_apps_fun` and `unfold_apps_stack` still force shifts (simpler, and the perf benefit
+is smaller since they don't create intermediate expressions).
 
 ### Shift-invariant hashing and caching
 
@@ -99,7 +108,7 @@ then serves as the base for future shifted lookups.
 
 | Benchmark | nanoda (locally nameless) | lean-slop-kernel |
 |-----------|--------------------------|------------------|
-| Init (54k decls, 310MB) | 21s | ~29s |
+| Init (54k decls, 310MB) | 21s | ~27s |
 | app-lam N=4000 | 8.3s | 10ms (830x faster) |
 | Mathlib (630k decls, 4.9GB) | works (<9GB) | OOM-killed at ~120k decls |
 
@@ -109,12 +118,10 @@ the full expression tree creating new nodes.
 
 ## TODO
 
-- **Make unfold_apps args lazy (Shift-wrapped)**: Currently unfold_apps forces each arg
-  individually. Making args Shift-wrapped (lazy) breaks downstream: infer_sort_of gets
-  shifted Var as binder_type, Proj reduction can't find constructor fields. The blocker is
-  that too many consumers pattern-match on args or pass them through inst_beta (offset=0
-  returns subst values as-is, propagating Shift wrappers). Would need systematic audit of
-  all unfold_apps consumers to handle Shift-wrapped args.
+- **Make whnf cache use force_shift_shallow again**: Currently uses force_shift_aux (full
+  traversal) because embedded Shift wrappers from force_shift_shallow break downstream
+  consumers (def_eq, infer_proj). To fix: audit def_eq and infer_proj to handle Shift-
+  wrapped whnf results, then switch back to force_shift_shallow for the cache hit path.
 
 - **Propagate Shift laziness into def_eq**: def_eq decomposes Pi/Lambda/App and compares
   children recursively. With whnf returning shallow-shifted results, children may be Shift
@@ -183,11 +190,20 @@ the full expression tree creating new nodes.
   Children flow into infer/def_eq/inst_beta which can handle Shift nodes.
   However, making unfold_apps return Shift-wrapped args still breaks (see TODO).
 
-- **Unfold_apps with lazy (Shift-wrapped) args breaks infer_sort_of**: When unfold_apps
-  returns Shift-wrapped args, those propagate through inst_beta (offset=0 returns subst
-  values as-is), into binder_type positions of Pi/Lambda, where infer_sort_of expects
-  a type but gets a shifted term. Specific failure: `Lean.Grind.Ring.intCast_nat_sub`,
-  binder_type=$5 (Var(5) shifted from Var(2)) had type Nat instead of Sort.
+- **Lazy unfold_apps requires two companion fixes**: (1) `inst_aux` must `force_shift` subst
+  values at offset=0, otherwise Shift wrappers propagate through inst_beta creating expressions
+  with embedded Shifts that cascade through the system. (2) The whnf shift-invariant cache must
+  use `force_shift_aux` (full traversal) not `force_shift_shallow`, because Shift-wrapped whnf
+  results produce structurally different ExprPtrs that change cache behavior in def_eq and
+  infer_proj, eventually causing type errors. With both fixes, lazy unfold_apps works correctly.
+
+- **shift_eq must track binder depth**: The old shift_eq checked `j == i + delta` for all Var
+  nodes, including bound vars inside Pi/Lambda bodies. This is wrong: bound Var(0) in a Pi body
+  should compare as 0 == 0, not 0 == 0+delta. Fixed by adding a `cutoff` parameter that
+  increments under binders. The old bug was masked because expressions rarely had Shift wrappers
+  inside binder bodies (no force_shift_shallow on whnf results). The Shift handling in shift_eq
+  is restricted to cutoff=0 (composition of cutoff=0 Shifts is additive; cutoff>0 requires
+  conservative fallback to false).
 
 - **shift_eq in def_eq_quick_check works**: Adding `shift_eq(inner, other_side, amount)` for
   single-sided Shift comparisons is cheap (non-allocating) and correct. This makes def_eq

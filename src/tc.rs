@@ -304,10 +304,13 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
     }
 
     pub(crate) fn infer_sort_of(&mut self, e: ExprPtr<'t>, flag: InferFlag) -> LevelPtr<'t> {
-        let whnfd = self.infer_then_whnf(e, flag);
+        let ty = self.infer(e, flag);
+        let whnfd = self.whnf(ty);
         match self.ctx.read_expr(whnfd) {
             Sort { level, .. } => level,
-            _ => panic!("infer_sort_of could not infer a sort"),
+            _ => {
+                panic!("infer_sort_of: expected Sort, got {:?} from e={:?}, infer={:?}, depth={}", self.ctx.debug_print(whnfd), self.ctx.debug_print(e), self.ctx.debug_print(ty), self.local_ctx.len());
+            }
         }
     }
 
@@ -852,7 +855,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             if e_bvar_ub >= stored_bvar_ub {
                 let delta = e_bvar_ub - stored_bvar_ub;
                 if delta > 0 && self.ctx.shift_eq(stored_input, e, delta) {
-                    return self.ctx.force_shift_shallow(stored_result, delta, 0);
+                    return self.ctx.force_shift_aux(stored_result, delta, 0);
                 }
             }
         }

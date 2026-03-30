@@ -300,9 +300,10 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
                     if rel_idx < n_substs {
                         // Within substitution range: replace with subst (in reverse order).
                         // Shift the value up by `offset` to account for binders we traversed.
-                        let val = substs[substs.len() - 1 - rel_idx as usize];
+                        // Force any Shift wrappers so inst results are structurally canonical
+                        // (avoids cascading Shift wrappers from lazy unfold_apps).
+                        let val = self.force_shift(substs[substs.len() - 1 - rel_idx as usize]);
                         if offset > 0 {
-                            // Use full traversal to avoid creating Shift nodes in inst results
                             self.force_shift_aux(val, offset, 0)
                         } else {
                             val
@@ -558,34 +559,17 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
 
     /// From `f a_0 .. a_N`, return `f`
     pub fn unfold_apps_fun(&mut self, mut e: ExprPtr<'t>) -> ExprPtr<'t> {
-        let mut pending_shift: u16 = 0;
         loop {
+            e = self.force_shift(e);
             match self.read_expr(e) {
-                Shift { inner, amount, cutoff: 0, .. } => {
-                    pending_shift += amount;
-                    e = inner;
-                }
-                Shift { inner, amount, cutoff, .. } => {
-                    e = self.force_shift_aux(inner, amount, cutoff);
-                    // force_shift_aux result is Shift-free; accumulated shift still applies
-                    if pending_shift > 0 {
-                        e = self.force_shift_aux(e, pending_shift, 0);
-                        pending_shift = 0;
-                    }
-                }
                 App { fun, .. } => e = fun,
-                _ => {
-                    if pending_shift > 0 {
-                        e = self.force_shift_aux(e, pending_shift, 0);
-                    }
-                    return e;
-                }
+                _ => return e,
             }
         }
     }
 
     /// From `f a_0 .. a_N`, return `(f, [a_0, ..a_N])`
-    /// Accumulates Shift through the App spine to avoid creating intermediate shifted App nodes.
+    /// Accumulates Shift through the App spine; returns lazy (Shift-wrapped) args and fun.
     pub fn unfold_apps(&mut self, mut e: ExprPtr<'t>) -> (ExprPtr<'t>, Vec<ExprPtr<'t>>) {
         let mut args = Vec::new();
         let mut pending_shift: u16 = 0;
@@ -596,16 +580,19 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
                     e = inner;
                 }
                 Shift { inner, amount, cutoff, .. } => {
-                    e = self.force_shift_aux(inner, amount, cutoff);
+                    // Force the cutoff>0 shift, then apply accumulated pending shift
+                    let forced = self.force_shift_aux(inner, amount, cutoff);
                     if pending_shift > 0 {
-                        e = self.force_shift_aux(e, pending_shift, 0);
+                        e = self.mk_shift(forced, pending_shift);
                         pending_shift = 0;
+                    } else {
+                        e = forced;
                     }
                 }
                 App { fun, arg, .. } => {
                     e = fun;
                     let arg = if pending_shift > 0 {
-                        self.force_shift_aux(arg, pending_shift, 0)
+                        self.mk_shift(arg, pending_shift)
                     } else {
                         arg
                     };
@@ -613,7 +600,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
                 },
                 _ => {
                     if pending_shift > 0 {
-                        e = self.force_shift_aux(e, pending_shift, 0);
+                        e = self.mk_shift(e, pending_shift);
                     }
                     break;
                 }
@@ -622,7 +609,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         args.reverse();
         (e, args)
     }
-    
+
     /// If this is a const application, return (Const {..}, name, levels, args)
     pub fn unfold_const_apps(
         &mut self,
@@ -644,35 +631,14 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
 
     pub(crate) fn unfold_apps_stack(&mut self, mut e: ExprPtr<'t>) -> (ExprPtr<'t>, Vec<ExprPtr<'t>>) {
         let mut args = Vec::new();
-        let mut pending_shift: u16 = 0;
         loop {
+            e = self.force_shift(e);
             match self.read_expr(e) {
-                Shift { inner, amount, cutoff: 0, .. } => {
-                    pending_shift += amount;
-                    e = inner;
-                }
-                Shift { inner, amount, cutoff, .. } => {
-                    e = self.force_shift_aux(inner, amount, cutoff);
-                    if pending_shift > 0 {
-                        e = self.force_shift_aux(e, pending_shift, 0);
-                        pending_shift = 0;
-                    }
-                }
                 App { fun, arg, .. } => {
-                    let arg = if pending_shift > 0 {
-                        self.force_shift_aux(arg, pending_shift, 0)
-                    } else {
-                        arg
-                    };
                     args.push(arg);
                     e = fun;
                 }
-                _ => {
-                    if pending_shift > 0 {
-                        e = self.force_shift_aux(e, pending_shift, 0);
-                    }
-                    break;
-                }
+                _ => break
             }
         }
         (e, args)
@@ -972,37 +938,64 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
 
     pub(crate) fn fvar_list_of(&self, e: ExprPtr<'t>) -> FVarList<'t> { self.read_expr(e).get_fvar_list() }
 
-    /// Check if `b` equals `shift(a, delta)` without allocating new expression nodes.
+    /// Check if `b` equals `force_shift_aux(a, delta, cutoff)` without allocating.
     /// Used to verify shift-invariant cache hits.
+    /// `cutoff` tracks binder depth: Var indices < cutoff are bound and should NOT be shifted.
     pub(crate) fn shift_eq(&self, a: ExprPtr<'t>, b: ExprPtr<'t>, delta: u16) -> bool {
+        let result = self.shift_eq_aux(a, b, delta, 0);
+        if result {
+            // Verify: force_shift_aux(a, delta, 0) should equal b
+            // (Can't call force_shift_aux here since we're &self, not &mut self)
+        }
+        result
+    }
+
+    fn shift_eq_aux(&self, a: ExprPtr<'t>, b: ExprPtr<'t>, delta: u16, cutoff: u16) -> bool {
         use crate::expr::Expr::*;
         if delta == 0 { return a == b; }
-        if self.num_loose_bvars(a) == 0 { return a == b; }
+        if self.num_loose_bvars(a) <= cutoff {
+            return a == b;
+        }
+        // Also check num_loose_bvars(b): b should have indices shifted by delta
+        // If b's nlbv is unexpectedly low, something might be wrong
+        if self.num_loose_bvars(b) <= cutoff {
+            // b has no free vars above cutoff, but a does — they can't be shifts of each other
+            return false;
+        }
         match (self.read_expr(a), self.read_expr(b)) {
-            (Var { dbj_idx: i, .. }, Var { dbj_idx: j, .. }) => j == i + delta,
+            (Var { dbj_idx: i, .. }, Var { dbj_idx: j, .. }) => {
+                if i >= cutoff {
+                    j == i + delta
+                } else {
+                    j == i  // bound var: not shifted
+                }
+            }
             (App { fun: f1, arg: a1, .. }, App { fun: f2, arg: a2, .. }) =>
-                self.shift_eq(f1, f2, delta) && self.shift_eq(a1, a2, delta),
+                self.shift_eq_aux(f1, f2, delta, cutoff) && self.shift_eq_aux(a1, a2, delta, cutoff),
             (Pi { binder_name: n1, binder_style: s1, binder_type: t1, body: b1, .. },
              Pi { binder_name: n2, binder_style: s2, binder_type: t2, body: b2, .. }) =>
-                n1 == n2 && s1 == s2 && self.shift_eq(t1, t2, delta) && self.shift_eq(b1, b2, delta),
+                n1 == n2 && s1 == s2 && self.shift_eq_aux(t1, t2, delta, cutoff)
+                && self.shift_eq_aux(b1, b2, delta, cutoff + 1),
             (Lambda { binder_name: n1, binder_style: s1, binder_type: t1, body: b1, .. },
              Lambda { binder_name: n2, binder_style: s2, binder_type: t2, body: b2, .. }) =>
-                n1 == n2 && s1 == s2 && self.shift_eq(t1, t2, delta) && self.shift_eq(b1, b2, delta),
+                n1 == n2 && s1 == s2 && self.shift_eq_aux(t1, t2, delta, cutoff)
+                && self.shift_eq_aux(b1, b2, delta, cutoff + 1),
             (Let { binder_name: n1, binder_type: t1, val: v1, body: b1, nondep: nd1, .. },
              Let { binder_name: n2, binder_type: t2, val: v2, body: b2, nondep: nd2, .. }) =>
-                n1 == n2 && nd1 == nd2 && self.shift_eq(t1, t2, delta)
-                && self.shift_eq(v1, v2, delta) && self.shift_eq(b1, b2, delta),
+                n1 == n2 && nd1 == nd2 && self.shift_eq_aux(t1, t2, delta, cutoff)
+                && self.shift_eq_aux(v1, v2, delta, cutoff) && self.shift_eq_aux(b1, b2, delta, cutoff + 1),
             (Proj { ty_name: tn1, idx: i1, structure: s1, .. },
              Proj { ty_name: tn2, idx: i2, structure: s2, .. }) =>
-                tn1 == tn2 && i1 == i2 && self.shift_eq(s1, s2, delta),
+                tn1 == tn2 && i1 == i2 && self.shift_eq_aux(s1, s2, delta, cutoff),
             (Sort { level: l1, .. }, Sort { level: l2, .. }) => l1 == l2,
             (Const { name: n1, levels: l1, .. }, Const { name: n2, levels: l2, .. }) =>
                 n1 == n2 && l1 == l2,
             (NatLit { ptr: p1, .. }, NatLit { ptr: p2, .. }) => p1 == p2,
             (StringLit { ptr: p1, .. }, StringLit { ptr: p2, .. }) => p1 == p2,
-            (Shift { inner, amount, cutoff: 0, .. }, _) => self.shift_eq(inner, b, delta + amount),
-            (_, Shift { inner, amount, cutoff: 0, .. }) if amount <= delta =>
-                self.shift_eq(a, inner, delta - amount),
+            (Shift { inner, amount, cutoff: 0, .. }, _) if cutoff == 0 =>
+                self.shift_eq_aux(inner, b, delta + amount, 0),
+            (_, Shift { inner, amount, cutoff: 0, .. }) if cutoff == 0 && amount <= delta =>
+                self.shift_eq_aux(a, inner, delta - amount, 0),
             _ => false,
         }
     }
