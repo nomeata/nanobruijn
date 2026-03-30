@@ -64,9 +64,8 @@ traversal), then apply delta via `force_shift_aux`.
 ## Results
 
 ### Correctness
-- Passes app-lam, dag-app-binder, init arena tests
-- Pre-existing failures on constlevels, level-imax-leq, level-imax-normalization
-  (not caused by our changes — also fail on baseline)
+- Passes all arena tests: app-lam, dag-app-binder, init (accept);
+  constlevels, level-imax-leq, level-imax-normalization (correctly rejected)
 
 ### Performance
 
@@ -95,9 +94,6 @@ the full expression tree creating new nodes.
   (interaction with eq_cache/failure_cache/proof_irrel_eq). Needs careful
   investigation of def_eq's full control flow with inner Shift nodes.
   See `force_shift_shallow` in util.rs for the one-level version and detailed notes.
-
-- **Fix pre-existing arena test failures**: constlevels, level-imax-leq,
-  level-imax-normalization fail on baseline too. Investigate.
 
 - **Fix mathlib OOM**: instrument memory per-declaration, find what's blowing up;
   consider periodic cache eviction or more compact expression representation
