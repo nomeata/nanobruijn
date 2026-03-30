@@ -826,6 +826,10 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         if nlbv <= cutoff {
             return inner;
         }
+        // Normalize cutoff to 0 when all free vars are >= cutoff.
+        // This enables more Shift collapsing and faster handling in whnf/shift_eq.
+        let inner_fvl = inner_expr.get_fvar_list();
+        let cutoff = if cutoff > 0 && self.fvar_lb(inner_fvl) >= cutoff { 0 } else { cutoff };
         // Collapse nested shifts when cutoffs match: Shift(Shift(e, j, c), k, c) -> Shift(e, j+k, c)
         if let Expr::Shift { inner: inner2, amount: prev, cutoff: prev_cutoff, .. } = inner_expr {
             if prev_cutoff == cutoff {
@@ -841,7 +845,6 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         let has_fvars = inner_expr.has_fvars();
         let hash = hash64!(crate::expr::SHIFT_HASH, inner, amount, cutoff);
         let struct_hash = inner_expr.get_struct_hash();
-        let inner_fvl = inner_expr.get_fvar_list();
         let fvar_list = self.fvar_shift_cutoff(inner_fvl, amount, cutoff);
         self.alloc_expr(Expr::Shift { hash, struct_hash, fvar_list, inner, amount, cutoff, num_loose_bvars: nlbv + amount, has_fvars })
     }
