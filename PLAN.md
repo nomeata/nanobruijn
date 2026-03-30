@@ -60,10 +60,15 @@ Canonical hash = `(struct_hash, normalized FVarList hash)`.
 traversal), then apply delta via `force_shift_aux`.
 
 **Infer cache (open expressions)**: organized as a stack of maps indexed by
-`canonical_depth = depth - fvar_lb` (the shallowest context entry the expression depends
+`bucket_idx = depth - 1 - fvar_lb` (the shallowest context entry the expression depends
 on). Each map keys by canonical hash → (stored_input, stored_result, stored_depth).
 On hit, verify with `shift_eq`, apply delta via `mk_shift`. Stack push/pop follows
 `push_local`/`pop_local` for O(1) eviction (replaces O(n) `retain` scan).
+Entries in shallow buckets survive push/pop of deeper context entries (correct, since
+they only depend on the unchanged shallow context). If an entry was stored at a deeper
+depth than the current query, we cannot reuse it (would need an "unshift"/shift-down
+operation we don't have); instead we recompute and store at the lower depth, which
+then serves as the base for future shifted lookups.
 
 ### Infrastructure
 
