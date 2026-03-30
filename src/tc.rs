@@ -3,8 +3,8 @@ use crate::env::{ConstructorData, Declar, DeclarInfo, Env, InductiveData, RecRul
 use crate::expr::Expr;
 use crate::level::Level;
 use crate::util::{
-    nat_div, nat_mod, nat_sub, nat_gcd, nat_land, nat_lor, 
-    nat_xor, nat_shr, nat_shl, ExportFile, ExprPtr, LevelPtr, 
+    nat_div, nat_mod, nat_sub, nat_gcd, nat_land, nat_lor,
+    nat_xor, nat_shr, nat_shl, new_fx_hash_map, ExportFile, ExprPtr, LevelPtr,
     LevelsPtr, NamePtr, TcCache, TcCtx, StringPtr
 };
 use std::error::Error;
@@ -181,23 +181,20 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
     /// Push a binder type onto the local context (entering a binder).
     fn push_local(&mut self, ty: ExprPtr<'t>) {
         self.local_ctx.push(ty);
-        // No need to clear infer_open_cache: entries are keyed by (ExprPtr, depth),
-        // so stale entries from shallower depths won't be returned at the new depth.
+        self.tc_cache.infer_open_cache.push(new_fx_hash_map());
     }
 
     /// Pop a binder type from the local context (exiting a binder).
     fn pop_local(&mut self) {
-        let popped_depth = self.local_ctx.len() as u16;
         self.local_ctx.pop().expect("pop_local: empty context");
-        self.tc_cache.infer_open_cache.retain(|&(_, d), _| d < popped_depth);
+        self.tc_cache.infer_open_cache.pop();
     }
 
     /// Restore local context to a previous depth.
     fn restore_depth(&mut self, depth: usize) {
         if self.local_ctx.len() > depth {
-            let depth16 = depth as u16;
             self.local_ctx.truncate(depth);
-            self.tc_cache.infer_open_cache.retain(|&(_, d), _| d <= depth16);
+            self.tc_cache.infer_open_cache.truncate(depth);
         }
     }
 
@@ -545,9 +542,25 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                 }
             }
         } else {
-            // Scope-local cache for open expressions, keyed by (ExprPtr, depth)
-            if let Some(cached) = self.tc_cache.infer_open_cache.get(&(e, depth)).copied() {
-                return cached
+            // Shift-invariant cache for open expressions, organized as a stack by canonical depth.
+            let e_fvl = self.ctx.read_expr(e).get_fvar_list();
+            let e_lb = self.ctx.fvar_lb(e_fvl);
+            // bucket_idx = depth - 1 - lb: the shallowest context entry this expr depends on.
+            // Shift-invariant: shift(e, k) at depth+k has the same bucket_idx.
+            let bucket_idx = (depth - 1 - e_lb) as usize;
+            let canon = self.ctx.canonical_hash(e);
+            if let Some(bucket) = self.tc_cache.infer_open_cache.get(bucket_idx) {
+                if let Some(&(stored_input, stored_result, stored_depth)) = bucket.get(&canon) {
+                    if stored_input == e && stored_depth == depth {
+                        return stored_result;
+                    }
+                    if depth >= stored_depth {
+                        let delta = depth - stored_depth;
+                        if delta > 0 && self.ctx.shift_eq(stored_input, e, delta) {
+                            return self.ctx.mk_shift(stored_result, delta);
+                        }
+                    }
+                }
             }
         }
         let r = match self.ctx.read_expr(e) {
@@ -583,7 +596,16 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                 }
             }
         } else {
-            self.tc_cache.infer_open_cache.insert((e, depth), r);
+            let e_fvl = self.ctx.read_expr(e).get_fvar_list();
+            let e_lb = self.ctx.fvar_lb(e_fvl);
+            let bucket_idx = (depth - 1 - e_lb) as usize;
+            let canon = self.ctx.canonical_hash(e);
+            if let Some(bucket) = self.tc_cache.infer_open_cache.get_mut(bucket_idx) {
+                // Prefer entry at lower depth (better for future shift hits)
+                if bucket.get(&canon).map_or(true, |&(_, _, sd)| depth < sd) {
+                    bucket.insert(canon, (e, r, depth));
+                }
+            }
         }
         r
     }

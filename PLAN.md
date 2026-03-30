@@ -54,9 +54,16 @@ delta-encoded linked list: `{0, 3, 7}` → `[0, 2, 3]` (head = lb, subsequent = 
 - `union`: merge two delta lists → O(n+m), shared tails give O(1) common case
 - **No false negatives at any depth** (proved in Theory.lean)
 
-Canonical hash = `(struct_hash, normalized FVarList)`.
-WHNF cache keyed by canonical hash; on hit, verify with `shift_eq` (non-allocating
+Canonical hash = `(struct_hash, normalized FVarList hash)`.
+
+**WHNF cache**: keyed by canonical hash; on hit, verify with `shift_eq` (non-allocating
 traversal), then apply delta via `force_shift_aux`.
+
+**Infer cache (open expressions)**: organized as a stack of maps indexed by
+`canonical_depth = depth - fvar_lb` (the shallowest context entry the expression depends
+on). Each map keys by canonical hash → (stored_input, stored_result, stored_depth).
+On hit, verify with `shift_eq`, apply delta via `mk_shift`. Stack push/pop follows
+`push_local`/`pop_local` for O(1) eviction (replaces O(n) `retain` scan).
 
 ### Infrastructure
 
@@ -101,7 +108,7 @@ the full expression tree creating new nodes.
 - **Fix mathlib OOM**: instrument memory per-declaration, find what's blowing up;
   consider periodic cache eviction or more compact expression representation
 
-- **Extend shift-invariant caching to infer and def_eq caches** (currently only whnf)
+- **Extend shift-invariant caching to def_eq cache** (whnf and infer done)
 
 - **DefEq cache with canonical keys**: current union-find doesn't support shift-invariant
   lookup; switch to HashMap with canonical keys + delta

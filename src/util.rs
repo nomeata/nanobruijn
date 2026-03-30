@@ -549,6 +549,14 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         }
     }
 
+    /// Lower bound (smallest free bvar index), or 0 if closed.
+    pub(crate) fn fvar_lb(&self, fvl: FVarList<'t>) -> u16 {
+        match fvl {
+            None => 0,
+            Some(ptr) => self.read_fvar_node(ptr).delta,
+        }
+    }
+
     /// Canonical hash for cache keys: (struct_hash, normalized_fvar_hash).
     pub(crate) fn canonical_hash(&self, e: ExprPtr<'t>) -> (u64, u64) {
         let expr = self.read_expr(e);
@@ -1103,10 +1111,12 @@ pub(crate) struct TcCache<'t> {
     pub(crate) failure_cache: FxHashSet<(ExprPtr<'t>, ExprPtr<'t>)>,
     /// Strong reduction is not used during type-checking, this is more of a library/inspection feature.
     pub(crate) strong_cache: UniqueHashMap<(ExprPtr<'t>, bool, bool), ExprPtr<'t>>,
-    /// Scope-local infer cache for open expressions (with loose bvars).
-    /// Keyed by (ExprPtr, depth). An entry at depth d is valid at depth d
-    /// (the local_ctx[0..d] must match). NOT cleared on push/pop_local.
-    pub(crate) infer_open_cache: FxHashMap<(ExprPtr<'t>, u16), ExprPtr<'t>>,
+    /// Shift-invariant infer cache for open expressions, organized as a stack.
+    /// `infer_open_cache[cd-1]` stores entries at canonical depth `cd = depth - fvar_lb`.
+    /// Each map keys by canonical hash → (stored_input, stored_result, stored_depth).
+    /// On hit, verify with shift_eq and apply delta via mk_shift.
+    /// Push/pop follows local_ctx for O(1) eviction.
+    pub(crate) infer_open_cache: Vec<FxHashMap<(u64, u64), (ExprPtr<'t>, ExprPtr<'t>, u16)>>,
 }
 
 impl<'t> TcCache<'t> {
@@ -1119,7 +1129,7 @@ impl<'t> TcCache<'t> {
             eq_cache: UnionFind::new(),
             failure_cache: new_fx_hash_set(),
             strong_cache: new_unique_hash_map(),
-            infer_open_cache: new_fx_hash_map(),
+            infer_open_cache: Vec::new(),
         }
     }
 
