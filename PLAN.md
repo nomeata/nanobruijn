@@ -23,37 +23,37 @@ We use a local context array with `push_local`/`pop_local` (zero allocation).
 
 `Shift { inner, amount }` expression variant wraps expressions for O(1) shifting.
 
-- `mk_shift`: creates wrappers, collapses `Shift(Shift(e, j), k) → Shift(e, j+k)`, elides on closed
+- `mk_shift`: creates wrappers, collapses `Shift(Shift(e, j), k) → Shift(e, j+k)`, elides
+  on closed expressions, eagerly forces `Var` (O(1))
 - `force_shift_aux`: full traversal when needed (pattern matching, substitution under binders)
-- All pattern-matching sites (whnf, infer, def_eq, inductive) handle Shift peeling
+- `force_shift`: convenience wrapper that forces a top-level Shift node
+- All `unfold_apps*` functions call `force_shift` before peeling App nodes
+- `infer_app` calls `force_shift` before matching Pi on function type
+- `infer_inner` has explicit Shift arm that forces before inferring
 - whnf iteratively peels nested Shifts before reducing
 
-**Constraint**: Shift nodes only wrap top-level expressions (e.g. `lookup_var` results),
-never inside expression trees. Pattern-matching on Pi/Lambda/etc. breaks otherwise.
+**Current state**: Shift nodes only wrap top-level expressions (e.g. `lookup_var` results).
+All consumers force Shift fully before pattern matching. This is correct but expensive
+(full O(n) traversal). See TODO for the "shallowish" force optimization.
 
-### Shift-homomorphic canonical hash (current, bitmask-based)
+### Shift-invariant hashing and caching
 
-Each expression stores `struct_hash: u64` (bvar indices replaced by constant, with
-per-child `(bvar_lb_delta, bvar_ub_delta)` mixed in) and `bvar_mask: u64` (bit `i%64` set
-iff `bvar(j)` with `j ≡ i mod 64` occurs).
+Each expression stores `struct_hash: u64` — a hash where bvar indices are replaced by a
+constant, so shifted expressions share the same struct_hash.
 
-- Canonical hash = `(struct_hash, bvar_mask.rotate_right(bvar_ub % 64))`
-- `unbind(mask) = (mask & !1).rotate_right(1)` — clears bound var's ghost bit
-- WHNF cache keyed by canonical hash; on hit, verify with `shift_eq` (non-allocating traversal)
-- 64k shift hits, 0 verify failures on init export
-
-**Problem**: 64-bit mask aliases at binder depth ≥ 64 — causes false negatives.
-
-### Proposed: delta-encoded free variable lists
-
-Replace `bvar_mask` with exact delta-encoded sorted set of free bvar indices.
-E.g. `{0, 3, 7}` encoded as `[0, 2, 3]` (head = lb, subsequent entries = gaps - 1).
+**FVarList** (delta-encoded free variable set): Replaces the old `bvar_mask: u64` which
+aliased at binder depth ≥ 64. Stores the sorted set of free bvar indices as a
+delta-encoded linked list: `{0, 3, 7}` → `[0, 2, 3]` (head = lb, subsequent = gaps - 1).
 
 - `shift k`: increment head → O(1)
 - `unbind`: decrement head (or pop if 0) → O(1)
 - `normalize`: set head to 0 → O(1), shift-invariant canonical form
-- `union`: merge two delta lists → O(n+m), but shared tails give O(1) common case
+- `union`: merge two delta lists → O(n+m), shared tails give O(1) common case
 - **No false negatives at any depth** (proved in Theory.lean)
+
+Canonical hash = `(struct_hash, normalized FVarList)`.
+WHNF cache keyed by canonical hash; on hit, verify with `shift_eq` (non-allocating
+traversal), then apply delta via `force_shift_aux`.
 
 ### Infrastructure
 
@@ -64,49 +64,57 @@ E.g. `{0, 3, 7}` encoded as `[0, 2, 3]` (head = lb, subsequent entries = gaps - 
 ## Results
 
 ### Correctness
-- Passes all 89 arena good tests + 45 bad tests (correctly rejected)
+- Passes app-lam, dag-app-binder, init arena tests
+- Pre-existing failures on constlevels, level-imax-leq, level-imax-normalization
+  (not caused by our changes — also fail on baseline)
 
 ### Performance
 
 | Benchmark | nanoda (locally nameless) | lean-slop-kernel |
 |-----------|--------------------------|------------------|
-| Init (54k decls, 310MB) | 21s | ~24.5s (+17%) |
+| Init (54k decls, 310MB) | 21s | ~29s |
 | app-lam N=4000 | 8.3s | 10ms (830x faster) |
-| grind-ring-5 (2.4k decls) | ~3s | 1.0s |
 | Mathlib (630k decls, 4.9GB) | works (<9GB) | OOM-killed at ~120k decls |
 
-The Init overhead (~17%) comes from expression metadata (struct_hash, bvar_mask, per-child
-deltas) and hash-consing. The shift-invariant cache saves ~1s from 64k shift hits but the
-metadata costs ~3s.
-
-Profile (init export): `mk_app` 20%, IndexMap (hash-consing) 14%, `mk_let` 8%,
-`inst_aux` 1.7%, `whnf_no_unfolding_aux` 1.2%.
-
-### Mathlib status
-OOM-killed around 120k/630k declarations due to 50 GB cgroup memory limit. Vanilla nanoda
-uses <9 GB. The DAG and caches grow unboundedly; need to investigate which declarations
-or data structures cause memory blowup.
+Profile (init, 375B instructions): `force_shift_aux` is the dominant cost —
+shift cache has ~40% hit rate (8M hits, 12M misses). Each miss traverses
+the full expression tree creating new nodes.
 
 ## TODO
 
-- **Implement delta-encoded FVarList** in Rust (replace `bvar_mask: u64`) — no false
-  negatives, exact shift-invariant cache keys at any depth
-- **Fix mathlib OOM**: instrument memory per-declaration, find what's blowing up; consider
-  periodic cache eviction or more compact expression representation
+- **"Shallowish" force_shift**: Replace full `force_shift_aux` calls in unfold_apps/whnf/def_eq
+  with a lazy force that pushes Shift just far enough for consumers:
+  1. Peel the entire App spine: shift each arg (lazy `mk_shift`), shift the head
+  2. Force the head one level to expose its constructor + immediate fields:
+     Var → shifted index, Const/Sort → as-is, Pi/Lambda → binder_type (lazy),
+     body (shift_expr cutoff=1), Let → similar, Proj → structure (lazy)
+  3. Leave everything deeper as Shift nodes
+
+  This is O(n_args) per step instead of O(expr_size). The blocker is def_eq:
+  inner Shift nodes cause subtle failures in def_eq's recursive comparison
+  (interaction with eq_cache/failure_cache/proof_irrel_eq). Needs careful
+  investigation of def_eq's full control flow with inner Shift nodes.
+  See `force_shift_shallow` in util.rs for the one-level version and detailed notes.
+
+- **Fix pre-existing arena test failures**: constlevels, level-imax-leq,
+  level-imax-normalization fail on baseline too. Investigate.
+
+- **Fix mathlib OOM**: instrument memory per-declaration, find what's blowing up;
+  consider periodic cache eviction or more compact expression representation
+
 - **Extend shift-invariant caching to infer and def_eq caches** (currently only whnf)
+
 - **DefEq cache with canonical keys**: current union-find doesn't support shift-invariant
   lookup; switch to HashMap with canonical keys + delta
-- **Let-binding strategy**: eager substitution (current) vs delay via Shift — benchmark
-- **Hash-cons the FVarList nodes** for O(1) equality and use pointer as hash component
+
 - **Remove dead locally-nameless code** (Local variant, FVarId, abstr, etc.)
+
 - **Fill in Theory.lean sorry's**: `decode_shift`, `fvars_shift_zero`
 
 ## Lessons learned (things that didn't work)
 
 - **Bitmask shift-invariance breaks at depth ≥ 64**: `bvar(0)` and `bvar(64)` alias to
-  the same bit. The `unbind` clearing trick (`mask & !1`) removes both, causing false
-  negatives for shift-equivalent expressions. In practice binder depth > 64 is rare
-  (0 on init) but this fundamentally limits the approach.
+  the same bit. Replaced with delta-encoded FVarList — no aliasing at any depth.
 
 - **struct_hash without per-child deltas had too many collisions**: all single-bvar
   expressions got `norm_mask = 1<<63`, so `app(bvar 0, bvar 1)` and `app(bvar 0, bvar 0)`
@@ -115,16 +123,23 @@ or data structures cause memory blowup.
 
 - **`restore_depth` off-by-one caused exponential blowup**: the cache eviction in
   `def_eq_binder_aux` used `d < depth` instead of `d <= depth`, discarding valid entries
-  at the current depth. This made app-lam O(2^n) instead of O(n). Subtle because
-  `pop_local` already had the correct condition.
+  at the current depth. This made app-lam O(2^n) instead of O(n).
 
-- **Shift nodes inside expression trees break pattern matching**: code expects
-  `Pi(name, ty, body)` but gets `Shift(Pi(...), k)`. Solution: Shift nodes only wrap
-  top-level expressions; `force_shift_aux` is used when building subexpressions.
+- **Shallow force in whnf (12x speedup but broken)**: Replacing `force_shift_aux` with
+  `force_shift_shallow` in whnf reduced init from 375B to 30.6B instructions. But inner
+  Shift nodes broke def_eq — expressions that should be definitionally equal returned false.
+  The issue: after whnf produces Shift-wrapped children, def_eq's recursive comparison
+  encounters Shift at every level. While this should converge at leaves, subtle cache
+  interactions cause incorrect results. Full force in def_eq_inner fixes correctness but
+  defeats the performance gain.
 
-- **Metadata cost dominates on small workloads**: computing struct_hash + bvar_mask + deltas
-  for every expression adds ~3s on init, but shift hits only save ~1s. The break-even
+- **Metadata cost dominates on small workloads**: computing struct_hash + FVarList
+  for every expression adds overhead, but shift hits only save ~1s on init. The break-even
   point needs larger workloads (mathlib) where shift hits accumulate.
+
+- **Inlining mk_* into force_shift_aux made it worse** (375B → 382B): code bloat hurt
+  icache. Similarly, adding an Option<u64> parameter for struct_hash reuse made it worse
+  (375B → 385B) due to branch overhead on every mk_* call.
 
 ## References
 

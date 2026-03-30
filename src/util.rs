@@ -860,6 +860,31 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
     /// Shallow shift: peel one level of constructor, wrapping children in lazy Shift nodes.
     /// `force_shift_shallow(Shift(Pi(ty, body), k))` → `Pi(Shift(ty, k), Shift(body, k))`
     /// O(1) per node vs O(n) for full traversal. Returns e unchanged if no shift needed.
+    ///
+    /// TODO: Replace force_shift calls in unfold_apps/whnf/def_eq with a "shallowish" force
+    /// that pushes Shift just far enough for all consumers:
+    ///
+    /// All consumers (whnf_no_unfolding, def_eq, infer_app) work via unfold_apps first,
+    /// then match on the head. So "far enough" means:
+    ///  1. Peel the entire App spine: shift each arg (lazy), shift the head
+    ///  2. Force the head one level to expose its constructor tag + immediate fields:
+    ///     - Var: eagerly compute shifted index (already done by mk_shift_lazy)
+    ///     - Const/Sort/NatLit/StringLit/Local: closed, no shift needed
+    ///     - Pi/Lambda: expose binder_type (lazy Shift) and body (shift_expr with cutoff=1)
+    ///     - Let: expose binder_type, val (lazy Shift), body (shift_expr cutoff=1)
+    ///     - Proj: expose structure (lazy Shift)
+    ///  3. Leave everything deeper as Shift nodes
+    ///
+    /// This is O(n_args) per whnf/def_eq step instead of O(expr_size).
+    /// The blocker was def_eq: it calls whnf_no_unfolding_cheap_proj on both sides, which
+    /// calls unfold_apps (peeling Shift on the spine), then rebuilds via foldl_apps.
+    /// The rebuilt expression has Shift-wrapped args. When def_eq_app recursively compares
+    /// args, each arg is a Shift node. The recursive def_eq call peels it via whnf, which
+    /// again does unfold_apps + foldl_apps, pushing Shift one level deeper each time.
+    /// This SHOULD converge at leaves (Var/Const), but the interaction with def_eq's
+    /// eq_cache, failure_cache, and proof_irrel_eq creates subtle bugs where comparisons
+    /// that should succeed return false. Needs careful investigation of def_eq's full
+    /// control flow with inner Shift nodes.
     pub fn force_shift_shallow(&mut self, e: ExprPtr<'t>, amount: u16) -> ExprPtr<'t> {
         if amount == 0 {
             return e;
