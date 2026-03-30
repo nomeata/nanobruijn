@@ -361,8 +361,8 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         if self.num_loose_bvars(e) <= cutoff {
             return e
         }
-        if let Some(cached) = self.expr_cache.shift_cache.get(&(e, amount, cutoff)) {
-            return *cached
+        if let Some(&cached) = self.expr_cache.shift_cache.get(&(e, amount, cutoff)) {
+            return cached;
         }
         let calcd = match self.read_expr(e) {
             Sort { .. } | Const { .. } | Local { .. } | StringLit { .. } | NatLit { .. } => panic!(),

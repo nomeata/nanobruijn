@@ -38,8 +38,11 @@ All consumers force Shift fully before pattern matching. This is correct but exp
 
 ### Shift-invariant hashing and caching
 
-Each expression stores `struct_hash: u64` — a hash where bvar indices are replaced by a
-constant, so shifted expressions share the same struct_hash.
+Each expression stores `struct_hash: u64` — a purely structural hash: tag + children's
+struct_hashes + binder_name/style. Bvar indices are replaced by a constant (VAR_HASH),
+so shifted expressions share the same struct_hash. No per-child deltas or normalized
+fvar hashes are mixed in — those were removed as unnecessary (FVarList handles
+shift-invariant discrimination).
 
 **FVarList** (delta-encoded free variable set): Replaces the old `bvar_mask: u64` which
 aliased at binder depth ≥ 64. Stores the sorted set of free bvar indices as a
@@ -112,10 +115,12 @@ the full expression tree creating new nodes.
 - **Bitmask shift-invariance breaks at depth ≥ 64**: `bvar(0)` and `bvar(64)` alias to
   the same bit. Replaced with delta-encoded FVarList — no aliasing at any depth.
 
-- **struct_hash without per-child deltas had too many collisions**: all single-bvar
-  expressions got `norm_mask = 1<<63`, so `app(bvar 0, bvar 1)` and `app(bvar 0, bvar 0)`
-  had the same canonical hash. Mixing `(bvar_lb_delta, bvar_ub_delta)` between siblings
-  into struct_hash fixed this (0 verify failures).
+- **struct_hash without per-child deltas had too many collisions** (old bitmask era):
+  all single-bvar expressions got `norm_mask = 1<<63`, so `app(bvar 0, bvar 1)` and
+  `app(bvar 0, bvar 0)` had the same canonical hash. This was fixed by mixing
+  `(bvar_lb_delta, bvar_ub_delta)` into struct_hash, but those deltas were later removed
+  once FVarList replaced bitmasks — FVarList's normalized hash already distinguishes these
+  cases. struct_hash is now purely structural (tag + children's struct_hashes).
 
 - **`restore_depth` off-by-one caused exponential blowup**: the cache eviction in
   `def_eq_binder_aux` used `d < depth` instead of `d <= depth`, discarding valid entries
@@ -136,6 +141,17 @@ the full expression tree creating new nodes.
 - **Inlining mk_* into force_shift_aux made it worse** (375B → 382B): code bloat hurt
   icache. Similarly, adding an Option<u64> parameter for struct_hash reuse made it worse
   (375B → 385B) due to branch overhead on every mk_* call.
+
+- **Shift-invariant shift cache causes infinite recursion**: Attempted keying the shift
+  cache by `(canonical_hash, amount, cutoff)` instead of `(ExprPtr, amount, cutoff)`, with
+  shift_eq verification + force_shift_aux(result, delta) on hit. Problem: the result of
+  force_shift_aux has the same canonical hash as the input (struct_hash is shift-invariant!),
+  so looking up the result in the cache finds the same entry, computing another delta,
+  recursing infinitely → OOM. The whnf cache doesn't have this problem because whnf
+  *reduces* expressions, changing the canonical hash. The shift cache can't benefit from
+  shift-invariant keys because the operation itself preserves structural identity.
+  The underlying issue is the same as shallowish force: to reuse shift results across
+  depths, you'd need to return Shift-wrapped results, but inner Shift nodes break def_eq.
 
 ## References
 
