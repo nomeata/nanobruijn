@@ -55,8 +55,19 @@ O(n_args × expr_size). Two companion fixes ensure correctness:
 2. The whnf shift-invariant cache uses `force_shift_aux` (not `force_shift_shallow`) to
    produce fully-forced results that downstream code can safely consume.
 
-`unfold_apps_fun` and `unfold_apps_stack` still force shifts (simpler, and the perf benefit
-is smaller since they don't create intermediate expressions).
+`view_expr(e)` is a view function that transparently handles Shift nodes: returns `Expr<'t>`
+with Shift pushed one level inside via `force_shift_shallow`. Never returns `Shift` variant;
+children may be Shift-wrapped. Replaces the common `force_shift(e); match read_expr(e)` pattern.
+Used by: `unfold_apps_fun`, `unfold_apps_stack`, `inst_forall_params`, `infer_app`, `subst_aux`,
+`inst_aux`, `shift_expr_aux`.
+
+Remaining `force_shift_aux` call sites (outside its own implementation):
+- **whnf cache hit** (tc.rs): the dominant cost. Switching to `force_shift_shallow` requires
+  making def_eq robust to Shift-wrapped whnf results (main TODO).
+- **inst_aux val shifting**: `force_shift_aux(val, offset, 0)` for shifting subst values up.
+  Needed for canonical results.
+- **cutoff>0 Shifts** (unfold_apps, whnf, infer_inner): rare, unavoidable without lazy cutoff>0.
+- **force_shift_shallow itself** (util.rs): forces inner Shift with mismatched cutoff.
 
 ### Shift-invariant hashing and caching
 
