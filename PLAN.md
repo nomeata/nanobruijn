@@ -21,22 +21,31 @@ We use a local context array with `push_local`/`pop_local` (zero allocation).
 
 ### Shift nodes (delayed shifting)
 
-`Shift { inner, amount }` expression variant wraps expressions for O(1) shifting.
+`Shift { inner, amount, cutoff }` expression variant wraps expressions for O(1) shifting.
+Semantics: free Var indices in `inner` with index >= `cutoff` are shifted up by `amount`.
+This is exactly a deferred `force_shift_aux(inner, amount, cutoff)`.
 
-- `mk_shift`: creates wrappers, collapses `Shift(Shift(e, j), k) → Shift(e, j+k)`, elides
-  on closed expressions, eagerly forces `Var` (O(1))
-- `force_shift_aux`: full traversal when needed (pattern matching, substitution under binders)
-- `force_shift`: convenience wrapper that forces a top-level Shift node
-- All `unfold_apps*` functions call `force_shift` before peeling App nodes
-- `infer_app` calls `force_shift` before matching Pi on function type
-- `infer_inner` handles Shift without forcing: `infer(Shift(inner, k), d) = mk_shift(infer(inner, d-k), k)`.
-  Temporarily shrinks `local_ctx` and `infer_open_cache` to depth d-k, infers inner,
-  restores. No O(n) traversal — just O(k) for save/restore.
-- whnf iteratively peels nested Shifts before reducing
+- `mk_shift` (cutoff=0): creates wrappers, collapses `Shift(Shift(e, j, 0), k, 0) → Shift(e, j+k, 0)`,
+  elides on closed expressions, eagerly forces `Var` (O(1))
+- `mk_shift_cutoff`: general version with cutoff parameter. Collapses when cutoffs match:
+  `Shift(Shift(e, j, c), k, c) → Shift(e, j+k, c)`. Cannot collapse different cutoffs.
+- `force_shift_shallow(e, amount, cutoff)`: pushes shift one level into constructor.
+  App → `App(Shift(fun, k, c), Shift(arg, k, c))`.
+  Lambda/Pi → `Lambda(Shift(ty, k, c), Shift(body, k, c+1))` — fully lazy, no traversal.
+  This is the key advantage of cutoff: binder bodies get `cutoff+1` instead of requiring
+  a full `shift_expr(body, amount, cutoff+1)` traversal.
+- `fvar_shift_cutoff`: shifts FVarList entries >= cutoff by k. Walks to the cutoff point,
+  adds k to first entry >= cutoff, shares tail. O(1) for cutoff=0, O(position) for cutoff>0.
+- `force_shift_aux`: full traversal when needed (now uses cutoff from Shift nodes)
+- `force_shift`: convenience wrapper that forces a top-level Shift node (any cutoff)
+- `infer_inner` handles cutoff=0 Shift without forcing via context-shrinking. For cutoff>0, forces first.
+- whnf peels cutoff=0 Shifts iteratively; forces cutoff>0 Shifts.
+- `shift_eq` handles cutoff=0 Shift nodes; returns false for cutoff>0 (conservative).
 
-**Current state**: Shift nodes only wrap top-level expressions (e.g. `lookup_var` results).
-All consumers force Shift fully before pattern matching. This is correct but expensive
-(full O(n) traversal). See TODO for the "shallowish" force optimization.
+**Current state**: All consumers still force Shift fully before pattern matching.
+The cutoff infrastructure is in place for `force_shift_shallow` to push through binders,
+but using it causes def_eq failures (see TODO). The blocker is def_eq's eq_cache/failure_cache
+interactions with inner Shift nodes.
 
 ### Shift-invariant hashing and caching
 
@@ -98,19 +107,13 @@ the full expression tree creating new nodes.
 
 ## TODO
 
-- **"Shallowish" force_shift**: Replace full `force_shift_aux` calls in unfold_apps/whnf/def_eq
-  with a lazy force that pushes Shift just far enough for consumers:
-  1. Peel the entire App spine: shift each arg (lazy `mk_shift`), shift the head
-  2. Force the head one level to expose its constructor + immediate fields:
-     Var → shifted index, Const/Sort → as-is, Pi/Lambda → binder_type (lazy),
-     body (shift_expr cutoff=1), Let → similar, Proj → structure (lazy)
-  3. Leave everything deeper as Shift nodes
-
-  This is O(n_args) per step instead of O(expr_size). The blocker is def_eq:
-  inner Shift nodes cause subtle failures in def_eq's recursive comparison
-  (interaction with eq_cache/failure_cache/proof_irrel_eq). Needs careful
-  investigation of def_eq's full control flow with inner Shift nodes.
-  See `force_shift_shallow` in util.rs for the one-level version and detailed notes.
+- **Fix def_eq to handle Shift nodes**: The single blocker for lazy shifting. Converting
+  unfold_apps/infer_app/whnf_no_unfolding to use `force_shift_shallow` passes small tests
+  but fails init with def_eq assertion errors. The infrastructure is ready:
+  `force_shift_shallow` with cutoff pushes through binders via `Shift(body, k, cutoff+1)`,
+  and `mk_shift_cutoff` creates the lazy wrappers. The issue is def_eq's eq_cache/failure_cache
+  interactions with inner Shift nodes. Fixing this unlocks O(n_args) per whnf/def_eq step
+  instead of O(expr_size). See `force_shift_shallow` in util.rs.
 
 - **Fix mathlib OOM**: instrument memory per-declaration, find what's blowing up;
   consider periodic cache eviction or more compact expression representation

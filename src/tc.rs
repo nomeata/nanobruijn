@@ -527,16 +527,22 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
     }
 
     fn infer_inner(&mut self, e: ExprPtr<'t>, flag: InferFlag) -> ExprPtr<'t> {
-        // Handle Shift nodes without forcing: infer(Shift(inner, k), d) = mk_shift(infer(inner, d-k), k).
+        // Handle Shift nodes without forcing: infer(Shift(inner, k, 0), d) = mk_shift(infer(inner, d-k), k).
         // Temporarily shrink the context to depth d-k, infer inner, restore, shift result.
-        if let Expr::Shift { inner, amount, .. } = self.ctx.read_expr(e) {
-            let new_depth = self.local_ctx.len() - amount as usize;
-            let saved_locals = self.local_ctx.split_off(new_depth);
-            let saved_cache = self.tc_cache.infer_open_cache.split_off(new_depth);
-            let inner_type = self.infer(inner, flag);
-            self.local_ctx.extend(saved_locals);
-            self.tc_cache.infer_open_cache.extend(saved_cache);
-            return self.ctx.mk_shift(inner_type, amount);
+        // Only works for cutoff=0 (top-level shifts). For cutoff>0, force first.
+        if let Expr::Shift { inner, amount, cutoff, .. } = self.ctx.read_expr(e) {
+            if cutoff == 0 {
+                let new_depth = self.local_ctx.len() - amount as usize;
+                let saved_locals = self.local_ctx.split_off(new_depth);
+                let saved_cache = self.tc_cache.infer_open_cache.split_off(new_depth);
+                let inner_type = self.infer(inner, flag);
+                self.local_ctx.extend(saved_locals);
+                self.tc_cache.infer_open_cache.extend(saved_cache);
+                return self.ctx.mk_shift(inner_type, amount);
+            } else {
+                let forced = self.ctx.force_shift_aux(inner, amount, cutoff);
+                return self.infer(forced, flag);
+            }
         }
         // Only use cache for closed expressions (no loose bvars), since
         // the result of inferring an expression with free Vars depends on
@@ -817,15 +823,18 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         if matches!(self.ctx.read_expr(e), NatLit { .. } | StringLit { .. }) {
             return e
         }
-        // whnf is shift-equivariant: whnf(Shift(e, k)) = shift(whnf(e), k)
-        // Peel off Shift (iteratively to avoid stack overflow on deep chains).
-        // Note: mk_shift collapses Shift(Shift(e,j),k) → Shift(e,j+k), so in
-        // practice this loop runs at most once, but we use a loop for safety.
+        // whnf is shift-equivariant: whnf(Shift(e, k, 0)) = shift(whnf(e), k)
+        // Peel off cutoff=0 Shift nodes (iteratively). For cutoff>0, force first.
         let mut total_shift: u16 = 0;
         let mut e = e;
-        while let Shift { inner, amount, .. } = self.ctx.read_expr(e) {
-            total_shift += amount;
-            e = inner;
+        while let Shift { inner, amount, cutoff, .. } = self.ctx.read_expr(e) {
+            if cutoff == 0 {
+                total_shift += amount;
+                e = inner;
+            } else {
+                // Force the cutoff>0 shift, then continue peeling
+                e = self.ctx.force_shift_aux(inner, amount, cutoff);
+            }
         }
         if total_shift > 0 {
             let r = self.whnf(e);
@@ -1283,11 +1292,11 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
 
             return Some(true)
         }
-        // Strip matching Shift wrappers: Shift(a, k) == Shift(b, k) iff a == b
-        if let (Shift { inner: ix, amount: kx, .. }, Shift { inner: iy, amount: ky, .. }) =
+        // Strip matching Shift wrappers: Shift(a, k, c) == Shift(b, k, c) iff a == b
+        if let (Shift { inner: ix, amount: kx, cutoff: cx, .. }, Shift { inner: iy, amount: ky, cutoff: cy, .. }) =
             (self.ctx.read_expr(x), self.ctx.read_expr(y))
         {
-            if kx == ky {
+            if kx == ky && cx == cy {
                 return Some(self.def_eq(ix, iy))
             }
         }

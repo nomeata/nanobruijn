@@ -123,15 +123,17 @@ pub enum Expr<'a> {
         binder_type: ExprPtr<'a>,
         id: FVarId,
     },
-    /// Delayed shift: all free Var indices in `inner` are shifted up by `amount`.
-    /// Created by mk_shift, collapsed on nesting: Shift(Shift(e, j), k) → Shift(e, j+k).
-    /// Elided when inner has no free bvars.
+    /// Delayed shift: free Var indices in `inner` with index >= `cutoff` are shifted up by `amount`.
+    /// Created by mk_shift (cutoff=0) or mk_shift_cutoff (cutoff>0).
+    /// Collapsed on nesting when cutoffs match: Shift(Shift(e, j, c), k, c) → Shift(e, j+k, c).
+    /// Elided when inner has no free bvars above cutoff.
     Shift {
         hash: u64,
         struct_hash: u64,
         fvar_list: FVarList<'a>,
         inner: ExprPtr<'a>,
         amount: u16,
+        cutoff: u16,
         num_loose_bvars: u16,
         has_fvars: bool,
     },
@@ -287,9 +289,9 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
             let calcd = match self.read_expr(e) {
                 // These expressions should be unreachable since they return `n_loose_bvars() == 0`
                 Sort { .. } | Const { .. } | Local { .. } | StringLit { .. } | NatLit { .. } => panic!(),
-                Shift { inner, amount, .. } => {
+                Shift { inner, amount, cutoff, .. } => {
                     // Force the shift, then substitute on the result.
-                    let forced = self.force_shift_aux(inner, amount, 0);
+                    let forced = self.force_shift_aux(inner, amount, cutoff);
                     self.inst_aux(forced, substs, offset, shift_down)
                 }
                 Var { dbj_idx, .. } => {
@@ -366,9 +368,9 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         }
         let calcd = match self.read_expr(e) {
             Sort { .. } | Const { .. } | Local { .. } | StringLit { .. } | NatLit { .. } => panic!(),
-            Shift { inner, amount: prev, .. } => {
+            Shift { inner, amount: prev, cutoff: prev_cutoff, .. } => {
                 // Force the inner shift first, then apply the outer shift.
-                let forced = self.force_shift_aux(inner, prev, 0);
+                let forced = self.force_shift_aux(inner, prev, prev_cutoff);
                 self.shift_expr_aux(forced, amount, cutoff)
             }
             Var { dbj_idx, .. } => {
@@ -938,8 +940,8 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
                 n1 == n2 && l1 == l2,
             (NatLit { ptr: p1, .. }, NatLit { ptr: p2, .. }) => p1 == p2,
             (StringLit { ptr: p1, .. }, StringLit { ptr: p2, .. }) => p1 == p2,
-            (Shift { inner, amount, .. }, _) => self.shift_eq(inner, b, delta + amount),
-            (_, Shift { inner, amount, .. }) if amount <= delta =>
+            (Shift { inner, amount, cutoff: 0, .. }, _) => self.shift_eq(inner, b, delta + amount),
+            (_, Shift { inner, amount, cutoff: 0, .. }) if amount <= delta =>
                 self.shift_eq(a, inner, delta - amount),
             _ => false,
         }

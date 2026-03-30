@@ -474,6 +474,35 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         }
     }
 
+    /// Shift free var indices >= cutoff by k in the FVarList.
+    /// Walk the delta-encoded list to find the first entry >= cutoff,
+    /// add k to its delta, share the tail. O(position of cutoff in list).
+    pub(crate) fn fvar_shift_cutoff(&mut self, fvl: FVarList<'t>, k: u16, cutoff: u16) -> FVarList<'t> {
+        if cutoff == 0 {
+            return self.fvar_shift(fvl, k);
+        }
+        self.fvar_shift_cutoff_aux(fvl, k, cutoff, 0)
+    }
+
+    fn fvar_shift_cutoff_aux(&mut self, fvl: FVarList<'t>, k: u16, cutoff: u16, abs_pos: u16) -> FVarList<'t> {
+        match fvl {
+            None => None,
+            Some(ptr) => {
+                let node = self.read_fvar_node(ptr);
+                // Current absolute index: first element has abs = delta, subsequent have abs = prev_abs + 1 + delta
+                let cur_abs = abs_pos + node.delta;
+                if cur_abs >= cutoff {
+                    // This entry and all after get shifted by k
+                    Some(self.alloc_fvar_node(node.delta + k, node.tail))
+                } else {
+                    // This entry stays, recurse on tail
+                    let new_tail = self.fvar_shift_cutoff_aux(node.tail, k, cutoff, cur_abs + 1);
+                    Some(self.alloc_fvar_node(node.delta, new_tail))
+                }
+            }
+        }
+    }
+
     /// Unbind: remove bvar(0), decrement others. O(1).
     pub(crate) fn fvar_unbind(&mut self, fvl: FVarList<'t>) -> FVarList<'t> {
         match fvl {
@@ -782,28 +811,39 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
     }
 
     pub fn mk_shift_lazy(&mut self, inner: ExprPtr<'t>, amount: u16) -> ExprPtr<'t> {
+        self.mk_shift_cutoff(inner, amount, 0)
+    }
+
+    /// Create a delayed shift node: Shift(inner, amount, cutoff) means free Var indices
+    /// in `inner` with index >= cutoff are shifted up by `amount`. O(1) — no traversal.
+    /// Collapses nested shifts when cutoffs match.
+    pub fn mk_shift_cutoff(&mut self, inner: ExprPtr<'t>, amount: u16, cutoff: u16) -> ExprPtr<'t> {
         if amount == 0 {
             return inner;
         }
         let inner_expr = self.read_expr(inner);
         let nlbv = inner_expr.num_loose_bvars();
-        if nlbv == 0 {
+        if nlbv <= cutoff {
             return inner;
         }
-        // Collapse nested shifts: Shift(Shift(e, j), k) -> Shift(e, j+k)
-        if let Expr::Shift { inner: inner2, amount: prev, .. } = inner_expr {
-            return self.mk_shift_lazy(inner2, prev + amount);
+        // Collapse nested shifts when cutoffs match: Shift(Shift(e, j, c), k, c) -> Shift(e, j+k, c)
+        if let Expr::Shift { inner: inner2, amount: prev, cutoff: prev_cutoff, .. } = inner_expr {
+            if prev_cutoff == cutoff {
+                return self.mk_shift_cutoff(inner2, prev + amount, cutoff);
+            }
         }
         // Eagerly force simple expressions (O(1))
-        if let Expr::Var { dbj_idx, .. } = inner_expr {
-            return self.mk_var(dbj_idx + amount);
+        if cutoff == 0 {
+            if let Expr::Var { dbj_idx, .. } = inner_expr {
+                return self.mk_var(dbj_idx + amount);
+            }
         }
         let has_fvars = inner_expr.has_fvars();
-        let hash = hash64!(crate::expr::SHIFT_HASH, inner, amount);
+        let hash = hash64!(crate::expr::SHIFT_HASH, inner, amount, cutoff);
         let struct_hash = inner_expr.get_struct_hash();
         let inner_fvl = inner_expr.get_fvar_list();
-        let fvar_list = self.fvar_shift(inner_fvl, amount);
-        self.alloc_expr(Expr::Shift { hash, struct_hash, fvar_list, inner, amount, num_loose_bvars: nlbv + amount, has_fvars })
+        let fvar_list = self.fvar_shift_cutoff(inner_fvl, amount, cutoff);
+        self.alloc_expr(Expr::Shift { hash, struct_hash, fvar_list, inner, amount, cutoff, num_loose_bvars: nlbv + amount, has_fvars })
     }
 
     /// Shallow shift: peel one level of constructor, wrapping children in lazy Shift nodes.
@@ -834,45 +874,57 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
     /// eq_cache, failure_cache, and proof_irrel_eq creates subtle bugs where comparisons
     /// that should succeed return false. Needs careful investigation of def_eq's full
     /// control flow with inner Shift nodes.
-    pub fn force_shift_shallow(&mut self, e: ExprPtr<'t>, amount: u16) -> ExprPtr<'t> {
+    /// Shallow shift: peel one level of constructor, wrapping children in lazy Shift nodes.
+    /// With cutoff support, binder bodies get `Shift(body, amount, cutoff+1)` — fully lazy.
+    pub fn force_shift_shallow(&mut self, e: ExprPtr<'t>, amount: u16, cutoff: u16) -> ExprPtr<'t> {
         if amount == 0 {
             return e;
         }
         let expr = self.read_expr(e);
-        if expr.num_loose_bvars() == 0 {
+        if expr.num_loose_bvars() <= cutoff {
             return e;
         }
         match expr {
-            Expr::Shift { inner, amount: prev, .. } => {
-                // Collapse: Shift(Shift(inner, prev), amount) → shallow(inner, prev+amount)
-                self.force_shift_shallow(inner, prev + amount)
+            Expr::Shift { inner, amount: prev, cutoff: prev_cutoff, .. } => {
+                if prev_cutoff == cutoff {
+                    // Collapse: Shift(Shift(inner, prev, c), amount, c) → shallow(inner, prev+amount, c)
+                    self.force_shift_shallow(inner, prev + amount, cutoff)
+                } else {
+                    // Different cutoffs — force inner first, then shallow outer
+                    let forced = self.force_shift_aux(inner, prev, prev_cutoff);
+                    self.force_shift_shallow(forced, amount, cutoff)
+                }
             }
             Expr::Var { dbj_idx, .. } => {
-                self.mk_var(dbj_idx + amount)
+                if dbj_idx >= cutoff {
+                    self.mk_var(dbj_idx + amount)
+                } else {
+                    e
+                }
             }
             Expr::App { fun, arg, .. } => {
-                let fun = self.mk_shift(fun, amount);
-                let arg = self.mk_shift(arg, amount);
+                let fun = self.mk_shift_cutoff(fun, amount, cutoff);
+                let arg = self.mk_shift_cutoff(arg, amount, cutoff);
                 self.mk_app(fun, arg)
             }
             Expr::Pi { binder_name, binder_style, binder_type, body, .. } => {
-                let binder_type = self.mk_shift(binder_type, amount);
-                let body = self.shift_expr(body, amount, 1);
+                let binder_type = self.mk_shift_cutoff(binder_type, amount, cutoff);
+                let body = self.mk_shift_cutoff(body, amount, cutoff + 1);
                 self.mk_pi(binder_name, binder_style, binder_type, body)
             }
             Expr::Lambda { binder_name, binder_style, binder_type, body, .. } => {
-                let binder_type = self.mk_shift(binder_type, amount);
-                let body = self.shift_expr(body, amount, 1);
+                let binder_type = self.mk_shift_cutoff(binder_type, amount, cutoff);
+                let body = self.mk_shift_cutoff(body, amount, cutoff + 1);
                 self.mk_lambda(binder_name, binder_style, binder_type, body)
             }
             Expr::Let { binder_name, binder_type, val, body, nondep, .. } => {
-                let binder_type = self.mk_shift(binder_type, amount);
-                let val = self.mk_shift(val, amount);
-                let body = self.shift_expr(body, amount, 1);
+                let binder_type = self.mk_shift_cutoff(binder_type, amount, cutoff);
+                let val = self.mk_shift_cutoff(val, amount, cutoff);
+                let body = self.mk_shift_cutoff(body, amount, cutoff + 1);
                 self.mk_let(binder_name, binder_type, val, body, nondep)
             }
             Expr::Proj { ty_name, idx, structure, .. } => {
-                let structure = self.mk_shift(structure, amount);
+                let structure = self.mk_shift_cutoff(structure, amount, cutoff);
                 self.mk_proj(ty_name, idx, structure)
             }
             Expr::Sort { .. } | Expr::Const { .. } | Expr::Local { .. } | Expr::StringLit { .. } | Expr::NatLit { .. } => {
@@ -885,8 +937,8 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
     /// If `e` is not a Shift node, returns it unchanged.
     pub fn force_shift(&mut self, e: ExprPtr<'t>) -> ExprPtr<'t> {
         match self.read_expr(e) {
-            Expr::Shift { inner, amount, .. } => {
-                self.force_shift_aux(inner, amount, 0)
+            Expr::Shift { inner, amount, cutoff, .. } => {
+                self.force_shift_aux(inner, amount, cutoff)
             }
             _ => e
         }
@@ -906,8 +958,8 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         }
         let calcd = match self.read_expr(e) {
             Expr::Sort { .. } | Expr::Const { .. } | Expr::Local { .. } | Expr::StringLit { .. } | Expr::NatLit { .. } => panic!(),
-            Expr::Shift { inner, amount: prev, .. } => {
-                let forced = self.force_shift_aux(inner, prev, 0);
+            Expr::Shift { inner, amount: prev, cutoff: prev_cutoff, .. } => {
+                let forced = self.force_shift_aux(inner, prev, prev_cutoff);
                 self.force_shift_aux(forced, amount, cutoff)
             }
             Expr::Var { dbj_idx, .. } => {
