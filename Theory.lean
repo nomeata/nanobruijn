@@ -7,15 +7,15 @@ We model the mask-based canonical hash from `expr.rs` and analyze shift-invarian
 
 Each expression stores:
 - `bvar_mask : UInt64` — bit `i % 64` set iff `bvar(j)` appears with `j ≡ i (mod 64)`
-- `nl : Nat` — `num_loose_bvars` (max bvar index + 1, 0 if closed)
+- `bvar_ub : Nat` — `num_loose_bvars` (max bvar index + 1, 0 if closed)
 - `struct_hash : UInt64` — structural hash mixing children's struct_hash, norm_mask, and deltas
 
-Canonical hash = `(struct_hash, norm_mask(bvar_mask, nl))`
-where `norm_mask(m, nl) = m.rotateRight(nl % 64)`
+Canonical hash = `(struct_hash, norm_mask(bvar_mask, bvar_ub))`
+where `norm_mask(m, bvar_ub) = m.rotateRight(bvar_ub % 64)`
 
-For `bvar(i)`: mask = `1 << (i % 64)`, nl = `i + 1`, struct_hash = `VAR_HASH`
-For `app(f, a)`: mask = `f.mask | a.mask`, nl = `max(f.nl, a.nl)`
-For `lam(body)`: mask = `unbind(body.mask)`, nl = `body.nl - 1`
+For `bvar(i)`: mask = `1 << (i % 64)`, bvar_ub = `i + 1`, struct_hash = `VAR_HASH`
+For `app(f, a)`: mask = `f.mask | a.mask`, bvar_ub = `max(f.bvar_ub, a.bvar_ub)`
+For `lam(body)`: mask = `unbind(body.mask)`, bvar_ub = `body.bvar_ub - 1`
   where `unbind(m) = (m &&& ~~~1).rotateRight(1)` — clears bit 0 (bound var) before rotating
 
 ## Results
@@ -58,7 +58,7 @@ def shift : Expr → (k : Nat) → (c : Nat := 0) → Expr
   | lam body, k, c => lam (body.shift k (c + 1))
   | const id, _, _ => const id
 
-/-! ## Metadata: mask and nl -/
+/-! ## Metadata: mask and bvar_ub -/
 
 def mask : Expr → Mask
   | bvar i => 1 <<< (i % 64 : Nat)
@@ -66,10 +66,10 @@ def mask : Expr → Mask
   | lam body => (body.mask &&& ~~~1).rotateRight 1  -- unbind with clearing
   | const _ => 0
 
-def nl : Expr → Nat
+def bvar_ub : Expr → Nat
   | bvar i => i + 1
-  | app f a => max f.nl a.nl
-  | lam body => body.nl - 1
+  | app f a => max f.bvar_ub a.bvar_ub
+  | lam body => body.bvar_ub - 1
   | const _ => 0
 
 /-! ## Canonical norm_mask -/
@@ -77,7 +77,7 @@ def nl : Expr → Nat
 def normMask (m : Mask) (n : Nat) : Mask :=
   if m == 0 then 0 else m.rotateRight (n % 64)
 
-def canonMask (e : Expr) : Mask := normMask e.mask e.nl
+def canonMask (e : Expr) : Mask := normMask e.mask e.bvar_ub
 
 /-! ## Binder-free fragment
 
@@ -103,46 +103,46 @@ theorem binderFree_shift (e : Expr) (k c : Nat) (hbf : e.binderFree = true) :
   | lam _ => simp [binderFree] at hbf
   | const _ => simp [shift, binderFree]
 
-/-! ### nl for binder-free expressions at cutoff 0
+/-! ### bvar_ub for binder-free expressions at cutoff 0
 
 For binder-free expressions shifted at cutoff 0, every bvar(i) becomes bvar(i+k)
 since i ≥ 0 always. No binder increments the cutoff. -/
 
-theorem nl_shift_bf_pos (e : Expr) (k : Nat) (hbf : e.binderFree = true) (hnl : nl e > 0) :
-    nl (e.shift k 0) = nl e + k := by
+theorem bvar_ub_shift_bf_pos (e : Expr) (k : Nat) (hbf : e.binderFree = true) (hub : bvar_ub e > 0) :
+    bvar_ub (e.shift k 0) = bvar_ub e + k := by
   induction e with
   | bvar i =>
-    simp only [shift, nl, Nat.zero_le, ↓reduceIte]
+    simp only [shift, bvar_ub, Nat.zero_le, ↓reduceIte]
     omega
   | app f a ihf iha =>
     simp only [binderFree, Bool.and_eq_true] at hbf
-    simp only [shift, nl] at hnl ⊢
-    by_cases hf : nl f > 0 <;> by_cases ha : nl a > 0
+    simp only [shift, bvar_ub] at hub ⊢
+    by_cases hf : bvar_ub f > 0 <;> by_cases ha : bvar_ub a > 0
     · rw [ihf hbf.1 hf, iha hbf.2 ha]; omega
-    · have ha0 : nl a = 0 := by omega
-      have : nl (a.shift k 0) = 0 := by
-        sorry -- nl_shift_closed for binder-free (induction)
+    · have ha0 : bvar_ub a = 0 := by omega
+      have : bvar_ub (a.shift k 0) = 0 := by
+        sorry -- bvar_ub_shift_closed for binder-free (induction)
       rw [ihf hbf.1 hf, this]; omega
-    · have hf0 : nl f = 0 := by omega
-      have : nl (f.shift k 0) = 0 := by sorry
+    · have hf0 : bvar_ub f = 0 := by omega
+      have : bvar_ub (f.shift k 0) = 0 := by sorry
       rw [iha hbf.2 ha, this]; omega
     · omega
   | lam _ => simp [binderFree] at hbf
-  | const _ => simp [nl] at hnl
+  | const _ => simp [bvar_ub] at hub
 
-theorem nl_shift_bf_zero (e : Expr) (k : Nat) (hbf : e.binderFree = true) (hnl : nl e = 0) :
-    nl (e.shift k 0) = 0 := by
+theorem bvar_ub_shift_bf_zero (e : Expr) (k : Nat) (hbf : e.binderFree = true) (hub : bvar_ub e = 0) :
+    bvar_ub (e.shift k 0) = 0 := by
   induction e with
-  | bvar i => simp [nl] at hnl
+  | bvar i => simp [bvar_ub] at hub
   | app f a ihf iha =>
     simp only [binderFree, Bool.and_eq_true] at hbf
-    simp only [nl] at hnl ⊢
-    have hf : nl f = 0 := by omega
-    have ha : nl a = 0 := by omega
-    simp only [shift, nl]
+    simp only [bvar_ub] at hub ⊢
+    have hf : bvar_ub f = 0 := by omega
+    have ha : bvar_ub a = 0 := by omega
+    simp only [shift, bvar_ub]
     rw [ihf hbf.1 hf, iha hbf.2 ha]; rfl
   | lam _ => simp [binderFree] at hbf
-  | const _ => simp [shift, nl]
+  | const _ => simp [shift, bvar_ub]
 
 /-- For binder-free e, `mask (e.shift k 0) = (mask e).rotateLeft (k % 64)`. -/
 theorem mask_shift_bf (e : Expr) (k : Nat) (hbf : e.binderFree = true) :
@@ -164,15 +164,15 @@ theorem mask_shift_bf (e : Expr) (k : Nat) (hbf : e.binderFree = true) :
     sorry -- BitVec: (0 : Mask).rotateLeft _ = 0
 
 /-- For binder-free closed e, mask is 0. -/
-theorem mask_closed_bf (e : Expr) (hbf : e.binderFree = true) (hnl : nl e = 0) :
+theorem mask_closed_bf (e : Expr) (hbf : e.binderFree = true) (hub : bvar_ub e = 0) :
     mask e = 0 := by
   induction e with
-  | bvar i => simp [nl] at hnl  -- nl (bvar i) = i + 1 = 0 is impossible
+  | bvar i => simp [bvar_ub] at hub  -- bvar_ub (bvar i) = i + 1 = 0 is impossible
   | app f a ihf iha =>
     simp only [binderFree, Bool.and_eq_true] at hbf
-    simp only [nl] at hnl
-    have hf : nl f = 0 := by omega
-    have ha : nl a = 0 := by omega
+    simp only [bvar_ub] at hub
+    have hf : bvar_ub f = 0 := by omega
+    have ha : bvar_ub a = 0 := by omega
     simp only [mask]
     rw [ihf hbf.1 hf, iha hbf.2 ha]
     simp
@@ -184,18 +184,18 @@ theorem canonMask_shift_inv_bf (e : Expr) (k : Nat) (hbf : e.binderFree = true) 
     canonMask (e.shift k 0) = canonMask e := by
   simp only [canonMask]
   rw [mask_shift_bf e k hbf]
-  by_cases hnl : nl e = 0
+  by_cases hub : bvar_ub e = 0
   · -- Closed: mask = 0, shift preserves closedness
-    have hm : mask e = 0 := mask_closed_bf e hbf hnl
-    rw [nl_shift_bf_zero e k hbf hnl]
+    have hm : mask e = 0 := mask_closed_bf e hbf hub
+    rw [bvar_ub_shift_bf_zero e k hbf hub]
     simp only [normMask, hm]
     sorry -- BitVec: rotateLeft of 0 is 0
   · -- Open: rotation cancels
-    have hopen : nl e > 0 := Nat.pos_of_ne_zero hnl
-    rw [nl_shift_bf_pos e k hbf hopen]
+    have hopen : bvar_ub e > 0 := Nat.pos_of_ne_zero hub
+    rw [bvar_ub_shift_bf_pos e k hbf hopen]
     simp only [normMask]
     sorry -- BitVec: nonzeroness preserved by rotateLeft, and
-          -- m.rotateLeft(k%64).rotateRight((nl+k)%64) = m.rotateRight(nl%64)
+          -- m.rotateLeft(k%64).rotateRight((bvar_ub+k)%64) = m.rotateRight(bvar_ub%64)
 
 /-! ## Verification: clearing fixes the ghost bit issue
 
@@ -215,7 +215,7 @@ private def cex_shifted : Expr := cex.shift 1 0
 
 -- And mask_closed now holds: lam (bvar 0) has mask = 0
 #eval mask (lam (bvar 0)) |>.toNat  -- 0
-#eval nl (lam (bvar 0))            -- 0
+#eval bvar_ub (lam (bvar 0))            -- 0
 
 /-! ## Aliasing at depth ≥ 64
 

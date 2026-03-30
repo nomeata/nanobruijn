@@ -143,10 +143,10 @@ pub enum FVarId {
 }
 
 /// Normalize a bvar_mask by anchoring at num_loose_bvars.
-/// Shift-invariant: shifting by k rotates mask left by k and adds k to nl, cancelling.
+/// Shift-invariant: shifting by k rotates mask left by k and adds k to bvar_ub, cancelling.
 #[inline]
-pub(crate) fn norm_mask(mask: u64, nl: u16) -> u64 {
-    if mask == 0 { 0 } else { mask.rotate_right(nl as u32 % 64) }
+pub(crate) fn norm_mask(mask: u64, bvar_ub: u16) -> u64 {
+    if mask == 0 { 0 } else { mask.rotate_right(bvar_ub as u32 % 64) }
 }
 
 /// "Unbind" a body's bvar_mask when constructing a binder (Lambda/Pi/Let).
@@ -161,16 +161,16 @@ pub(crate) fn unbind_mask(mask: u64) -> u64 {
 }
 
 /// Compute a shift-invariant delta between two children for mixing into struct_hash.
-/// Returns (lb_delta, nl_delta). Both are 0 when either child is closed (mask == 0),
-/// since shifting a closed expression doesn't change its nl/lb, breaking invariance.
+/// Returns (bvar_lb_delta, bvar_ub_delta). Both are 0 when either child is closed (mask == 0),
+/// since shifting a closed expression doesn't change its bvar_ub/bvar_lb, breaking invariance.
 #[inline]
-pub(crate) fn shift_inv_deltas(mask_a: u64, nl_a: u16, mask_b: u64, nl_b: u16) -> (i32, i32) {
+pub(crate) fn shift_inv_deltas(mask_a: u64, bvar_ub_a: u16, mask_b: u64, bvar_ub_b: u16) -> (i32, i32) {
     if mask_a == 0 || mask_b == 0 {
         (0, 0)
     } else {
-        let lb_a = mask_a.trailing_zeros() as i32;
-        let lb_b = mask_b.trailing_zeros() as i32;
-        (lb_a - lb_b, nl_a as i32 - nl_b as i32)
+        let bvar_lb_a = mask_a.trailing_zeros() as i32;
+        let bvar_lb_b = mask_b.trailing_zeros() as i32;
+        (bvar_lb_a - bvar_lb_b, bvar_ub_a as i32 - bvar_ub_b as i32)
     }
 }
 

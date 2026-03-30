@@ -112,7 +112,11 @@ impl<'p> ExportFile<'p> {
 
     /// Check all declarations in this export file using a single thread.
     pub(crate) fn check_all_declars_serial(&self) {
-        for declar in self.declars.values() {
+        let total = self.declars.len();
+        for (i, declar) in self.declars.values().enumerate() {
+            if i % 10000 == 0 {
+                eprintln!("[{}/{}]", i, total);
+            }
             self.check_declar(declar);
         }
     }
@@ -799,14 +803,14 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         // Shift-invariant cache: keyed by canonical hash.
         // On hit, verify structural equality up to shift, then apply delta.
         let canon = self.ctx.canonical_hash(e);
-        let e_nl = self.ctx.num_loose_bvars(e);
-        if let Some(&(stored_input, stored_result, stored_nl)) = self.tc_cache.whnf_cache.get(&canon) {
+        let e_bvar_ub = self.ctx.num_loose_bvars(e);
+        if let Some(&(stored_input, stored_result, stored_bvar_ub)) = self.tc_cache.whnf_cache.get(&canon) {
             // Fast path: exact pointer match (no shift_eq needed)
             if stored_input == e {
                 return stored_result;
             }
-            if e_nl >= stored_nl {
-                let delta = e_nl - stored_nl;
+            if e_bvar_ub >= stored_bvar_ub {
+                let delta = e_bvar_ub - stored_bvar_ub;
                 if delta > 0 && self.ctx.shift_eq(stored_input, e, delta) {
                     return self.ctx.force_shift_aux(stored_result, delta, 0);
                 }
@@ -820,9 +824,9 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             } else if let Some(next_term) = self.unfold_def(whnfd) {
                 cursor = next_term;
             } else {
-                // Only store if no entry exists or if this nl is smaller (better for future shift hits)
-                if self.tc_cache.whnf_cache.get(&canon).map_or(true, |&(_, _, stored_nl)| e_nl < stored_nl) {
-                    self.tc_cache.whnf_cache.insert(canon, (e, whnfd, e_nl));
+                // Only store if no entry exists or if this bvar_ub is smaller (better for future shift hits)
+                if self.tc_cache.whnf_cache.get(&canon).map_or(true, |&(_, _, stored_bvar_ub)| e_bvar_ub < stored_bvar_ub) {
+                    self.tc_cache.whnf_cache.insert(canon, (e, whnfd, e_bvar_ub));
                 }
                 return whnfd
             }

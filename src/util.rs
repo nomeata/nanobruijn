@@ -516,18 +516,18 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         let hash = hash64!(crate::expr::APP_HASH, fun, arg);
         let fun_e = self.read_expr(fun);
         let arg_e = self.read_expr(arg);
-        let fun_nl = fun_e.num_loose_bvars();
-        let arg_nl = arg_e.num_loose_bvars();
-        let num_loose_bvars = fun_nl.max(arg_nl);
+        let fun_ub = fun_e.num_loose_bvars();
+        let arg_ub = arg_e.num_loose_bvars();
+        let num_loose_bvars = fun_ub.max(arg_ub);
         let has_fvars = fun_e.has_fvars() || arg_e.has_fvars();
         let fun_sh = fun_e.get_struct_hash();
         let arg_sh = arg_e.get_struct_hash();
         let fun_mask = fun_e.get_bvar_mask();
         let arg_mask = arg_e.get_bvar_mask();
-        let fun_nm = norm_mask(fun_mask, fun_nl);
-        let arg_nm = norm_mask(arg_mask, arg_nl);
-        let (lb_delta, nl_delta) = shift_inv_deltas(fun_mask, fun_nl, arg_mask, arg_nl);
-        let struct_hash = hash64!(crate::expr::APP_HASH, fun_sh, arg_sh, fun_nm, arg_nm, lb_delta, nl_delta);
+        let fun_nm = norm_mask(fun_mask, fun_ub);
+        let arg_nm = norm_mask(arg_mask, arg_ub);
+        let (bvar_lb_delta, bvar_ub_delta) = shift_inv_deltas(fun_mask, fun_ub, arg_mask, arg_ub);
+        let struct_hash = hash64!(crate::expr::APP_HASH, fun_sh, arg_sh, fun_nm, arg_nm, bvar_lb_delta, bvar_ub_delta);
         let bvar_mask = fun_mask | arg_mask;
         self.alloc_expr(Expr::App { fun, arg, num_loose_bvars, has_fvars, hash, struct_hash, bvar_mask })
     }
@@ -542,20 +542,20 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         let hash = hash64!(crate::expr::LAMBDA_HASH, binder_name, binder_style, binder_type, body);
         let ty_e = self.read_expr(binder_type);
         let body_e = self.read_expr(body);
-        let ty_nl = ty_e.num_loose_bvars();
-        let body_nl = body_e.num_loose_bvars();
-        let num_loose_bvars = ty_nl.max(body_nl.saturating_sub(1));
+        let ty_ub = ty_e.num_loose_bvars();
+        let body_ub = body_e.num_loose_bvars();
+        let num_loose_bvars = ty_ub.max(body_ub.saturating_sub(1));
         let has_fvars = ty_e.has_fvars() || body_e.has_fvars();
         let ty_sh = ty_e.get_struct_hash();
         let body_sh = body_e.get_struct_hash();
         let ty_mask = ty_e.get_bvar_mask();
         let body_mask = body_e.get_bvar_mask();
         let body_free_mask = unbind_mask(body_mask);
-        let body_free_nl = body_nl.saturating_sub(1);
-        let ty_nm = norm_mask(ty_mask, ty_nl);
-        let body_free_nm = norm_mask(body_free_mask, body_free_nl);
-        let (lb_delta, nl_delta) = shift_inv_deltas(ty_mask, ty_nl, body_free_mask, body_free_nl);
-        let struct_hash = hash64!(crate::expr::LAMBDA_HASH, binder_name, binder_style, ty_sh, body_sh, ty_nm, body_free_nm, lb_delta, nl_delta);
+        let body_free_ub = body_ub.saturating_sub(1);
+        let ty_nm = norm_mask(ty_mask, ty_ub);
+        let body_free_nm = norm_mask(body_free_mask, body_free_ub);
+        let (bvar_lb_delta, bvar_ub_delta) = shift_inv_deltas(ty_mask, ty_ub, body_free_mask, body_free_ub);
+        let struct_hash = hash64!(crate::expr::LAMBDA_HASH, binder_name, binder_style, ty_sh, body_sh, ty_nm, body_free_nm, bvar_lb_delta, bvar_ub_delta);
         let bvar_mask = ty_mask | body_free_mask;
         self.alloc_expr(Expr::Lambda { binder_name, binder_style, binder_type, body, num_loose_bvars, has_fvars, hash, struct_hash, bvar_mask })
     }
@@ -570,20 +570,20 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         let hash = hash64!(crate::expr::PI_HASH, binder_name, binder_style, binder_type, body);
         let ty_e = self.read_expr(binder_type);
         let body_e = self.read_expr(body);
-        let ty_nl = ty_e.num_loose_bvars();
-        let body_nl = body_e.num_loose_bvars();
-        let num_loose_bvars = ty_nl.max(body_nl.saturating_sub(1));
+        let ty_ub = ty_e.num_loose_bvars();
+        let body_ub = body_e.num_loose_bvars();
+        let num_loose_bvars = ty_ub.max(body_ub.saturating_sub(1));
         let has_fvars = ty_e.has_fvars() || body_e.has_fvars();
         let ty_sh = ty_e.get_struct_hash();
         let body_sh = body_e.get_struct_hash();
         let ty_mask = ty_e.get_bvar_mask();
         let body_mask = body_e.get_bvar_mask();
         let body_free_mask = unbind_mask(body_mask);
-        let body_free_nl = body_nl.saturating_sub(1);
-        let ty_nm = norm_mask(ty_mask, ty_nl);
-        let body_free_nm = norm_mask(body_free_mask, body_free_nl);
-        let (lb_delta, nl_delta) = shift_inv_deltas(ty_mask, ty_nl, body_free_mask, body_free_nl);
-        let struct_hash = hash64!(crate::expr::PI_HASH, binder_name, binder_style, ty_sh, body_sh, ty_nm, body_free_nm, lb_delta, nl_delta);
+        let body_free_ub = body_ub.saturating_sub(1);
+        let ty_nm = norm_mask(ty_mask, ty_ub);
+        let body_free_nm = norm_mask(body_free_mask, body_free_ub);
+        let (bvar_lb_delta, bvar_ub_delta) = shift_inv_deltas(ty_mask, ty_ub, body_free_mask, body_free_ub);
+        let struct_hash = hash64!(crate::expr::PI_HASH, binder_name, binder_style, ty_sh, body_sh, ty_nm, body_free_nm, bvar_lb_delta, bvar_ub_delta);
         let bvar_mask = ty_mask | body_free_mask;
         self.alloc_expr(Expr::Pi { binder_name, binder_style, binder_type, body, num_loose_bvars, has_fvars, hash, struct_hash, bvar_mask })
     }
@@ -600,10 +600,10 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         let ty_e = self.read_expr(binder_type);
         let val_e = self.read_expr(val);
         let body_e = self.read_expr(body);
-        let ty_nl = ty_e.num_loose_bvars();
-        let val_nl = val_e.num_loose_bvars();
-        let body_nl = body_e.num_loose_bvars();
-        let num_loose_bvars = ty_nl.max(val_nl.max(body_nl.saturating_sub(1)));
+        let ty_ub = ty_e.num_loose_bvars();
+        let val_ub = val_e.num_loose_bvars();
+        let body_ub = body_e.num_loose_bvars();
+        let num_loose_bvars = ty_ub.max(val_ub.max(body_ub.saturating_sub(1)));
         let has_fvars = ty_e.has_fvars() || val_e.has_fvars() || body_e.has_fvars();
         let ty_sh = ty_e.get_struct_hash();
         let val_sh = val_e.get_struct_hash();
@@ -612,13 +612,13 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         let val_mask = val_e.get_bvar_mask();
         let body_mask = body_e.get_bvar_mask();
         let body_free_mask = unbind_mask(body_mask);
-        let body_free_nl = body_nl.saturating_sub(1);
-        let ty_nm = norm_mask(ty_mask, ty_nl);
-        let val_nm = norm_mask(val_mask, val_nl);
-        let body_free_nm = norm_mask(body_free_mask, body_free_nl);
-        let (lb_delta_tv, nl_delta_tv) = shift_inv_deltas(ty_mask, ty_nl, val_mask, val_nl);
-        let (lb_delta_vb, nl_delta_vb) = shift_inv_deltas(val_mask, val_nl, body_free_mask, body_free_nl);
-        let struct_hash = hash64!(crate::expr::LET_HASH, binder_name, ty_sh, val_sh, body_sh, nondep, ty_nm, val_nm, body_free_nm, lb_delta_tv, nl_delta_tv, lb_delta_vb, nl_delta_vb);
+        let body_free_ub = body_ub.saturating_sub(1);
+        let ty_nm = norm_mask(ty_mask, ty_ub);
+        let val_nm = norm_mask(val_mask, val_ub);
+        let body_free_nm = norm_mask(body_free_mask, body_free_ub);
+        let (bvar_lb_delta_tv, bvar_ub_delta_tv) = shift_inv_deltas(ty_mask, ty_ub, val_mask, val_ub);
+        let (bvar_lb_delta_vb, bvar_ub_delta_vb) = shift_inv_deltas(val_mask, val_ub, body_free_mask, body_free_ub);
+        let struct_hash = hash64!(crate::expr::LET_HASH, binder_name, ty_sh, val_sh, body_sh, nondep, ty_nm, val_nm, body_free_nm, bvar_lb_delta_tv, bvar_ub_delta_tv, bvar_lb_delta_vb, bvar_ub_delta_vb);
         let bvar_mask = ty_mask | val_mask | body_free_mask;
         self.alloc_expr(Expr::Let { binder_name, binder_type, val, body, num_loose_bvars, has_fvars, hash, nondep, struct_hash, bvar_mask })
     }
@@ -936,8 +936,8 @@ pub(crate) struct TcCache<'t> {
     pub(crate) infer_cache_check: UniqueHashMap<ExprPtr<'t>, ExprPtr<'t>>,
     pub(crate) infer_cache_no_check: UniqueHashMap<ExprPtr<'t>, ExprPtr<'t>>,
     /// Shift-invariant WHNF cache: keyed by canonical hash (struct_hash, norm_mask),
-    /// stores (input_expr, result_expr, nl). On hit, verify with shift_eq, then
-    /// force_shift_aux(result, delta) where delta = query_nl - stored_nl.
+    /// stores (input_expr, result_expr, bvar_ub). On hit, verify with shift_eq, then
+    /// force_shift_aux(result, delta) where delta = query_bvar_ub - stored_bvar_ub.
     pub(crate) whnf_cache: FxHashMap<(u64, u64), (ExprPtr<'t>, ExprPtr<'t>, u16)>,
     pub(crate) whnf_no_unfolding_cache: UniqueHashMap<ExprPtr<'t>, ExprPtr<'t>>,
     pub(crate) eq_cache: UnionFind<ExprPtr<'t>>,

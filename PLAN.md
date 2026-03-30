@@ -36,12 +36,12 @@ store.
 
 Each expression stores `(canonical_hash, lower_bound)`:
 
-- `BVar(i)`: hash = `BVAR_CONST`, lb = `i`
-- `App(f, x)`: hash = `combine(hash_f, hash_x, lb_f - lb_x)`, lb = `min(lb_f, lb_x)`
-- `Lam(ty, body)`: hash = `combine(hash_ty, hash_body, lb_ty - (lb_body - 1))`,
-  lb = `min(lb_ty, lb_body - 1)`
+- `BVar(i)`: hash = `BVAR_CONST`, bvar_lb = `i`
+- `App(f, x)`: hash = `combine(hash_f, hash_x, bvar_lb_f - bvar_lb_x)`, bvar_lb = `min(bvar_lb_f, bvar_lb_x)`
+- `Lam(ty, body)`: hash = `combine(hash_ty, hash_body, bvar_lb_ty - (bvar_lb_body - 1))`,
+  bvar_lb = `min(bvar_lb_ty, bvar_lb_body - 1)`
 
-The delta `lb_f - lb_x` is shift-invariant (shifting both by k cancels). The hash
+The delta `bvar_lb_f - bvar_lb_x` is shift-invariant (shifting both by k cancels). The hash
 captures full relative variable structure — no information is lost — but is invariant
 under uniform shifting. Two expressions differing only by a uniform shift produce the
 same hash.
@@ -52,7 +52,7 @@ Instead of traversing to shift, wrap: `Shift(e, k)` meaning all free vars in e a
 shifted up by k.
 
 - `hash(Shift(e, k)) = hash(e)` — transparent to cache lookup
-- `lb(Shift(e, k)) = lb(e) + k` — O(1)
+- `bvar_lb(Shift(e, k)) = bvar_lb(e) + k` — O(1)
 - Pushed down lazily during pattern matching in reduction
 - Collapsed: `Shift(Shift(e, j), k) → Shift(e, j+k)`
 - Skipped: if `loose_bvar_range(e) == 0`, no shift needed
@@ -70,8 +70,8 @@ Cache results are returned wrapped in `Shift` — O(1) instead of O(n) traversal
 
 Each expression node stores (computed at construction, O(1)):
 - `canonical_hash: u64`
-- `lower_bound: u16` (minimum bvar index; sentinel for "no free bvars")
-- `loose_bvar_range: u16` (max bvar index + 1, for fast "no free vars" checks)
+- `bvar_lb: u16` (minimum bvar index; sentinel for "no free bvars")
+- `bvar_ub: u16` (max bvar index + 1, for fast "no free vars" checks)
 
 ## Implementation Plan
 
@@ -109,23 +109,23 @@ on Pi/Lambda/etc. breaks if those are wrapped in Shift.
 **Metadata** (stored per expression node):
 
 - `struct_hash: u64` — structural hash with bvar indices replaced by a constant,
-  plus per-child `(lb_delta, nl_delta)` for shift-invariant discrimination and
-  each child's `norm_mask` (bvar_mask rotated by nl).
+  plus per-child `(bvar_lb_delta, bvar_ub_delta)` for shift-invariant discrimination and
+  each child's `norm_mask` (bvar_mask rotated by bvar_ub).
 - `bvar_mask: u64` — bit `i` set iff any `bvar(j)` occurs with `j ≡ i (mod 64)`.
 - `unbind(mask) = (mask & !1).rotate_right(1)` for binder bodies — clears the bound
   variable's bit before rotating, eliminating "ghost bits" that break shift-invariance.
   At depth ≥ 64, a free `bvar(64)` aliases with `bvar(0)` and gets incorrectly cleared,
   but this only causes hash collisions (caught by verify), not correctness issues.
 
-**Canonical hash**: `(struct_hash, bvar_mask.rotate_right(nl % 64))` — O(1), shift-invariant
+**Canonical hash**: `(struct_hash, bvar_mask.rotate_right(bvar_ub % 64))` — O(1), shift-invariant
 for expressions with binder depth < 64 (proved in Theory.lean for the binder-free fragment).
 
 **Discrimination fix**: Earlier attempt without per-child deltas had too many collisions
-(norm_mask maps ALL single-BVar expressions to `1<<63`). Adding `(lb_delta, nl_delta)`
+(norm_mask maps ALL single-BVar expressions to `1<<63`). Adding `(bvar_lb_delta, bvar_ub_delta)`
 between sibling children to struct_hash fully resolved this — 0 verify failures on init export.
 
 **WHNF cache**: `FxHashMap<(u64,u64), (ExprPtr, ExprPtr, u16)>` keyed by canonical hash,
-stores `(input, result, nl)`. On hit:
+stores `(input, result, bvar_ub)`. On hit:
 - Fast path: if `stored_input == query` (pointer equality), return stored result directly.
 - Shift path: verify with `shift_eq(stored_input, query, delta)` (non-allocating traversal),
   then return `force_shift_aux(stored_result, delta, 0)`.
@@ -136,7 +136,7 @@ stores `(input, result, nl)`. On hit:
 
 **Cache stats on init export** (54,475 decls, with bit-clearing unbind):
 - 3.6M exact hits (pointer match), 64k shift hits (verified), 0 verify failures
-- 11k nl failures (stored_nl > query_nl), 1.1M misses, 112k shift peels
+- 11k bvar_ub failures (stored_bvar_ub > query_bvar_ub), 1.1M misses, 112k shift peels
 
 ### Phase 5: Benchmark ✅ (partial)
 - [done] Validated against arena test cases (89 good + 45 bad)
