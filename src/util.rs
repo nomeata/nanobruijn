@@ -337,6 +337,13 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         (self.read_expr(a), self.read_expr(x))
     }
 
+    /// Like read_expr_pair but with Shift pushed one level inside.
+    pub fn view_expr_pair(&mut self, a: ExprPtr<'t>, x: ExprPtr<'t>) -> (Expr<'t>, Expr<'t>) {
+        let va = self.view_expr(a);
+        let vx = self.view_expr(x);
+        (va, vx)
+    }
+
     pub fn read_string(&self, p: StringPtr<'t>) -> &CowStr<'t> {
         match p.dag_marker() {
             DagMarker::ExportFile => self.export_file.dag.strings.get_index(p.idx()).unwrap(),

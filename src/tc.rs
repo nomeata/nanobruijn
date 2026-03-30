@@ -489,7 +489,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         let mut ctor_ty = self.ctx.subst_declar_info_levels(*ctor_info, struct_ty_levels);
         for i in 0..(*num_params) {
             ctor_ty = self.whnf(ctor_ty);
-            match self.ctx.read_expr(ctor_ty) {
+            match self.ctx.view_expr(ctor_ty) {
                 Pi { body, .. } => {
                     ctor_ty = self.ctx.inst_beta(body, &[struct_ty_args[i as usize]]);
                 }
@@ -498,7 +498,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         }
         for i in 0..idx {
             ctor_ty = self.whnf(ctor_ty);
-            match self.ctx.read_expr(ctor_ty) {
+            match self.ctx.view_expr(ctor_ty) {
                 Pi { binder_type, body, .. } => {
                     if self.ctx.num_loose_bvars(body) != 0 {
                       if structure_ty_is_prop && !self.is_proposition(binder_type).0 {
@@ -514,7 +514,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             }
         }
         let reduced = self.whnf(ctor_ty);
-        match self.ctx.read_expr(reduced) {
+        match self.ctx.view_expr(reduced) {
             Pi { binder_type, .. } => {
                 if structure_ty_is_prop && !self.is_proposition(binder_type).0 {
                     panic!("infer_proj prop")
@@ -703,7 +703,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
     fn infer_lambda(&mut self, mut e: ExprPtr<'t>, flag: InferFlag) -> ExprPtr<'t> {
         // Collect binder info while descending into nested lambdas
         let mut binders: Vec<(NamePtr<'t>, crate::expr::BinderStyle, ExprPtr<'t>)> = Vec::new();
-        while let Lambda { binder_name, binder_style, binder_type, body, .. } = self.ctx.read_expr(e) {
+        while let Lambda { binder_name, binder_style, binder_type, body, .. } = self.ctx.view_expr(e) {
             if let Check = flag {
                 self.infer_sort_of(binder_type, flag);
             }
@@ -727,7 +727,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
     fn infer_pi(&mut self, mut e: ExprPtr<'t>, flag: InferFlag) -> ExprPtr<'t> {
         let mut universes = Vec::new();
         let depth0 = self.local_ctx.len();
-        while let Pi { binder_type, body, .. } = self.ctx.read_expr(e) {
+        while let Pi { binder_type, body, .. } = self.ctx.view_expr(e) {
             let dom_univ = self.infer_sort_of(binder_type, flag);
             universes.push(dom_univ);
             self.push_local(binder_type);
@@ -994,7 +994,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         | (
             Lambda { binder_type: t1, body: body1, .. },
             Lambda { binder_type: t2, body: body2, .. },
-        ) = self.ctx.read_expr_pair(x, y)
+        ) = self.ctx.view_expr_pair(x, y)
         {
             if self.def_eq(t1, t2) {
                 self.push_local(t1);
