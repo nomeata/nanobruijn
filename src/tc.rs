@@ -1300,6 +1300,20 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                 return Some(self.def_eq(ix, iy))
             }
         }
+        // Check if one side is a shift of the other (non-allocating structural comparison)
+        match (self.ctx.read_expr(x), self.ctx.read_expr(y)) {
+            (Shift { inner, amount, cutoff: 0, .. }, _) => {
+                if self.ctx.shift_eq(inner, y, amount) {
+                    return Some(true)
+                }
+            }
+            (_, Shift { inner, amount, cutoff: 0, .. }) => {
+                if self.ctx.shift_eq(inner, x, amount) {
+                    return Some(true)
+                }
+            }
+            _ => {}
+        }
         if self.tc_cache.eq_cache.check_uf_eq(x, y) {
 
             return Some(true)

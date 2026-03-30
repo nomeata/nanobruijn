@@ -107,13 +107,14 @@ the full expression tree creating new nodes.
 
 ## TODO
 
-- **Fix def_eq to handle Shift nodes**: The single blocker for lazy shifting. Converting
-  unfold_apps/infer_app/whnf_no_unfolding to use `force_shift_shallow` passes small tests
-  but fails init with def_eq assertion errors. The infrastructure is ready:
-  `force_shift_shallow` with cutoff pushes through binders via `Shift(body, k, cutoff+1)`,
-  and `mk_shift_cutoff` creates the lazy wrappers. The issue is def_eq's eq_cache/failure_cache
-  interactions with inner Shift nodes. Fixing this unlocks O(n_args) per whnf/def_eq step
-  instead of O(expr_size). See `force_shift_shallow` in util.rs.
+- **Make whnf/unfold_apps lazy with Shift nodes**: Converting unfold_apps to use
+  `force_shift_shallow` fails init — the Shift-wrapped args propagate everywhere and
+  interact badly with code that pattern-matches on whnf results (expects Pi/Lambda/etc,
+  gets Shift). Making whnf return mk_shift results also fails — every consumer of whnf
+  (`match read_expr(whnfd)`) needs to handle Shift. This is a pervasive change.
+  First step done: added `shift_eq` check in `def_eq_quick_check` so def_eq can handle
+  top-level Shift inputs. Next: systematically audit all `match read_expr` after whnf calls
+  to handle Shift, or add a `whnf_and_force` wrapper and make individual sites lazy.
 
 - **Fix mathlib OOM**: instrument memory per-declaration, find what's blowing up;
   consider periodic cache eviction or more compact expression representation
@@ -169,6 +170,20 @@ the full expression tree creating new nodes.
   shift-invariant keys because the operation itself preserves structural identity.
   The underlying issue is the same as shallowish force: to reuse shift results across
   depths, you'd need to return Shift-wrapped results, but inner Shift nodes break def_eq.
+
+- **Shift nodes break ALL whnf consumers, not just def_eq**: Making whnf return
+  Shift-wrapped results (mk_shift instead of force_shift_aux) causes failures everywhere
+  that pattern-matches on whnf results: `match read_expr(whnfd) { Pi { .. } => ... }` gets
+  Shift instead of Pi. Same for unfold_apps with force_shift_shallow: the Shift-wrapped args
+  propagate through inst_beta (offset=0 case returns substitution values as-is), foldl_apps,
+  def unfolding, etc. The issue isn't just def_eq's caches — it's that Shift is a new
+  constructor tag that no consumer expects after whnf. The fix requires either: (a) making
+  every `match read_expr` after whnf handle Shift, or (b) keeping whnf's contract (no Shifts
+  in output) and finding laziness elsewhere.
+
+- **shift_eq in def_eq_quick_check works**: Adding `shift_eq(inner, other_side, amount)` for
+  single-sided Shift comparisons is cheap (non-allocating) and correct. This makes def_eq
+  robust against Shift-wrapped inputs from infer (which returns mk_shift results).
 
 ## References
 
