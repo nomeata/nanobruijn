@@ -1,5 +1,5 @@
 //! Implementation of Lean expressions
-use crate::util::{BigUintPtr, ExprPtr, FxHashMap, LevelPtr, LevelsPtr, NamePtr, StringPtr, TcCtx};
+use crate::util::{BigUintPtr, ExprPtr, FxHashMap, LevelPtr, LevelsPtr, NamePtr, Ptr, StringPtr, TcCtx};
 use num_bigint::BigUint;
 use num_traits::identities::Zero;
 use Expr::*;
@@ -17,6 +17,7 @@ pub(crate) const LOCAL_HASH: u64 = 211;
 pub(crate) const STRING_LIT_HASH: u64 = 1493;
 pub(crate) const NAT_LIT_HASH: u64 = 1583;
 pub(crate) const SHIFT_HASH: u64 = 1699;
+pub(crate) const FVAR_HASH: u64 = 1871;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Expr<'a> {
@@ -24,20 +25,20 @@ pub enum Expr<'a> {
     StringLit {
         hash: u64,
         struct_hash: u64,
-        bvar_mask: u64,
+        fvar_list: FVarList<'a>,
         ptr: StringPtr<'a>,
     },
     /// A nat literal, holds a pointer to an arbitrary precision bignum.
     NatLit {
         hash: u64,
         struct_hash: u64,
-        bvar_mask: u64,
+        fvar_list: FVarList<'a>,
         ptr: BigUintPtr<'a>,
     },
     Proj {
         hash: u64,
         struct_hash: u64,
-        bvar_mask: u64,
+        fvar_list: FVarList<'a>,
         /// The name of the structure being projected. E.g. `Prod` if this is
         /// projection 0 of `Prod.mk ..`
         ty_name: NamePtr<'a>,
@@ -53,26 +54,26 @@ pub enum Expr<'a> {
     Var {
         hash: u64,
         struct_hash: u64,
-        bvar_mask: u64,
+        fvar_list: FVarList<'a>,
         dbj_idx: u16,
     },
     Sort {
         hash: u64,
         struct_hash: u64,
-        bvar_mask: u64,
+        fvar_list: FVarList<'a>,
         level: LevelPtr<'a>,
     },
     Const {
         hash: u64,
         struct_hash: u64,
-        bvar_mask: u64,
+        fvar_list: FVarList<'a>,
         name: NamePtr<'a>,
         levels: LevelsPtr<'a>,
     },
     App {
         hash: u64,
         struct_hash: u64,
-        bvar_mask: u64,
+        fvar_list: FVarList<'a>,
         fun: ExprPtr<'a>,
         arg: ExprPtr<'a>,
         num_loose_bvars: u16,
@@ -81,7 +82,7 @@ pub enum Expr<'a> {
     Pi {
         hash: u64,
         struct_hash: u64,
-        bvar_mask: u64,
+        fvar_list: FVarList<'a>,
         binder_name: NamePtr<'a>,
         binder_style: BinderStyle,
         binder_type: ExprPtr<'a>,
@@ -92,7 +93,7 @@ pub enum Expr<'a> {
     Lambda {
         hash: u64,
         struct_hash: u64,
-        bvar_mask: u64,
+        fvar_list: FVarList<'a>,
         binder_name: NamePtr<'a>,
         binder_style: BinderStyle,
         binder_type: ExprPtr<'a>,
@@ -103,7 +104,7 @@ pub enum Expr<'a> {
     Let {
         hash: u64,
         struct_hash: u64,
-        bvar_mask: u64,
+        fvar_list: FVarList<'a>,
         binder_name: NamePtr<'a>,
         binder_type: ExprPtr<'a>,
         val: ExprPtr<'a>,
@@ -116,7 +117,7 @@ pub enum Expr<'a> {
     Local {
         hash: u64,
         struct_hash: u64,
-        bvar_mask: u64,
+        fvar_list: FVarList<'a>,
         binder_name: NamePtr<'a>,
         binder_style: BinderStyle,
         binder_type: ExprPtr<'a>,
@@ -128,7 +129,7 @@ pub enum Expr<'a> {
     Shift {
         hash: u64,
         struct_hash: u64,
-        bvar_mask: u64,
+        fvar_list: FVarList<'a>,
         inner: ExprPtr<'a>,
         amount: u16,
         num_loose_bvars: u16,
@@ -142,36 +143,29 @@ pub enum FVarId {
     Unique(u32),
 }
 
-/// Normalize a bvar_mask by anchoring at num_loose_bvars.
-/// Shift-invariant: shifting by k rotates mask left by k and adds k to bvar_ub, cancelling.
-#[inline]
-pub(crate) fn norm_mask(mask: u64, bvar_ub: u16) -> u64 {
-    if mask == 0 { 0 } else { mask.rotate_right(bvar_ub as u32 % 64) }
+/// A node in a delta-encoded sorted set of free bvar indices.
+/// The set {a0, a1, a2, ...} (sorted) is encoded as [a0, a1-a0-1, a2-a1-1, ...].
+/// None = empty set (closed). Some(ptr) = non-empty.
+pub type FVarList<'a> = Option<FVarListPtr<'a>>;
+pub type FVarListPtr<'a> = Ptr<&'a FVarNode<'a>>;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FVarNode<'a> {
+    /// Hash of this node (delta + tail hash), for hash-consing via UniqueHasher.
+    pub(crate) hash: u64,
+    /// For the head: the lower bound (smallest free bvar index).
+    /// For subsequent nodes: the gap minus 1 to the next free bvar index.
+    pub(crate) delta: u16,
+    /// The rest of the list.
+    pub(crate) tail: FVarList<'a>,
 }
 
-/// "Unbind" a body's bvar_mask when constructing a binder (Lambda/Pi/Let).
-/// Clears bit 0 (the bound variable's bit) before rotating, so that bound
-/// variables don't contribute "ghost bits" to the canonical hash. This makes
-/// norm_mask exactly shift-invariant for binder depths < 64. At depth >= 64,
-/// a free bvar(64) aliases with bvar(0) and gets incorrectly cleared, but
-/// this only causes hash collisions (caught by verify), not correctness issues.
-#[inline]
-pub(crate) fn unbind_mask(mask: u64) -> u64 {
-    (mask & !1).rotate_right(1)
+impl<'a> FVarNode<'a> {
+    pub(crate) fn get_hash(&self) -> u64 { self.hash }
 }
 
-/// Compute a shift-invariant delta between two children for mixing into struct_hash.
-/// Returns (bvar_lb_delta, bvar_ub_delta). Both are 0 when either child is closed (mask == 0),
-/// since shifting a closed expression doesn't change its bvar_ub/bvar_lb, breaking invariance.
-#[inline]
-pub(crate) fn shift_inv_deltas(mask_a: u64, bvar_ub_a: u16, mask_b: u64, bvar_ub_b: u16) -> (i32, i32) {
-    if mask_a == 0 || mask_b == 0 {
-        (0, 0)
-    } else {
-        let bvar_lb_a = mask_a.trailing_zeros() as i32;
-        let bvar_lb_b = mask_b.trailing_zeros() as i32;
-        (bvar_lb_a - bvar_lb_b, bvar_ub_a as i32 - bvar_ub_b as i32)
-    }
+impl<'a> std::hash::Hash for FVarNode<'a> {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) { state.write_u64(self.hash) }
 }
 
 impl<'a> Expr<'a> {
@@ -209,27 +203,21 @@ impl<'a> Expr<'a> {
         }
     }
 
-    pub(crate) fn get_bvar_mask(&self) -> u64 {
+    pub(crate) fn get_fvar_list(&self) -> FVarList<'a> {
         match self {
-            Var { bvar_mask, .. }
-            | Sort { bvar_mask, .. }
-            | Const { bvar_mask, .. }
-            | App { bvar_mask, .. }
-            | Pi { bvar_mask, .. }
-            | Lambda { bvar_mask, .. }
-            | Let { bvar_mask, .. }
-            | Local { bvar_mask, .. }
-            | StringLit { bvar_mask, .. }
-            | NatLit { bvar_mask, .. }
-            | Proj { bvar_mask, .. }
-            | Shift { bvar_mask, .. } => *bvar_mask,
+            Var { fvar_list, .. }
+            | Sort { fvar_list, .. }
+            | Const { fvar_list, .. }
+            | App { fvar_list, .. }
+            | Pi { fvar_list, .. }
+            | Lambda { fvar_list, .. }
+            | Let { fvar_list, .. }
+            | Local { fvar_list, .. }
+            | StringLit { fvar_list, .. }
+            | NatLit { fvar_list, .. }
+            | Proj { fvar_list, .. }
+            | Shift { fvar_list, .. } => *fvar_list,
         }
-    }
-
-    /// Compute the shift-invariant canonical hash for cache keys.
-    /// Returns (struct_hash, normalized_bvar_mask).
-    pub(crate) fn canonical_hash(&self) -> (u64, u64) {
-        (self.get_struct_hash(), norm_mask(self.get_bvar_mask(), self.num_loose_bvars()))
     }
 }
 impl<'a> std::hash::Hash for Expr<'a> {
@@ -909,9 +897,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
 
     pub(crate) fn struct_hash(&self, e: ExprPtr<'t>) -> u64 { self.read_expr(e).get_struct_hash() }
 
-    pub(crate) fn bvar_mask(&self, e: ExprPtr<'t>) -> u64 { self.read_expr(e).get_bvar_mask() }
-
-    pub(crate) fn canonical_hash(&self, e: ExprPtr<'t>) -> (u64, u64) { self.read_expr(e).canonical_hash() }
+    pub(crate) fn fvar_list_of(&self, e: ExprPtr<'t>) -> FVarList<'t> { self.read_expr(e).get_fvar_list() }
 
     /// Check if `b` equals `shift(a, delta)` without allocating new expression nodes.
     /// Used to verify shift-invariant cache hits.
