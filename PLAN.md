@@ -29,7 +29,9 @@ We use a local context array with `push_local`/`pop_local` (zero allocation).
 - `force_shift`: convenience wrapper that forces a top-level Shift node
 - All `unfold_apps*` functions call `force_shift` before peeling App nodes
 - `infer_app` calls `force_shift` before matching Pi on function type
-- `infer_inner` has explicit Shift arm that forces before inferring
+- `infer_inner` handles Shift without forcing: `infer(Shift(inner, k), d) = mk_shift(infer(inner, d-k), k)`.
+  Temporarily shrinks `local_ctx` and `infer_open_cache` to depth d-k, infers inner,
+  restores. No O(n) traversal — just O(k) for save/restore.
 - whnf iteratively peels nested Shifts before reducing
 
 **Current state**: Shift nodes only wrap top-level expressions (e.g. `lookup_var` results).

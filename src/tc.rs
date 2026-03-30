@@ -527,6 +527,17 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
     }
 
     fn infer_inner(&mut self, e: ExprPtr<'t>, flag: InferFlag) -> ExprPtr<'t> {
+        // Handle Shift nodes without forcing: infer(Shift(inner, k), d) = mk_shift(infer(inner, d-k), k).
+        // Temporarily shrink the context to depth d-k, infer inner, restore, shift result.
+        if let Expr::Shift { inner, amount, .. } = self.ctx.read_expr(e) {
+            let new_depth = self.local_ctx.len() - amount as usize;
+            let saved_locals = self.local_ctx.split_off(new_depth);
+            let saved_cache = self.tc_cache.infer_open_cache.split_off(new_depth);
+            let inner_type = self.infer(inner, flag);
+            self.local_ctx.extend(saved_locals);
+            self.tc_cache.infer_open_cache.extend(saved_cache);
+            return self.ctx.mk_shift(inner_type, amount);
+        }
         // Only use cache for closed expressions (no loose bvars), since
         // the result of inferring an expression with free Vars depends on
         // the local context depth.
@@ -581,10 +592,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                 assert!(self.ctx.export_file.config.string_extension);
                 self.ctx.string_type().unwrap()
             }
-            Shift { .. } => {
-                let forced = self.ctx.force_shift(e);
-                return self.infer(forced, flag)
-            }
+            Shift { .. } => unreachable!("Shift handled before cache lookup")
         };
         if cacheable {
             match flag {
