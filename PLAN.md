@@ -1,205 +1,130 @@
-# lean-slop-kernel: De Bruijn Indices with Shift-Homomorphic Caching
+# lean-slop-kernel
 
-Forked from [nanoda_lib](https://github.com/ammkrn/nanoda_lib) (Rust Lean 4 kernel).
+Forked from [nanoda_lib](https://github.com/ammkrn/nanoda_lib) (Rust Lean 4 type checker).
 
-## Hypothesis
+**Goal**: Replace locally-nameless binding with pure de Bruijn indices + shift-homomorphic
+caching. Avoid the expensive substitution on binder entry while retaining cross-depth
+cache hits via shift-invariant keys.
 
-The standard Lean kernel uses locally nameless binding: when entering a binder, it
-substitutes the bound variable with a fresh free variable (expensive traversal), but
-gains cache hits because expressions at different depths become structurally equal.
+## Design (changes from vanilla nanoda)
 
-Pure de Bruijn indices avoid the substitution cost (just increment a depth counter),
-but lose cache hits because the "same" expression at different depths has different
-variable indices.
+### Pure de Bruijn (no locally nameless)
 
-**We hypothesize that de Bruijn indices + a shift-homomorphic hash + delayed shifting
-can achieve both: no substitution on binder entry AND effective caching.**
+Vanilla nanoda substitutes `bvar(0)` with a fresh fvar on binder entry (full traversal).
+We use a local context array with `push_local`/`pop_local` (zero allocation).
 
-### Architectural Goal: Zero-Copy, Allocation-Free Checking
+- `inst` split into `inst` (no shift-down) and `inst_beta` (shift-down for beta/let/Pi)
+- `inst_aux` shifts substitution values under binders
+- `lookup_var` retrieves types from `local_ctx[depth - 1 - idx]` and shifts to current depth
+- Scope-local infer cache for open expressions, keyed by `(ExprPtr, depth)`, evicted on `pop_local`
+- `inductive.rs`/`quot.rs` still use old Local approach (works correctly)
 
-The ideal kernel reads the export file (possibly mmap'd) and type-checks declarations
-directly off the read-only input without allocating new expression nodes for
-substitution. With locally nameless, every binder entry forces allocation of fresh
-fvars and traversal to substitute. With de Bruijn + `Shift` nodes, entering a binder
-is just incrementing a depth counter, and the only allocations are for `Shift` wrappers
-(which are small, fixed-size, and can live in a bump allocator or stack). WHNF
-reduction still allocates (beta reduction produces new terms), but the common case of
-"check type, check defEq, move on" should be nearly allocation-free.
+### Shift nodes (delayed shifting)
 
-This also enables trivial parallelism: multiple threads can type-check independent
-declarations against the same mmap'd input with no synchronization on the expression
-store.
+`Shift { inner, amount }` expression variant wraps expressions for O(1) shifting.
 
-## Key Ideas
+- `mk_shift`: creates wrappers, collapses `Shift(Shift(e, j), k) → Shift(e, j+k)`, elides on closed
+- `force_shift_aux`: full traversal when needed (pattern matching, substitution under binders)
+- All pattern-matching sites (whnf, infer, def_eq, inductive) handle Shift peeling
+- whnf iteratively peels nested Shifts before reducing
 
-### 1. Depth-Normalizing Hash
+**Constraint**: Shift nodes only wrap top-level expressions (e.g. `lookup_var` results),
+never inside expression trees. Pattern-matching on Pi/Lambda/etc. breaks otherwise.
 
-Each expression stores `(canonical_hash, lower_bound)`:
+### Shift-homomorphic canonical hash (current, bitmask-based)
 
-- `BVar(i)`: hash = `BVAR_CONST`, bvar_lb = `i`
-- `App(f, x)`: hash = `combine(hash_f, hash_x, bvar_lb_f - bvar_lb_x)`, bvar_lb = `min(bvar_lb_f, bvar_lb_x)`
-- `Lam(ty, body)`: hash = `combine(hash_ty, hash_body, bvar_lb_ty - (bvar_lb_body - 1))`,
-  bvar_lb = `min(bvar_lb_ty, bvar_lb_body - 1)`
+Each expression stores `struct_hash: u64` (bvar indices replaced by constant, with
+per-child `(bvar_lb_delta, bvar_ub_delta)` mixed in) and `bvar_mask: u64` (bit `i%64` set
+iff `bvar(j)` with `j ≡ i mod 64` occurs).
 
-The delta `bvar_lb_f - bvar_lb_x` is shift-invariant (shifting both by k cancels). The hash
-captures full relative variable structure — no information is lost — but is invariant
-under uniform shifting. Two expressions differing only by a uniform shift produce the
-same hash.
+- Canonical hash = `(struct_hash, bvar_mask.rotate_right(bvar_ub % 64))`
+- `unbind(mask) = (mask & !1).rotate_right(1)` — clears bound var's ghost bit
+- WHNF cache keyed by canonical hash; on hit, verify with `shift_eq` (non-allocating traversal)
+- 64k shift hits, 0 verify failures on init export
 
-### 2. `Shift` Nodes (Delayed/Explicit Shifting)
+**Problem**: 64-bit mask aliases at binder depth ≥ 64 — causes false negatives.
 
-Instead of traversing to shift, wrap: `Shift(e, k)` meaning all free vars in e are
-shifted up by k.
+### Proposed: delta-encoded free variable lists
 
-- `hash(Shift(e, k)) = hash(e)` — transparent to cache lookup
-- `bvar_lb(Shift(e, k)) = bvar_lb(e) + k` — O(1)
-- Pushed down lazily during pattern matching in reduction
-- Collapsed: `Shift(Shift(e, j), k) → Shift(e, j+k)`
-- Skipped: if `loose_bvar_range(e) == 0`, no shift needed
+Replace `bvar_mask` with exact delta-encoded sorted set of free bvar indices.
+E.g. `{0, 3, 7}` encoded as `[0, 2, 3]` (head = lb, subsequent entries = gaps - 1).
 
-Cache results are returned wrapped in `Shift` — O(1) instead of O(n) traversal.
+- `shift k`: increment head → O(1)
+- `unbind`: decrement head (or pop if 0) → O(1)
+- `normalize`: set head to 0 → O(1), shift-invariant canonical form
+- `union`: merge two delta lists → O(n+m), but shared tails give O(1) common case
+- **No false negatives at any depth** (proved in Theory.lean)
 
-### 3. Cache Design
+### Infrastructure
 
-- **DefEq cache**: keyed by `(canonical_hash_a, canonical_hash_b)`, stores bool — works directly
-- **WHNF cache**: keyed by canonical_hash, stores result. On retrieval at different depth,
-  wrap in `Shift` node
-- **Infer cache**: same as WHNF — store canonical result, shift on retrieval
+- `stacker` crate for dynamic stack growth (deep recursion on mathlib)
+- 256 MB worker thread stack in `main.rs`
+- Iterative `whnf_no_unfolding_aux` (was recursive, caused stack overflow)
 
-### 4. Expression Metadata
+## Results
 
-Each expression node stores (computed at construction, O(1)):
-- `canonical_hash: u64`
-- `bvar_lb: u16` (minimum bvar index; sentinel for "no free bvars")
-- `bvar_ub: u16` (max bvar index + 1, for fast "no free vars" checks)
+### Correctness
+- Passes all 89 arena good tests + 45 bad tests (correctly rejected)
 
-## Implementation Plan
+### Performance
 
-### Phase 1: Remove FVars, Pure De Bruijn ✅
-- [done] Core tc.rs uses pure de Bruijn: `push_local`/`pop_local` instead of `inst`+`mk_local`
-- [done] `inst` split into `inst` (no shift-down, for Local-based code) and `inst_beta` (shift-down,
-  for beta/let reduction and Pi consumption)
-- [done] `inst_aux` shifts substitution values by offset when substituting under binders
-- [done] `lookup_var` retrieves types from local_ctx and shifts to current depth
-- [done] Infer cache restricted to closed expressions (DAG-shared open exprs are depth-dependent)
-- [done] Eta expansion shifts `y` up by 1 when constructing `λ x. y x`
-- [deferred] inductive.rs/quot.rs still use old Local approach (works correctly)
-- [deferred] Remove dead code (Local variant, FVarId, abstr, etc.)
-- **Passes all 88 arena good tests, rejects all 40 bad tests**
-- **Performance: init-prelude (2051 decls) 0.08s, grind-ring-5 (2439 decls) 2.97s (release)**
+| Benchmark | nanoda (locally nameless) | lean-slop-kernel |
+|-----------|--------------------------|------------------|
+| Init (54k decls, 310MB) | 21s | ~24.5s (+17%) |
+| app-lam N=4000 | 8.3s | 10ms (830x faster) |
+| grind-ring-5 (2.4k decls) | ~3s | 1.0s |
+| Mathlib (630k decls, 4.9GB) | works (<9GB) | OOM-killed at ~120k decls |
 
-### Phase 2: Shift Nodes ✅
-- [done] `Shift { inner, amount }` variant in Expr for delayed shifting
-- [done] `mk_shift` creates O(1) wrappers (collapses nested, elides on closed)
-- [done] `force_shift` / `force_shift_aux` for full traversal when needed
-- [done] `shift_expr` with cutoff=0 creates lazy Shift (cutoff>0 traverses)
-- [done] All pattern-matching sites handle Shift: whnf, infer, def_eq, inductive, etc.
-- [done] `inst_aux` uses `force_shift_aux` (not `mk_shift`) for substitution values
-  under binders — prevents Shift nodes inside Pi/Lambda bodies where pattern-matching
-  code expects bare constructors
-- [done] `def_eq_quick_check` strips matching Shift wrappers
-- **Passes all 88 arena good tests + 5 bad tests**
+The Init overhead (~17%) comes from expression metadata (struct_hash, bvar_mask, per-child
+deltas) and hash-consing. The shift-invariant cache saves ~1s from 64k shift hits but the
+metadata costs ~3s.
 
-**Key design constraint**: Lazy Shift nodes should only wrap top-level expressions
-(e.g. `lookup_var` results), not appear inside expression trees. Code that pattern-matches
-on Pi/Lambda/etc. breaks if those are wrapped in Shift.
+Profile (init export): `mk_app` 20%, IndexMap (hash-consing) 14%, `mk_let` 8%,
+`inst_aux` 1.7%, `whnf_no_unfolding_aux` 1.2%.
 
-### Phase 3–4: Shift-Homomorphic Caching ✅
+### Mathlib status
+OOM-killed around 120k/630k declarations due to 50 GB cgroup memory limit. Vanilla nanoda
+uses <9 GB. The DAG and caches grow unboundedly; need to investigate which declarations
+or data structures cause memory blowup.
 
-**Metadata** (stored per expression node):
+## TODO
 
-- `struct_hash: u64` — structural hash with bvar indices replaced by a constant,
-  plus per-child `(bvar_lb_delta, bvar_ub_delta)` for shift-invariant discrimination and
-  each child's `norm_mask` (bvar_mask rotated by bvar_ub).
-- `bvar_mask: u64` — bit `i` set iff any `bvar(j)` occurs with `j ≡ i (mod 64)`.
-- `unbind(mask) = (mask & !1).rotate_right(1)` for binder bodies — clears the bound
-  variable's bit before rotating, eliminating "ghost bits" that break shift-invariance.
-  At depth ≥ 64, a free `bvar(64)` aliases with `bvar(0)` and gets incorrectly cleared,
-  but this only causes hash collisions (caught by verify), not correctness issues.
+- **Implement delta-encoded FVarList** in Rust (replace `bvar_mask: u64`) — no false
+  negatives, exact shift-invariant cache keys at any depth
+- **Fix mathlib OOM**: instrument memory per-declaration, find what's blowing up; consider
+  periodic cache eviction or more compact expression representation
+- **Extend shift-invariant caching to infer and def_eq caches** (currently only whnf)
+- **DefEq cache with canonical keys**: current union-find doesn't support shift-invariant
+  lookup; switch to HashMap with canonical keys + delta
+- **Let-binding strategy**: eager substitution (current) vs delay via Shift — benchmark
+- **Hash-cons the FVarList nodes** for O(1) equality and use pointer as hash component
+- **Remove dead locally-nameless code** (Local variant, FVarId, abstr, etc.)
+- **Fill in Theory.lean sorry's**: `decode_shift`, `fvars_shift_zero`
 
-**Canonical hash**: `(struct_hash, bvar_mask.rotate_right(bvar_ub % 64))` — O(1), shift-invariant
-for expressions with binder depth < 64 (proved in Theory.lean for the binder-free fragment).
+## Lessons learned (things that didn't work)
 
-**Discrimination fix**: Earlier attempt without per-child deltas had too many collisions
-(norm_mask maps ALL single-BVar expressions to `1<<63`). Adding `(bvar_lb_delta, bvar_ub_delta)`
-between sibling children to struct_hash fully resolved this — 0 verify failures on init export.
+- **Bitmask shift-invariance breaks at depth ≥ 64**: `bvar(0)` and `bvar(64)` alias to
+  the same bit. The `unbind` clearing trick (`mask & !1`) removes both, causing false
+  negatives for shift-equivalent expressions. In practice binder depth > 64 is rare
+  (0 on init) but this fundamentally limits the approach.
 
-**WHNF cache**: `FxHashMap<(u64,u64), (ExprPtr, ExprPtr, u16)>` keyed by canonical hash,
-stores `(input, result, bvar_ub)`. On hit:
-- Fast path: if `stored_input == query` (pointer equality), return stored result directly.
-- Shift path: verify with `shift_eq(stored_input, query, delta)` (non-allocating traversal),
-  then return `force_shift_aux(stored_result, delta, 0)`.
+- **struct_hash without per-child deltas had too many collisions**: all single-bvar
+  expressions got `norm_mask = 1<<63`, so `app(bvar 0, bvar 1)` and `app(bvar 0, bvar 0)`
+  had the same canonical hash. Mixing `(bvar_lb_delta, bvar_ub_delta)` between siblings
+  into struct_hash fixed this (0 verify failures).
 
-**Lazy Shift nodes**: `mk_shift` creates O(1) `Shift` wrappers. whnf peels them off
-(shift-equivariance: `whnf(Shift(e,k)) = shift(whnf(e),k)`), always returning bare
-(non-Shift) results via `force_shift_aux`.
+- **`restore_depth` off-by-one caused exponential blowup**: the cache eviction in
+  `def_eq_binder_aux` used `d < depth` instead of `d <= depth`, discarding valid entries
+  at the current depth. This made app-lam O(2^n) instead of O(n). Subtle because
+  `pop_local` already had the correct condition.
 
-**Cache stats on init export** (54,475 decls, with bit-clearing unbind):
-- 3.6M exact hits (pointer match), 64k shift hits (verified), 0 verify failures
-- 11k bvar_ub failures (stored_bvar_ub > query_bvar_ub), 1.1M misses, 112k shift peels
+- **Shift nodes inside expression trees break pattern matching**: code expects
+  `Pi(name, ty, body)` but gets `Shift(Pi(...), k)`. Solution: Shift nodes only wrap
+  top-level expressions; `force_shift_aux` is used when building subexpressions.
 
-### Phase 5: Benchmark ✅ (partial)
-- [done] Validated against arena test cases (89 good + 45 bad)
-- [done] Init export (54,475 decls, 310MB ndjson): **324B instructions** (perf stat)
-  - Baseline (original nanoda, locally-nameless): **21s**
-  - Previous with metadata + canonical cache: **29s**
-  - After restore_depth fix: **24.5s** (better open-expr cache retention)
-  - After unbind bit-clearing: **324.0B instructions** (vs 324.7B without clearing)
-  - Key optimization: scope-local infer cache for open exprs (39s → 26s → 24.5s)
-  - Shift-invariant cache: 64k shift hits, 0 verify failures
-- [done] grind-ring-5 (2,439 decls): 1.0s
-- [done] app-lam (N=4000): **10ms** (original nanoda: 8.3s)
-- [todo] Benchmark on mathlib export (requires building mathlib with lean4export)
-- [todo] Profile: mk_app at 20%, hash-consing at 14% — dominated by expression allocation,
-  not metadata or type checking
-
-**Profiling results** (init export):
-- `mk_app`: 20% — expression construction + hash-consing
-- `IndexMap` operations: 14% — hash-consing lookups and inserts
-- `mk_let`: 8% — expression construction
-- `inst_aux`: 1.7% (down from 10% after single-read optimization)
-- `whnf_no_unfolding_aux`: 1.2%
-
-### Deep Binder Issue: app-lam test ✅
-
-The app-lam arena test has ~4000 nested lambdas with `wrap2` applications at each level.
-Each level applies `wrap2 lam_next lam_next` where `lam_next` is DAG-shared.
-
-**Bug**: `restore_depth` (used by `def_eq_binder_aux`) was too aggressive — it removed
-`infer_open_cache` entries at the depth being restored TO (`d < depth`), not just entries
-ABOVE it. When `def_eq_binder_aux` compared Pi types with different binder names (e.g.
-`Pi(y3, Nat, Nat)` vs `Pi(n, Nat, Nat)`), it would:
-1. Push a local (depth 3 → 4)
-2. Compare bodies (Nat == Nat, trivial)
-3. `restore_depth(3)` → removed entries with `d >= 3`, including the just-computed
-   `infer_open_cache[(lam_3, 3)]` entry
-4. Second DAG-shared arg of `wrap2` had to re-infer from scratch → exponential blowup
-
-**Fix**: Changed `retain(d < depth16)` to `retain(d <= depth16)` in `restore_depth`.
-Note: `pop_local` already used the correct condition (`d < popped_depth` where
-`popped_depth = old_len`, equivalent to `d <= new_len`).
-
-**Result**: app-lam N=4000 completes in 10ms (original nanoda: 8.3s).
-With unique binder names, N=2000 also completes instantly (was timing out before).
-
-## Open Questions
-
-- **Metadata cost vs benefit**: The canonical hash infrastructure costs ~3s on init export
-  but only saves ~1s from shift hits. Needs larger workloads (mathlib) to determine if the
-  ratio improves. The 0 verify failures suggest the hash is well-discriminating.
-- **app-lam deep binder test**: ✅ Fixed — was `restore_depth` off-by-one in cache eviction.
-- **Ghost bit clearing**: ✅ Switched to `(mask & !1).rotate_right(1)` — clears bound
-  variable's bit before rotating. Makes canonMask exactly shift-invariant for binder
-  depth < 64 (proved for binder-free fragment in Theory.lean). At depth ≥ 64, clearing
-  incorrectly removes aliased free vars, but this only causes collisions caught by verify.
-  Perf result: 324.0B vs 324.7B instructions (clearing wins slightly), 64k vs 59k shift hits.
-- **Let-bindings**: Substitute eagerly (avoids shifting let-values, which can be large)
-  or delay via `Shift`? Needs benchmarking.
-- **DefEq cache shift-invariance**: The union-find defEq cache doesn't easily support
-  canonical hash keys. Could switch to a HashMap with canonical hash keys + relative
-  offset delta.
-- **Mathlib benchmark**: Requires building mathlib export via
-  `cd lean-kernel-arena && python3 lka.py build-test mathlib`. Not yet done.
+- **Metadata cost dominates on small workloads**: computing struct_hash + bvar_mask + deltas
+  for every expression adds ~3s on init, but shift hits only save ~1s. The break-even
+  point needs larger workloads (mathlib) where shift hits accumulate.
 
 ## References
 
