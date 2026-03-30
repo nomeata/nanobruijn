@@ -140,13 +140,13 @@ the full expression tree creating new nodes.
   `def_eq_binder_aux` used `d < depth` instead of `d <= depth`, discarding valid entries
   at the current depth. This made app-lam O(2^n) instead of O(n).
 
-- **Shallow force in whnf (12x speedup but broken)**: Replacing `force_shift_aux` with
-  `force_shift_shallow` in whnf reduced init from 375B to 30.6B instructions. But inner
-  Shift nodes broke def_eq — expressions that should be definitionally equal returned false.
-  The issue: after whnf produces Shift-wrapped children, def_eq's recursive comparison
-  encounters Shift at every level. While this should converge at leaves, subtle cache
-  interactions cause incorrect results. Full force in def_eq_inner fixes correctness but
-  defeats the performance gain.
+- **Shift-wrapped whnf results break def_eq**: Both `force_shift_shallow` (inner Shift
+  nodes, 12x speedup) and `mk_shift` on whnf results (top-level Shift only) break def_eq.
+  Even top-level Shifts fail: when def_eq decomposes App/Pi/Lambda and compares children
+  recursively, each child carries Shift wrappers. The eq_cache/failure_cache interactions
+  then produce incorrect results. This blocks the main performance optimization for whnf.
+  Note: `infer` successfully returns mk_shift results because infer results go through
+  whnf (which forces Shifts) before reaching def_eq.
 
 - **Metadata cost dominates on small workloads**: computing struct_hash + FVarList
   for every expression adds overhead, but shift hits only save ~1s on init. The break-even

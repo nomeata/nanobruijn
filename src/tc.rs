@@ -829,7 +829,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         }
         if total_shift > 0 {
             let r = self.whnf(e);
-            return self.ctx.force_shift_aux(r, total_shift, 0)
+            return self.ctx.force_shift_aux(r, total_shift, 0);
         }
         // Shift-invariant cache: keyed by canonical hash.
         // On hit, verify structural equality up to shift, then apply delta.
