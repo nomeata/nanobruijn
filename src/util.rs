@@ -494,22 +494,41 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         match (a, b) {
             (None, _) => b,
             (_, None) => a,
-            (Some(a_ptr), Some(b_ptr)) => {
-                if a_ptr == b_ptr { return a; }
-                let a_node = self.read_fvar_node(a_ptr);
-                let b_node = self.read_fvar_node(b_ptr);
-                if a_node.delta < b_node.delta {
-                    let b_adj = Some(self.alloc_fvar_node(b_node.delta - a_node.delta - 1, b_node.tail));
-                    let rest = self.fvar_union(a_node.tail, b_adj);
-                    Some(self.alloc_fvar_node(a_node.delta, rest))
-                } else if a_node.delta == b_node.delta {
-                    let rest = self.fvar_union(a_node.tail, b_node.tail);
-                    Some(self.alloc_fvar_node(a_node.delta, rest))
-                } else {
-                    let a_adj = Some(self.alloc_fvar_node(a_node.delta - b_node.delta - 1, a_node.tail));
-                    let rest = self.fvar_union(a_adj, b_node.tail);
-                    Some(self.alloc_fvar_node(b_node.delta, rest))
-                }
+            (Some(ap), Some(bp)) => {
+                if ap == bp { return a; }  // ptr-eq shortcut
+                let an = self.read_fvar_node(ap);
+                let bn = self.read_fvar_node(bp);
+                self.fvar_merge(an.delta, an.tail, bn.delta, bn.tail)
+            }
+        }
+    }
+
+    /// Core merge: two "virtual" heads (a_d, a_tail) and (b_d, b_tail).
+    /// Both deltas are relative to the same base.
+    fn fvar_merge(&mut self, a_d: u16, a_tail: FVarList<'t>, b_d: u16, b_tail: FVarList<'t>) -> FVarList<'t> {
+        if a_d < b_d {
+            // Emit a_d. b's head relative to (a_d+1): b_d - a_d - 1.
+            // a's tail is already relative to (a_d+1).
+            let rest = self.fvar_merge_into(a_tail, b_d - a_d - 1, b_tail);
+            Some(self.alloc_fvar_node(a_d, rest))
+        } else if a_d == b_d {
+            // Same element. Merge tails (both relative to a_d+1). ptr-eq works here.
+            let rest = self.fvar_union(a_tail, b_tail);
+            Some(self.alloc_fvar_node(a_d, rest))
+        } else {
+            // Emit b_d. Symmetric.
+            let rest = self.fvar_merge_into(b_tail, a_d - b_d - 1, a_tail);
+            Some(self.alloc_fvar_node(b_d, rest))
+        }
+    }
+
+    /// Merge a FVarList with a virtual head (vd, vtail). vd is relative to the list's base.
+    fn fvar_merge_into(&mut self, list: FVarList<'t>, vd: u16, vtail: FVarList<'t>) -> FVarList<'t> {
+        match list {
+            None => Some(self.alloc_fvar_node(vd, vtail)),
+            Some(lp) => {
+                let ln = self.read_fvar_node(lp);
+                self.fvar_merge(ln.delta, ln.tail, vd, vtail)
             }
         }
     }
