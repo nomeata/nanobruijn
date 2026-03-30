@@ -555,17 +555,21 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
     }
 
     /// From `f a_0 .. a_N`, return `f`
-    pub fn unfold_apps_fun(&self, mut e: ExprPtr<'t>) -> ExprPtr<'t> {
-        while let App { fun, .. } = self.read_expr(e) {
-            e = fun;
+    pub fn unfold_apps_fun(&mut self, mut e: ExprPtr<'t>) -> ExprPtr<'t> {
+        loop {
+            e = self.force_shift(e);
+            match self.read_expr(e) {
+                App { fun, .. } => e = fun,
+                _ => return e,
+            }
         }
-        e
     }
 
     /// From `f a_0 .. a_N`, return `(f, [a_0, ..a_N])`
-    pub fn unfold_apps(&self, mut e: ExprPtr<'t>) -> (ExprPtr<'t>, Vec<ExprPtr<'t>>) {
+    pub fn unfold_apps(&mut self, mut e: ExprPtr<'t>) -> (ExprPtr<'t>, Vec<ExprPtr<'t>>) {
         let mut args = Vec::new();
         loop {
+            e = self.force_shift(e);
             match self.read_expr(e) {
                 App { fun, arg, .. } => {
                     e = fun;
@@ -580,7 +584,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
     
     /// If this is a const application, return (Const {..}, name, levels, args)
     pub fn unfold_const_apps(
-        &self,
+        &mut self,
         e: ExprPtr<'t>,
     ) -> Option<(ExprPtr<'t>, NamePtr<'t>, LevelsPtr<'t>, Vec<ExprPtr<'t>>)> {
         let (f, args) = self.unfold_apps(e);
@@ -597,11 +601,17 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         }
     }
 
-    pub(crate) fn unfold_apps_stack(&self, mut e: ExprPtr<'t>) -> (ExprPtr<'t>, Vec<ExprPtr<'t>>) {
+    pub(crate) fn unfold_apps_stack(&mut self, mut e: ExprPtr<'t>) -> (ExprPtr<'t>, Vec<ExprPtr<'t>>) {
         let mut args = Vec::new();
-        while let App { fun, arg, .. } = self.read_expr(e) {
-            args.push(arg);
-            e = fun;
+        loop {
+            e = self.force_shift(e);
+            match self.read_expr(e) {
+                App { fun, arg, .. } => {
+                    args.push(arg);
+                    e = fun;
+                }
+                _ => break
+            }
         }
         (e, args)
     }
@@ -882,8 +892,9 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
 
     /// Get the name of the inductive type which is the major premise for this recursor
     /// by finding the correct binder in the recursor's type.
-    pub fn get_major_induct(&self, rec: &crate::env::RecursorData<'t>) -> Option<NamePtr<'t>> {
-        match self.get_nth_pi_binder(rec.info.ty, rec.major_idx()).map(|x| self.read_expr(self.unfold_apps_fun(x))) {
+    pub fn get_major_induct(&mut self, rec: &crate::env::RecursorData<'t>) -> Option<NamePtr<'t>> {
+        let binder = self.get_nth_pi_binder(rec.info.ty, rec.major_idx());
+        match binder.map(|x| { let f = self.unfold_apps_fun(x); self.read_expr(f) }) {
             Some(Const {name, ..}) => Some(name),
             _ => None
         }

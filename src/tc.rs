@@ -601,6 +601,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         let mut ctx = Vec::new();
         fun = self.infer(fun, flag);
         while !args.is_empty() {
+            fun = self.ctx.force_shift(fun);
             match self.ctx.read_expr(fun) {
                 Pi { binder_type, body, .. } => {
                     let arg = args.pop().unwrap();
@@ -1112,8 +1113,9 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         }
     }
 
-    fn is_ctor_app(&self, e: ExprPtr<'t>) -> Option<NamePtr<'t>> {
-        if let Const { name, .. } = self.ctx.read_expr(self.ctx.unfold_apps_fun(e)) {
+    fn is_ctor_app(&mut self, e: ExprPtr<'t>) -> Option<NamePtr<'t>> {
+        let f = self.ctx.unfold_apps_fun(e);
+        if let Const { name, .. } = self.ctx.read_expr(f) {
             if let Some(Declar::Constructor { .. }) = self.env.get_declar(&name) {
                 return Some(name)
             }
@@ -1207,7 +1209,8 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
 
     // We only need the name and reducibility from this.
     fn get_applied_def(&mut self, e: ExprPtr<'t>) -> Option<(NamePtr<'t>, ReducibilityHint)> {
-        if let Const { name, .. } = self.ctx.read_expr(self.ctx.unfold_apps_fun(e)) {
+        let f = self.ctx.unfold_apps_fun(e);
+        if let Const { name, .. } = self.ctx.read_expr(f) {
             if let Some(Declar::Definition { info, hint, .. }) = self.env.get_declar(&name) {
                 return Some((info.name, *hint))
             } else if let Some(Declar::Theorem { info, .. }) = self.env.get_declar(&name) {
@@ -1326,7 +1329,8 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
     }
 
     fn try_unfold_proj_app(&mut self, e: ExprPtr<'t>) -> Option<ExprPtr<'t>> {
-        if let Proj { .. } = self.ctx.read_expr(self.ctx.unfold_apps_fun(e)) {
+        let f = self.ctx.unfold_apps_fun(e);
+        if let Proj { .. } = self.ctx.read_expr(f) {
             let eprime = self.whnf_no_unfolding(e);
             if eprime != e {
                 return Some(eprime)

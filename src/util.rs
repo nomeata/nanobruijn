@@ -845,12 +845,66 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         if let Expr::Shift { inner: inner2, amount: prev, .. } = inner_expr {
             return self.mk_shift_lazy(inner2, prev + amount);
         }
+        // Eagerly force simple expressions (O(1))
+        if let Expr::Var { dbj_idx, .. } = inner_expr {
+            return self.mk_var(dbj_idx + amount);
+        }
         let has_fvars = inner_expr.has_fvars();
         let hash = hash64!(crate::expr::SHIFT_HASH, inner, amount);
         let struct_hash = inner_expr.get_struct_hash();
         let inner_fvl = inner_expr.get_fvar_list();
         let fvar_list = self.fvar_shift(inner_fvl, amount);
         self.alloc_expr(Expr::Shift { hash, struct_hash, fvar_list, inner, amount, num_loose_bvars: nlbv + amount, has_fvars })
+    }
+
+    /// Shallow shift: peel one level of constructor, wrapping children in lazy Shift nodes.
+    /// `force_shift_shallow(Shift(Pi(ty, body), k))` → `Pi(Shift(ty, k), Shift(body, k))`
+    /// O(1) per node vs O(n) for full traversal. Returns e unchanged if no shift needed.
+    pub fn force_shift_shallow(&mut self, e: ExprPtr<'t>, amount: u16) -> ExprPtr<'t> {
+        if amount == 0 {
+            return e;
+        }
+        let expr = self.read_expr(e);
+        if expr.num_loose_bvars() == 0 {
+            return e;
+        }
+        match expr {
+            Expr::Shift { inner, amount: prev, .. } => {
+                // Collapse: Shift(Shift(inner, prev), amount) → shallow(inner, prev+amount)
+                self.force_shift_shallow(inner, prev + amount)
+            }
+            Expr::Var { dbj_idx, .. } => {
+                self.mk_var(dbj_idx + amount)
+            }
+            Expr::App { fun, arg, .. } => {
+                let fun = self.mk_shift(fun, amount);
+                let arg = self.mk_shift(arg, amount);
+                self.mk_app(fun, arg)
+            }
+            Expr::Pi { binder_name, binder_style, binder_type, body, .. } => {
+                let binder_type = self.mk_shift(binder_type, amount);
+                let body = self.shift_expr(body, amount, 1);
+                self.mk_pi(binder_name, binder_style, binder_type, body)
+            }
+            Expr::Lambda { binder_name, binder_style, binder_type, body, .. } => {
+                let binder_type = self.mk_shift(binder_type, amount);
+                let body = self.shift_expr(body, amount, 1);
+                self.mk_lambda(binder_name, binder_style, binder_type, body)
+            }
+            Expr::Let { binder_name, binder_type, val, body, nondep, .. } => {
+                let binder_type = self.mk_shift(binder_type, amount);
+                let val = self.mk_shift(val, amount);
+                let body = self.shift_expr(body, amount, 1);
+                self.mk_let(binder_name, binder_type, val, body, nondep)
+            }
+            Expr::Proj { ty_name, idx, structure, .. } => {
+                let structure = self.mk_shift(structure, amount);
+                self.mk_proj(ty_name, idx, structure)
+            }
+            Expr::Sort { .. } | Expr::Const { .. } | Expr::Local { .. } | Expr::StringLit { .. } | Expr::NatLit { .. } => {
+                panic!("force_shift_shallow on closed expression")
+            }
+        }
     }
 
     /// Force a Shift node: eagerly apply the shift via full traversal.
