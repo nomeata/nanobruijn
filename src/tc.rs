@@ -640,8 +640,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         let mut ctx = Vec::new();
         fun = self.infer(fun, flag);
         while !args.is_empty() {
-            fun = self.ctx.force_shift(fun);
-            match self.ctx.read_expr(fun) {
+            match self.ctx.view_expr(fun) {
                 Pi { binder_type, body, .. } => {
                     let arg = args.pop().unwrap();
                     if flag == Check {

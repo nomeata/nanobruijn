@@ -247,8 +247,7 @@ pub enum BinderStyle {
 impl<'t, 'p: 't> TcCtx<'t, 'p> {
     pub(crate) fn inst_forall_params(&mut self, mut e: ExprPtr<'t>, n: usize, all_args: &[ExprPtr<'t>]) -> ExprPtr<'t> {
         for _ in 0..n {
-            let e2 = self.force_shift(e);
-            if let Pi { body, .. } = self.read_expr(e2) {
+            if let Pi { body, .. } = self.view_expr(e) {
                 e = body
             } else {
                 panic!()
@@ -480,7 +479,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         if let Some(cached) = self.expr_cache.subst_cache.get(&(e, ks, vs)) {
             *cached
         } else {
-            let r = match self.read_expr(e) {
+            let r = match self.view_expr(e) {
                 Var { .. } | NatLit { .. } | StringLit { .. } => e,
                 Sort { level, .. } => {
                     let level = self.subst_level(level, ks, vs);
@@ -511,14 +510,8 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
                     let body = self.subst_aux(body, ks, vs);
                     self.mk_let(binder_name, binder_type, val, body, nondep)
                 }
-                // Level subst is only used in const inference, and when unfolding definitions;
-                // in both cases you're substituting in expressions that were just pulled out of the
-                // environment, so they should have no locals.
                 Local { .. } => panic!("level substitution should not find locals"),
-                Shift { .. } => {
-                    let forced = self.force_shift(e);
-                    self.subst_aux(forced, ks, vs)
-                }
+                Shift { .. } => unreachable!("view_expr never returns Shift"),
                 Proj { ty_name, idx, structure, .. } => {
                     let structure = self.subst_aux(structure, ks, vs);
                     self.mk_proj(ty_name, idx, structure)
@@ -560,10 +553,9 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
     /// From `f a_0 .. a_N`, return `f`
     pub fn unfold_apps_fun(&mut self, mut e: ExprPtr<'t>) -> ExprPtr<'t> {
         loop {
-            e = self.force_shift(e);
-            match self.read_expr(e) {
+            match self.view_expr(e) {
                 App { fun, .. } => e = fun,
-                _ => return e,
+                _ => return self.force_shift(e),
             }
         }
     }
@@ -632,13 +624,15 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
     pub(crate) fn unfold_apps_stack(&mut self, mut e: ExprPtr<'t>) -> (ExprPtr<'t>, Vec<ExprPtr<'t>>) {
         let mut args = Vec::new();
         loop {
-            e = self.force_shift(e);
-            match self.read_expr(e) {
+            match self.view_expr(e) {
                 App { fun, arg, .. } => {
                     args.push(arg);
                     e = fun;
                 }
-                _ => break
+                _ => {
+                    e = self.force_shift(e);
+                    break
+                }
             }
         }
         (e, args)

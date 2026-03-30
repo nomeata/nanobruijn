@@ -944,6 +944,20 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         }
     }
 
+    /// View an expression with Shift pushed one level inside.
+    /// Never returns `Expr::Shift` — children may be Shift-wrapped.
+    /// Replaces the common `force_shift(e); match read_expr(e)` pattern
+    /// with the cheaper `match view_expr(e)` (O(1) per node via force_shift_shallow).
+    pub fn view_expr(&mut self, e: ExprPtr<'t>) -> Expr<'t> {
+        match self.read_expr(e) {
+            Expr::Shift { inner, amount, cutoff, .. } => {
+                let shallow = self.force_shift_shallow(inner, amount, cutoff);
+                self.read_expr(shallow)
+            }
+            other => other
+        }
+    }
+
     /// Full shift traversal that never creates Shift nodes.
     pub(crate) fn force_shift_aux(&mut self, e: ExprPtr<'t>, amount: u16, cutoff: u16) -> ExprPtr<'t> {
         stacker::maybe_grow(64 * 1024, 2 * 1024 * 1024, || self.force_shift_aux_inner(e, amount, cutoff))
