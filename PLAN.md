@@ -42,10 +42,12 @@ This is exactly a deferred `force_shift_aux(inner, amount, cutoff)`.
 - whnf peels cutoff=0 Shifts iteratively; forces cutoff>0 Shifts.
 - `shift_eq` handles cutoff=0 Shift nodes; returns false for cutoff>0 (conservative).
 
-**Current state**: All consumers still force Shift fully before pattern matching.
-The cutoff infrastructure is in place for `force_shift_shallow` to push through binders,
-but using it causes def_eq failures (see TODO). The blocker is def_eq's eq_cache/failure_cache
-interactions with inner Shift nodes.
+**Current state**: whnf uses `force_shift_shallow` on results (both direct and cache-hit paths),
+so whnf returns expressions with the top-level constructor preserved (Pi/Lambda/App/etc.) but
+children may be lazy Shift nodes. `unfold_apps` accumulates cutoff=0 shifts through the App
+spine and forces each component individually, avoiding intermediate shifted App allocations.
+All other consumers still force Shift fully. Making unfold_apps return Shift-wrapped args
+(instead of forcing them) breaks downstream code (infer_sort_of, Proj reduction, etc.).
 
 ### Shift-invariant hashing and caching
 
@@ -107,14 +109,17 @@ the full expression tree creating new nodes.
 
 ## TODO
 
-- **Make whnf/unfold_apps lazy with Shift nodes**: Converting unfold_apps to use
-  `force_shift_shallow` fails init — the Shift-wrapped args propagate everywhere and
-  interact badly with code that pattern-matches on whnf results (expects Pi/Lambda/etc,
-  gets Shift). Making whnf return mk_shift results also fails — every consumer of whnf
-  (`match read_expr(whnfd)`) needs to handle Shift. This is a pervasive change.
-  First step done: added `shift_eq` check in `def_eq_quick_check` so def_eq can handle
-  top-level Shift inputs. Next: systematically audit all `match read_expr` after whnf calls
-  to handle Shift, or add a `whnf_and_force` wrapper and make individual sites lazy.
+- **Make unfold_apps args lazy (Shift-wrapped)**: Currently unfold_apps forces each arg
+  individually. Making args Shift-wrapped (lazy) breaks downstream: infer_sort_of gets
+  shifted Var as binder_type, Proj reduction can't find constructor fields. The blocker is
+  that too many consumers pattern-match on args or pass them through inst_beta (offset=0
+  returns subst values as-is, propagating Shift wrappers). Would need systematic audit of
+  all unfold_apps consumers to handle Shift-wrapped args.
+
+- **Propagate Shift laziness into def_eq**: def_eq decomposes Pi/Lambda/App and compares
+  children recursively. With whnf returning shallow-shifted results, children may be Shift
+  nodes. def_eq_quick_check handles top-level Shifts (via shift_eq), but deeper Shift
+  nodes in the comparison tree interact with eq_cache/failure_cache.
 
 - **Fix mathlib OOM**: instrument memory per-declaration, find what's blowing up;
   consider periodic cache eviction or more compact expression representation
@@ -171,15 +176,18 @@ the full expression tree creating new nodes.
   The underlying issue is the same as shallowish force: to reuse shift results across
   depths, you'd need to return Shift-wrapped results, but inner Shift nodes break def_eq.
 
-- **Shift nodes break ALL whnf consumers, not just def_eq**: Making whnf return
-  Shift-wrapped results (mk_shift instead of force_shift_aux) causes failures everywhere
-  that pattern-matches on whnf results: `match read_expr(whnfd) { Pi { .. } => ... }` gets
-  Shift instead of Pi. Same for unfold_apps with force_shift_shallow: the Shift-wrapped args
-  propagate through inst_beta (offset=0 case returns substitution values as-is), foldl_apps,
-  def unfolding, etc. The issue isn't just def_eq's caches — it's that Shift is a new
-  constructor tag that no consumer expects after whnf. The fix requires either: (a) making
-  every `match read_expr` after whnf handle Shift, or (b) keeping whnf's contract (no Shifts
-  in output) and finding laziness elsewhere.
+- **force_shift_shallow on whnf results WORKS** (previously thought impossible):
+  Using `force_shift_shallow` instead of `force_shift_aux` on whnf results preserves the
+  top-level constructor tag (Pi/Lambda/App) while keeping children as lazy Shift nodes.
+  The key insight: whnf consumers pattern-match on the top-level tag, not on children.
+  Children flow into infer/def_eq/inst_beta which can handle Shift nodes.
+  However, making unfold_apps return Shift-wrapped args still breaks (see TODO).
+
+- **Unfold_apps with lazy (Shift-wrapped) args breaks infer_sort_of**: When unfold_apps
+  returns Shift-wrapped args, those propagate through inst_beta (offset=0 returns subst
+  values as-is), into binder_type positions of Pi/Lambda, where infer_sort_of expects
+  a type but gets a shifted term. Specific failure: `Lean.Grind.Ring.intCast_nat_sub`,
+  binder_type=$5 (Var(5) shifted from Var(2)) had type Nat instead of Sort.
 
 - **shift_eq in def_eq_quick_check works**: Adding `shift_eq(inner, other_side, amount)` for
   single-sided Shift comparisons is cheap (non-allocating) and correct. This makes def_eq
