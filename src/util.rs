@@ -857,35 +857,9 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
     }
 
     /// Shallow shift: peel one level of constructor, wrapping children in lazy Shift nodes.
-    /// `force_shift_shallow(Shift(Pi(ty, body), k))` → `Pi(Shift(ty, k), Shift(body, k))`
-    /// O(1) per node vs O(n) for full traversal. Returns e unchanged if no shift needed.
-    ///
-    /// TODO: Replace force_shift calls in unfold_apps/whnf/def_eq with a "shallowish" force
-    /// that pushes Shift just far enough for all consumers:
-    ///
-    /// All consumers (whnf_no_unfolding, def_eq, infer_app) work via unfold_apps first,
-    /// then match on the head. So "far enough" means:
-    ///  1. Peel the entire App spine: shift each arg (lazy), shift the head
-    ///  2. Force the head one level to expose its constructor tag + immediate fields:
-    ///     - Var: eagerly compute shifted index (already done by mk_shift_lazy)
-    ///     - Const/Sort/NatLit/StringLit/Local: closed, no shift needed
-    ///     - Pi/Lambda: expose binder_type (lazy Shift) and body (shift_expr with cutoff=1)
-    ///     - Let: expose binder_type, val (lazy Shift), body (shift_expr cutoff=1)
-    ///     - Proj: expose structure (lazy Shift)
-    ///  3. Leave everything deeper as Shift nodes
-    ///
-    /// This is O(n_args) per whnf/def_eq step instead of O(expr_size).
-    /// The blocker was def_eq: it calls whnf_no_unfolding_cheap_proj on both sides, which
-    /// calls unfold_apps (peeling Shift on the spine), then rebuilds via foldl_apps.
-    /// The rebuilt expression has Shift-wrapped args. When def_eq_app recursively compares
-    /// args, each arg is a Shift node. The recursive def_eq call peels it via whnf, which
-    /// again does unfold_apps + foldl_apps, pushing Shift one level deeper each time.
-    /// This SHOULD converge at leaves (Var/Const), but the interaction with def_eq's
-    /// eq_cache, failure_cache, and proof_irrel_eq creates subtle bugs where comparisons
-    /// that should succeed return false. Needs careful investigation of def_eq's full
-    /// control flow with inner Shift nodes.
-    /// Shallow shift: peel one level of constructor, wrapping children in lazy Shift nodes.
-    /// With cutoff support, binder bodies get `Shift(body, amount, cutoff+1)` — fully lazy.
+    /// `force_shift_shallow(Shift(Pi(ty, body), k))` → `Pi(Shift(ty, k), Shift(body, k+1))`
+    /// O(1) per binder node vs O(n) for full traversal. For App, recurses into both fun
+    /// and arg to keep the App spine shift-free. Returns e unchanged if no shift needed.
     pub fn force_shift_shallow(&mut self, e: ExprPtr<'t>, amount: u16, cutoff: u16) -> ExprPtr<'t> {
         if amount == 0 {
             return e;
@@ -948,16 +922,6 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         }
     }
 
-    /// Force a Shift node: eagerly apply the shift via full traversal.
-    /// If `e` is not a Shift node, returns it unchanged.
-    pub fn force_shift(&mut self, e: ExprPtr<'t>) -> ExprPtr<'t> {
-        match self.read_expr(e) {
-            Expr::Shift { inner, amount, cutoff, .. } => {
-                self.force_shift_aux(inner, amount, cutoff)
-            }
-            _ => e
-        }
-    }
 
     /// View an expression with Shift pushed one level inside.
     /// Never returns `Expr::Shift` — children may be Shift-wrapped.
@@ -973,60 +937,6 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         }
     }
 
-    /// Full shift traversal that never creates Shift nodes.
-    pub(crate) fn force_shift_aux(&mut self, e: ExprPtr<'t>, amount: u16, cutoff: u16) -> ExprPtr<'t> {
-        stacker::maybe_grow(64 * 1024, 2 * 1024 * 1024, || self.force_shift_aux_inner(e, amount, cutoff))
-    }
-
-    fn force_shift_aux_inner(&mut self, e: ExprPtr<'t>, amount: u16, cutoff: u16) -> ExprPtr<'t> {
-        if amount == 0 || self.num_loose_bvars(e) <= cutoff {
-            return e
-        }
-        if let Some(&cached) = self.expr_cache.shift_cache.get(&(e, amount, cutoff)) {
-            return cached;
-        }
-        let calcd = match self.read_expr(e) {
-            Expr::Sort { .. } | Expr::Const { .. } | Expr::Local { .. } | Expr::StringLit { .. } | Expr::NatLit { .. } => panic!(),
-            Expr::Shift { inner, amount: prev, cutoff: prev_cutoff, .. } => {
-                let forced = self.force_shift_aux(inner, prev, prev_cutoff);
-                self.force_shift_aux(forced, amount, cutoff)
-            }
-            Expr::Var { dbj_idx, .. } => {
-                if dbj_idx >= cutoff {
-                    self.mk_var(dbj_idx + amount)
-                } else {
-                    e
-                }
-            }
-            Expr::App { fun, arg, .. } => {
-                let fun = self.force_shift_aux(fun, amount, cutoff);
-                let arg = self.force_shift_aux(arg, amount, cutoff);
-                self.mk_app(fun, arg)
-            }
-            Expr::Pi { binder_name, binder_style, binder_type, body, .. } => {
-                let binder_type = self.force_shift_aux(binder_type, amount, cutoff);
-                let body = self.force_shift_aux(body, amount, cutoff + 1);
-                self.mk_pi(binder_name, binder_style, binder_type, body)
-            }
-            Expr::Lambda { binder_name, binder_style, binder_type, body, .. } => {
-                let binder_type = self.force_shift_aux(binder_type, amount, cutoff);
-                let body = self.force_shift_aux(body, amount, cutoff + 1);
-                self.mk_lambda(binder_name, binder_style, binder_type, body)
-            }
-            Expr::Let { binder_name, binder_type, val, body, nondep, .. } => {
-                let binder_type = self.force_shift_aux(binder_type, amount, cutoff);
-                let val = self.force_shift_aux(val, amount, cutoff);
-                let body = self.force_shift_aux(body, amount, cutoff + 1);
-                self.mk_let(binder_name, binder_type, val, body, nondep)
-            }
-            Expr::Proj { ty_name, idx, structure, .. } => {
-                let structure = self.force_shift_aux(structure, amount, cutoff);
-                self.mk_proj(ty_name, idx, structure)
-            }
-        };
-        self.expr_cache.shift_cache.insert((e, amount, cutoff), calcd);
-        calcd
-    }
 }
 
 #[derive(Debug)]
