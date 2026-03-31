@@ -286,7 +286,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             return level
         }
         let whnfd = self.whnf(e);
-        match self.ctx.read_expr(whnfd) {
+        match self.ctx.view_expr(whnfd) {
             Sort { level, .. } => level,
             _ => panic!("ensur_sort could not produce a sort"),
         }
@@ -297,7 +297,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             return e
         }
         let whnfd = self.whnf(e);
-        match self.ctx.read_expr(whnfd) {
+        match self.ctx.view_expr(whnfd) {
             Pi { .. } => whnfd,
             _ => panic!("ensure_pi could not produce a pi"),
         }
@@ -306,7 +306,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
     pub(crate) fn infer_sort_of(&mut self, e: ExprPtr<'t>, flag: InferFlag) -> LevelPtr<'t> {
         let ty = self.infer(e, flag);
         let whnfd = self.whnf(ty);
-        match self.ctx.read_expr(whnfd) {
+        match self.ctx.view_expr(whnfd) {
             Sort { level, .. } => level,
             _ => {
                 panic!("infer_sort_of: expected Sort, got {:?} from e={:?}, infer={:?}, depth={}", self.ctx.debug_print(whnfd), self.ctx.debug_print(e), self.ctx.debug_print(ty), self.local_ctx.len());
@@ -458,7 +458,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
 
     fn reduce_proj(&mut self, idx: u32, structure: ExprPtr<'t>, cheap: bool) -> Option<ExprPtr<'t>> {
         let mut structure = if cheap { self.whnf_no_unfolding_cheap_proj(structure) } else { self.whnf(structure) };
-        if let StringLit { ptr, .. } = self.ctx.read_expr(structure) {
+        if let StringLit { ptr, .. } = self.ctx.view_expr(structure) {
             if let Some(s) = self.str_lit_to_ctor_reducing(ptr) {
                 structure = s;
             }
@@ -662,7 +662,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                 _ => {
                     let as_pi = self.ctx.inst_beta(fun, ctx.as_slice());
                     let as_pi = self.ensure_pi(as_pi);
-                    match self.ctx.read_expr(as_pi) {
+                    match self.ctx.view_expr(as_pi) {
                         Pi { .. } => {
                             // Only clear what we just instantiated.
                             ctx.clear();
@@ -779,7 +779,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             return cached
         }
 
-        let out = match self.ctx.read_expr(e) {
+        let out = match self.ctx.view_expr(e) {
             Expr::App {fun, arg, ..} => {
                 let f = self.strong_reduce(fun, reduce_types, reduce_proofs);
                 let arg = self.strong_reduce(arg, reduce_types, reduce_proofs);
@@ -1197,7 +1197,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         let major = args.get(rec.major_idx()).copied()?;
         let major = self.to_ctor_when_k(major, rec).unwrap_or(major);
         let major = self.whnf(major);
-        let major = match self.ctx.read_expr(major) {
+        let major = match self.ctx.view_expr(major) {
             NatLit { ptr, .. } => self.ctx.nat_lit_to_constructor(ptr).unwrap_or(major),
             StringLit { ptr, .. } => self.str_lit_to_ctor_reducing(ptr).unwrap_or(major),
             _ => {
@@ -1241,7 +1241,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             };
         }
         let f = args.get(3).copied()?;
-        let appd = match self.ctx.read_expr(qmk) {
+        let appd = match self.ctx.view_expr(qmk) {
             App { arg, .. } => self.ctx.mk_app(f, arg),
             _ => panic!("Quot iota"),
         };
@@ -1457,7 +1457,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
 
     pub fn is_sort_zero(&mut self, e: ExprPtr<'t>) -> bool {
         let e = self.whnf(e);
-        match self.ctx.read_expr(e) {
+        match self.ctx.view_expr(e) {
             Sort { level, .. } => self.ctx.read_level(level) == Level::Zero,
             _ => false,
         }
@@ -1487,9 +1487,9 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
     }
 
     fn try_eta_expansion_aux(&mut self, x: ExprPtr<'t>, y: ExprPtr<'t>) -> bool {
-        if let Lambda { .. } = self.ctx.read_expr(x) {
+        if let Lambda { .. } = self.ctx.view_expr(x) {
             let y_ty = self.infer_then_whnf(y, InferOnly);
-            if let Pi { binder_name, binder_type, binder_style, .. } = self.ctx.read_expr(y_ty) {
+            if let Pi { binder_name, binder_type, binder_style, .. } = self.ctx.view_expr(y_ty) {
                 // Shift y up by 1 since it will be placed inside a new lambda body
                 let y_shifted = self.ctx.shift_expr(y, 1, 0);
                 let v0 = self.ctx.mk_var(0);

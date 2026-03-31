@@ -756,7 +756,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
 
     /// If `e` is a NatLit, or `Const Nat.zero []`, return the appropriate Bignum.
     pub(crate) fn get_bignum_from_expr(&mut self, e: ExprPtr<'t>) -> Option<BigUint> {
-        if let NatLit { ptr, .. } = self.read_expr(e) {
+        if let NatLit { ptr, .. } = self.view_expr(e) {
             self.read_bignum(ptr).cloned()
         } else if Some(e) == self.c_nat_zero() {
             Some(BigUint::zero())
@@ -766,7 +766,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
     }
 
     pub(crate) fn get_bignum_succ_from_expr(&mut self, e: ExprPtr<'t>) -> Option<ExprPtr<'t>> {
-        if let NatLit { ptr, .. } = self.read_expr(e) {
+        if let NatLit { ptr, .. } = self.view_expr(e) {
             self.mk_nat_lit_quick(self.read_bignum(ptr)? + 1usize)
         } else if Some(e) == self.c_nat_zero() {
             self.mk_nat_lit_quick(BigUint::zero() + 1usize)
