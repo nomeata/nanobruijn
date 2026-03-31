@@ -59,7 +59,9 @@ O(n_args × expr_size). Two companion fixes ensure correctness:
 with Shift pushed one level inside via `force_shift_shallow`. Never returns `Shift` variant;
 children may be Shift-wrapped. Replaces the common `force_shift(e); match read_expr(e)` pattern.
 Used by: `unfold_apps_fun`, `unfold_apps_stack`, `inst_forall_params`, `infer_app`, `subst_aux`,
-`inst_aux`, `shift_expr_aux`.
+`inst_aux`, `shift_expr_aux`, and all whnf-result consumption sites (ensure_sort, ensure_pi,
+infer_sort_of, reduce_proj, strong_reduce, iota_reduce_recursor, reduce_quot, is_sort_zero,
+try_eta_expansion_aux, get_bignum_from_expr, get_bignum_succ_from_expr).
 
 Remaining `force_shift_aux` call sites (outside its own implementation):
 - **whnf cache hit** (tc.rs): the dominant cost. Switching to `force_shift_shallow` requires
@@ -130,14 +132,25 @@ the full expression tree creating new nodes.
 ## TODO
 
 - **Make whnf cache use force_shift_shallow again**: Currently uses force_shift_aux (full
-  traversal) because embedded Shift wrappers from force_shift_shallow break downstream
-  consumers (def_eq, infer_proj). To fix: audit def_eq and infer_proj to handle Shift-
-  wrapped whnf results, then switch back to force_shift_shallow for the cache hit path.
+  traversal). All whnf-result consumption sites now use `view_expr` (transparent Shift
+  handling), and the whnf cache is verified semantically correct. However, returning
+  `mk_shift` or `force_shift_shallow` results causes ExprPtr identity divergence: different
+  ExprPtrs produce different cache hit/miss patterns in downstream infer/def_eq, changing
+  execution paths and eventually causing type errors (first failure: hit #5042 at
+  `Lean.Grind.Ring.intCast_nat_sub`, depth=9, delta=3). The root cause is NOT incorrect
+  caching or def_eq — it's that the type checker's execution is path-dependent on ExprPtr
+  identity. To fix: either (a) make all caches shift-invariant so different ExprPtrs for
+  the same expression always produce the same results, or (b) identify and fix the specific
+  code path that diverges.
 
 - **Propagate Shift laziness into def_eq**: def_eq decomposes Pi/Lambda/App and compares
   children recursively. With whnf returning shallow-shifted results, children may be Shift
   nodes. def_eq_quick_check handles top-level Shifts (via shift_eq), but deeper Shift
   nodes in the comparison tree interact with eq_cache/failure_cache.
+
+- **mk_shift_cutoff optimizations** (implemented, verify on larger workloads):
+  - Short-circuit: if cutoff > fvar_ub, expression has no free vars above cutoff → no-op
+  - Cutoff normalization: if fvar_lb >= cutoff, normalize cutoff to 0 for more collapsing
 
 - **Fix mathlib OOM**: instrument memory per-declaration, find what's blowing up;
   consider periodic cache eviction or more compact expression representation
@@ -167,11 +180,14 @@ the full expression tree creating new nodes.
   `def_eq_binder_aux` used `d < depth` instead of `d <= depth`, discarding valid entries
   at the current depth. This made app-lam O(2^n) instead of O(n).
 
-- **Shift-wrapped whnf results break def_eq**: Both `force_shift_shallow` (inner Shift
-  nodes, 12x speedup) and `mk_shift` on whnf results (top-level Shift only) break def_eq.
-  Even top-level Shifts fail: when def_eq decomposes App/Pi/Lambda and compares children
-  recursively, each child carries Shift wrappers. The eq_cache/failure_cache interactions
-  then produce incorrect results. This blocks the main performance optimization for whnf.
+- **Shift-wrapped whnf results break via ExprPtr identity divergence**: Both
+  `force_shift_shallow` and `mk_shift` on whnf cache results cause type errors, but NOT
+  because def_eq or caching is semantically wrong. `def_eq(mk_shift_result, force_shift_aux_result)`
+  returns true for all sampled hits. The actual mechanism: different ExprPtrs (Shift-wrapped
+  vs fully-forced) cause different cache hit/miss patterns in downstream infer/def_eq code,
+  which changes execution paths. The 5042nd global whnf cache hit (at
+  `Lean.Grind.Ring.intCast_nat_sub`, depth=9, delta=3) is the first to trigger divergence.
+  Disabling eq_cache, failure_cache, or whnf_no_unfolding_cache individually does NOT fix it.
   Note: `infer` successfully returns mk_shift results because infer results go through
   whnf (which forces Shifts) before reaching def_eq.
 
