@@ -105,8 +105,9 @@ delta-encoded linked list: `{0, 3, 7}` → `[0, 2, 3]` (head = lb, subsequent = 
 
 Canonical hash = `(struct_hash, normalized FVarList hash)`.
 
-**WHNF cache**: keyed by canonical hash; on hit, verify with `shift_eq` (non-allocating
-traversal), then apply delta via `force_shift_shallow`.
+**WHNF cache** and **whnf_no_unfolding cache**: both keyed by canonical hash; on hit,
+verify with `shift_eq` (non-allocating traversal), then apply delta via `force_shift_shallow`.
+`whnf_no_unfolding` also peels top-level Shifts (shift-equivariance) before cache lookup.
 
 **Infer cache (open expressions)**: organized as a stack of maps indexed by
 `bucket_idx = depth - 1 - fvar_lb` (the shallowest context entry the expression depends

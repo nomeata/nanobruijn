@@ -1096,7 +1096,8 @@ pub(crate) struct TcCache<'t> {
     /// stores (input_expr, result_expr, bvar_ub). On hit, verify with shift_eq, then
     /// force_shift_aux(result, delta) where delta = query_bvar_ub - stored_bvar_ub.
     pub(crate) whnf_cache: FxHashMap<(u64, u64), (ExprPtr<'t>, ExprPtr<'t>, u16)>,
-    pub(crate) whnf_no_unfolding_cache: UniqueHashMap<ExprPtr<'t>, ExprPtr<'t>>,
+    /// Shift-invariant whnf_no_unfolding cache: same design as whnf_cache.
+    pub(crate) whnf_no_unfolding_cache: FxHashMap<(u64, u64), (ExprPtr<'t>, ExprPtr<'t>, u16)>,
     pub(crate) eq_cache: UnionFind<ExprPtr<'t>>,
     /// A cache of congruence failures during the lazy delta step procedure.
     pub(crate) failure_cache: FxHashSet<(ExprPtr<'t>, ExprPtr<'t>)>,
@@ -1124,7 +1125,7 @@ impl<'t> TcCache<'t> {
             infer_cache_check: new_unique_hash_map(),
             infer_cache_no_check: new_unique_hash_map(),
             whnf_cache: new_fx_hash_map(),
-            whnf_no_unfolding_cache: new_unique_hash_map(),
+            whnf_no_unfolding_cache: new_fx_hash_map(),
             eq_cache: UnionFind::new(),
             failure_cache: new_fx_hash_set(),
             defeq_pos_open: Vec::new(),

@@ -862,7 +862,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             if stored_input == e {
                 return stored_result;
             }
-            if e_bvar_ub >= stored_bvar_ub {
+            if false && e_bvar_ub >= stored_bvar_ub {
                 let delta = e_bvar_ub - stored_bvar_ub;
                 if delta > 0 && self.ctx.shift_eq(stored_input, e, delta) {
                     return self.ctx.force_shift_shallow(stored_result, delta, 0);
@@ -891,13 +891,40 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
     pub fn whnf_no_unfolding(&mut self, e: ExprPtr<'t>) -> ExprPtr<'t> { self.whnf_no_unfolding_aux(e, false) }
 
     fn whnf_no_unfolding_aux(&mut self, e: ExprPtr<'t>, cheap_proj: bool) -> ExprPtr<'t> {
+        // whnf_no_unfolding is shift-equivariant: peel top-level Shifts.
+        let mut total_shift: u16 = 0;
+        let mut e = e;
+        while let Shift { inner, amount, cutoff, .. } = self.ctx.read_expr(e) {
+            if cutoff == 0 {
+                total_shift += amount;
+                e = inner;
+            } else {
+                e = self.ctx.force_shift_shallow(inner, amount, cutoff);
+            }
+        }
+        if total_shift > 0 {
+            let r = self.whnf_no_unfolding_aux(e, cheap_proj);
+            return self.ctx.force_shift_shallow(r, total_shift, 0);
+        }
         // Iterative version: tail-recursive calls become loop iterations.
         // We track original inputs to cache on exit.
         let mut cache_entries: Vec<ExprPtr<'t>> = Vec::new();
         let mut cur = e;
         let result = loop {
-            if let Some(cached) = self.tc_cache.whnf_no_unfolding_cache.get(&cur).copied() {
-                break cached;
+            // Shift-invariant cache lookup: canonical hash keyed.
+            let cur_canon = self.ctx.canonical_hash(cur);
+            let cur_bvar_ub = self.ctx.num_loose_bvars(cur);
+            if let Some(&(stored_input, stored_result, stored_bvar_ub)) = self.tc_cache.whnf_no_unfolding_cache.get(&cur_canon) {
+                if stored_input == cur {
+                    break stored_result;
+                }
+                if cur_bvar_ub >= stored_bvar_ub {
+                    let delta = cur_bvar_ub - stored_bvar_ub;
+                    if delta > 0 && self.ctx.shift_eq(stored_input, cur, delta) {
+                        let shifted = self.ctx.force_shift_shallow(stored_result, delta, 0);
+                        break shifted;
+                    }
+                }
             }
             let (e_fun, args) = self.ctx.unfold_apps(cur);
             match self.ctx.read_expr(e_fun) {
@@ -966,9 +993,15 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                 }
             }
         };
-        // Cache all intermediate inputs that led to this result
-        for entry in cache_entries {
-            self.tc_cache.whnf_no_unfolding_cache.insert(entry, result);
+        // Cache intermediate inputs (non-cheap_proj only).
+        if !cheap_proj {
+            for entry in cache_entries {
+                let entry_canon = self.ctx.canonical_hash(entry);
+                let entry_bvar_ub = self.ctx.num_loose_bvars(entry);
+                if self.tc_cache.whnf_no_unfolding_cache.get(&entry_canon).map_or(true, |&(_, _, s)| entry_bvar_ub < s) {
+                    self.tc_cache.whnf_no_unfolding_cache.insert(entry_canon, (entry, result, entry_bvar_ub));
+                }
+            }
         }
         result
     }
