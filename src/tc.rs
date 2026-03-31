@@ -854,6 +854,14 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             if e_bvar_ub >= stored_bvar_ub {
                 let delta = e_bvar_ub - stored_bvar_ub;
                 if delta > 0 && self.ctx.shift_eq(stored_input, e, delta) {
+                    // Shallow shift for non-App whnf results: Pi/Lambda consumers use
+                    // view_expr which transparently handles Shift-wrapped children.
+                    // App results need full force because unfold_apps decomposes the
+                    // spine, and Shift-wrapped args create different ExprPtrs that
+                    // cause downstream cache/path divergence.
+                    if !matches!(self.ctx.read_expr(stored_result), App { .. }) {
+                        return self.ctx.force_shift_shallow(stored_result, delta, 0);
+                    }
                     return self.ctx.force_shift_aux(stored_result, delta, 0);
                 }
             }
@@ -1317,7 +1325,6 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             _ => {}
         }
         if self.tc_cache.eq_cache.check_uf_eq(x, y) {
-
             return Some(true)
         }
         if let Some(r) = self.def_eq_sort(x, y) {
