@@ -42,18 +42,20 @@ This is exactly a deferred `force_shift_aux(inner, amount, cutoff)`.
 - whnf peels cutoff=0 Shifts iteratively; forces cutoff>0 Shifts.
 - `shift_eq` handles cutoff=0 Shift nodes; returns false for cutoff>0 (conservative).
 
-**Current state**: whnf uses `force_shift_shallow` on results from the direct Shift-peeling path.
-The shift-invariant whnf cache uses `force_shift_aux` (full traversal) on hits — `force_shift_shallow`
-here causes embedded Shift wrappers in whnf results that break downstream consumers (def_eq,
-infer_proj, etc.).
+**Current state**: whnf uses `force_shift_shallow` on results from both the direct
+Shift-peeling path and the shift-invariant cache hit path (for non-App results).
+App results still require `force_shift_aux` (full traversal) because `unfold_apps`
+decomposes the App spine, and Shift-wrapped args create different ExprPtrs that
+cause downstream cache/path divergence. Pi/Lambda/Var consumers use `view_expr`
+which transparently handles Shift-wrapped children, so shallow shifting is safe.
 
 `unfold_apps` returns lazy (Shift-wrapped) args: accumulates cutoff=0 shifts through the App
 spine and wraps each arg with `mk_shift` instead of `force_shift_aux`. O(n_args) instead of
 O(n_args × expr_size). Two companion fixes ensure correctness:
 1. `inst_aux` forces substitution values with `force_shift` at offset=0, preventing cascading
    Shift wrappers in inst_beta results.
-2. The whnf shift-invariant cache uses `force_shift_aux` (not `force_shift_shallow`) to
-   produce fully-forced results that downstream code can safely consume.
+2. The whnf shift-invariant cache uses `force_shift_aux` for App results (not
+   `force_shift_shallow`), because unfold_apps produces different ExprPtrs.
 
 `view_expr(e)` is a view function that transparently handles Shift nodes: returns `Expr<'t>`
 with Shift pushed one level inside via `force_shift_shallow`. Never returns `Shift` variant;
@@ -64,8 +66,8 @@ infer_sort_of, reduce_proj, strong_reduce, iota_reduce_recursor, reduce_quot, is
 try_eta_expansion_aux, get_bignum_from_expr, get_bignum_succ_from_expr).
 
 Remaining `force_shift_aux` call sites (outside its own implementation):
-- **whnf cache hit** (tc.rs): the dominant cost. Switching to `force_shift_shallow` requires
-  making def_eq robust to Shift-wrapped whnf results (main TODO).
+- **whnf cache hit for App results** (tc.rs): Pi/Lambda use force_shift_shallow (O(1)),
+  but App results still need full traversal. This is the remaining dominant cost.
 - **inst_aux val shifting**: `force_shift_aux(val, offset, 0)` for shifting subst values up.
   Needed for canonical results.
 - **cutoff>0 Shifts** (unfold_apps, whnf, infer_inner): rare, unavoidable without lazy cutoff>0.
@@ -131,22 +133,13 @@ the full expression tree creating new nodes.
 
 ## TODO
 
-- **Make whnf cache use force_shift_shallow again**: Currently uses force_shift_aux (full
-  traversal). All whnf-result consumption sites now use `view_expr` (transparent Shift
-  handling), and the whnf cache is verified semantically correct. However, returning
-  `mk_shift` or `force_shift_shallow` results causes ExprPtr identity divergence: different
-  ExprPtrs produce different cache hit/miss patterns in downstream infer/def_eq, changing
-  execution paths and eventually causing type errors (first failure: hit #5042 at
-  `Lean.Grind.Ring.intCast_nat_sub`, depth=9, delta=3). The root cause is NOT incorrect
-  caching or def_eq — it's that the type checker's execution is path-dependent on ExprPtr
-  identity. To fix: either (a) make all caches shift-invariant so different ExprPtrs for
-  the same expression always produce the same results, or (b) identify and fix the specific
-  code path that diverges.
-
-- **Propagate Shift laziness into def_eq**: def_eq decomposes Pi/Lambda/App and compares
-  children recursively. With whnf returning shallow-shifted results, children may be Shift
-  nodes. def_eq_quick_check handles top-level Shifts (via shift_eq), but deeper Shift
-  nodes in the comparison tree interact with eq_cache/failure_cache.
+- **Eliminate force_shift_aux for App whnf cache hits**: Pi/Lambda cache hits now use
+  force_shift_shallow (O(1)), but App results still need force_shift_aux (O(n)) because
+  unfold_apps decomposes the spine and Shift-wrapped args cause ExprPtr divergence.
+  Approaches: (a) make unfold_apps normalize its output so Shift-wrapped and fully-forced
+  args produce the same ExprPtrs, (b) make downstream caches (eq_cache, failure_cache,
+  whnf_no_unfolding_cache) shift-invariant, or (c) handle App results with a "medium force"
+  that fully forces the App spine but leaves non-spine children as Shift nodes.
 
 - **mk_shift_cutoff optimizations** (implemented, verify on larger workloads):
   - Short-circuit: if cutoff > fvar_ub, expression has no free vars above cutoff → no-op
@@ -180,14 +173,16 @@ the full expression tree creating new nodes.
   `def_eq_binder_aux` used `d < depth` instead of `d <= depth`, discarding valid entries
   at the current depth. This made app-lam O(2^n) instead of O(n).
 
-- **Shift-wrapped whnf results break via ExprPtr identity divergence**: Both
-  `force_shift_shallow` and `mk_shift` on whnf cache results cause type errors, but NOT
-  because def_eq or caching is semantically wrong. `def_eq(mk_shift_result, force_shift_aux_result)`
-  returns true for all sampled hits. The actual mechanism: different ExprPtrs (Shift-wrapped
-  vs fully-forced) cause different cache hit/miss patterns in downstream infer/def_eq code,
-  which changes execution paths. The 5042nd global whnf cache hit (at
-  `Lean.Grind.Ring.intCast_nat_sub`, depth=9, delta=3) is the first to trigger divergence.
+- **Shift-wrapped App whnf results break via ExprPtr identity divergence**: Both
+  `force_shift_shallow` and `mk_shift` on whnf cache results cause type errors for App
+  results, but NOT for Pi/Lambda. The mechanism: `unfold_apps` decomposes the App spine,
+  and Shift-wrapped args produce different ExprPtrs than fully-forced args. These different
+  ExprPtrs cause different cache hit/miss patterns in downstream infer/def_eq code, which
+  changes execution paths. The failure manifests at `Lean.Grind.Ring.intCast_nat_sub`
+  (depth=9) via `proof_irrel_eq` receiving an expression with wrong variable references.
   Disabling eq_cache, failure_cache, or whnf_no_unfolding_cache individually does NOT fix it.
+  Fix: only use force_shift_shallow for non-App whnf results; App results still use
+  force_shift_aux. Pi/Lambda consumers use view_expr which transparently handles Shifts.
   Note: `infer` successfully returns mk_shift results because infer results go through
   whnf (which forces Shifts) before reaching def_eq.
 
