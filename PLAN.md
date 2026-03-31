@@ -16,7 +16,7 @@ We use a local context array with `push_local`/`pop_local` (zero allocation).
 - `inst` split into `inst` (no shift-down) and `inst_beta` (shift-down for beta/let/Pi)
 - `inst_aux` shifts substitution values under binders
 - `lookup_var` retrieves types from `local_ctx[depth - 1 - idx]` and shifts to current depth
-- Scope-local infer cache for open expressions, keyed by `(ExprPtr, depth)`, evicted on `pop_local`
+- Unified infer cache (see Shift-invariant hashing and caching section)
 - `inductive.rs`/`quot.rs` still use old Local approach (works correctly)
 
 ### Shift nodes (delayed shifting)
@@ -38,8 +38,6 @@ This is exactly a deferred `force_shift_aux(inner, amount, cutoff)`.
   a full `shift_expr(body, amount, cutoff+1)` traversal.
 - `fvar_shift_cutoff`: shifts FVarList entries >= cutoff by k. Walks to the cutoff point,
   adds k to first entry >= cutoff, shares tail. O(1) for cutoff=0, O(position) for cutoff>0.
-- `force_shift_aux`: full traversal when needed (now uses cutoff from Shift nodes)
-- `force_shift`: convenience wrapper that forces a top-level Shift node (any cutoff)
 - `infer_inner` handles cutoff=0 Shift without forcing via context-shrinking. For cutoff>0, shallow-forces first.
 - whnf peels cutoff=0 Shifts iteratively; shallow-forces cutoff>0 Shifts.
 - `shift_eq` handles Shift nodes where the Shift's cutoff matches the comparison cutoff.
@@ -52,12 +50,12 @@ Shift-peeling path and the shift-invariant cache hit path for ALL result types
 (including App). This is possible because `force_shift_shallow` recurses into App's
 `fun` and `arg`, ensuring the entire App spine and all args are real constructors
 (not Shift wrappers). Only grandchildren of the spine nodes carry Shift wrappers.
-This eliminates the last `force_shift_aux` call in the whnf cache hit path.
+No full traversal (`force_shift_aux`) needed in the whnf cache hit path.
 
 `unfold_apps` returns lazy (Shift-wrapped) args: accumulates cutoff=0 shifts through the App
-spine and wraps each arg with `mk_shift` instead of `force_shift_aux`. O(n_args) instead of
-O(n_args × expr_size). Companion fix: `inst_aux` forces substitution values with
-`force_shift` at offset=0, preventing cascading Shift wrappers in inst_beta results.
+spine and wraps each arg with `mk_shift` instead of full traversal. O(n_args) instead of
+O(n_args × expr_size). Companion fix: `inst_aux` shallow-forces substitution values with
+`force_shift_shallow` at offset=0, preventing cascading Shift wrappers in inst_beta results.
 
 `view_expr(e)` is a view function that transparently handles Shift nodes: returns `Expr<'t>`
 with Shift pushed one level inside via `force_shift_shallow`. Never returns `Shift` variant;
@@ -67,23 +65,19 @@ Used by: `unfold_apps_fun`, `unfold_apps_stack`, `inst_forall_params`, `infer_ap
 infer_sort_of, reduce_proj, strong_reduce, iota_reduce_recursor, reduce_quot, is_sort_zero,
 try_eta_expansion_aux, get_bignum_from_expr, get_bignum_succ_from_expr).
 
-Remaining `force_shift_aux` call sites (outside its own implementation):
-- **force_shift** convenience wrapper (util.rs): now dead code (no callers).
-- **force_shift_shallow itself** (util.rs): forces inner Shift with mismatched cutoff
-  (via two sequential shallow forces instead of one full force).
-All former `force_shift` callers (`unfold_apps_fun`, `unfold_apps_stack`, `abstr_aux`,
-`inductive.rs` replace_all_nested/restore_replace) now use `force_shift_shallow` instead.
+`force_shift` and `force_shift_aux` (full O(n) traversal) have been deleted.
+All shift forcing now uses `force_shift_shallow` (one-level push) or `mk_shift` (O(1) wrapper).
+`force_shift_shallow` handles nested Shift with mismatched cutoff via two sequential
+shallow forces.
 
-`inst_aux` val shifting uses `force_shift_shallow(val, offset, 0)` instead of
-`force_shift_aux`. Using `mk_shift` (fully lazy) was attempted but fails due to ExprPtr
-identity divergence — `Shift(Lambda, k, 0)` and `Lambda(Shift_ty, Shift_body)` are
-semantically equivalent but have different ExprPtrs, cascading through caches.
-The `force_shift` pre-forcing of subst values (for lazy unfold_apps) was removed —
-Shift-wrapped subst values from `unfold_apps` are handled by `force_shift_shallow`.
+`inst_aux` val shifting uses `force_shift_shallow(val, offset, 0)`. Using `mk_shift`
+(fully lazy) was attempted but fails due to ExprPtr identity divergence —
+`Shift(Lambda, k, 0)` and `Lambda(Shift_ty, Shift_body)` are semantically equivalent
+but have different ExprPtrs, cascading through caches.
 
 `whnf_no_unfolding_aux` uses `view_expr` for the Lambda body-collection loop (handles
 Shift-wrapped bodies from `force_shift_shallow` results) and `force_shift_shallow` in the
-Shift arm (was `force_shift`).
+Shift arm.
 
 ### Shift-invariant hashing and caching
 
@@ -111,10 +105,11 @@ verify with `shift_eq` (non-allocating traversal), then apply delta via `force_s
 
 **Infer cache**: unified stack of maps. Bucket 0 holds closed expressions (never evicted).
 Buckets 1..depth hold open expressions, indexed by `bucket_idx = depth - fvar_lb`.
-Each map keys by canonical hash → (stored_input, stored_result, stored_depth).
-On hit, verify with `shift_eq`, apply delta via `mk_shift`. Stack push/pop follows
-`push_local`/`pop_local` for O(1) eviction. Replaces the old three-cache design
-(infer_cache_check, infer_cache_no_check, infer_open_cache).
+Each map keys by canonical hash → (stored_input, stored_result, stored_depth, checked).
+`checked=true` entries (from Check pass) serve both Check and InferOnly queries;
+`checked=false` entries only serve InferOnly. On hit, verify with `shift_eq`, apply
+delta via `mk_shift`. Stack push/pop follows `push_local`/`pop_local` for O(1) eviction.
+Replaces the old three-cache design (infer_cache_check, infer_cache_no_check, infer_open_cache).
 Entries in shallow buckets survive push/pop of deeper context entries (correct, since
 they only depend on the unchanged shallow context). If an entry was stored at a deeper
 depth than the current query, we cannot reuse it (would need an "unshift"/shift-down
@@ -149,9 +144,9 @@ for closed expressions. On init: ~39K shift-invariant hits out of ~913K open sto
 | app-lam N=4000 | 8.3s | 10ms (830x faster) |
 | Mathlib (630k decls, 4.9GB) | works (<9GB) | OOM-killed at ~120k decls |
 
-Profile (init, 375B instructions): `force_shift_aux` is the dominant cost —
-shift cache has ~40% hit rate (8M hits, 12M misses). Each miss traverses
-the full expression tree creating new nodes.
+Profile (init, pre-deletion baseline, 375B instructions): `force_shift_aux` was the
+dominant cost — shift cache had ~40% hit rate (8M hits, 12M misses). Now deleted;
+all shifting uses `force_shift_shallow` (one-level push) or `mk_shift` (O(1) wrapper).
 
 ## TODO
 
@@ -190,8 +185,9 @@ the full expression tree creating new nodes.
   changes execution paths. The failure manifests at `Lean.Grind.Ring.intCast_nat_sub`
   (depth=9) via `proof_irrel_eq` receiving an expression with wrong variable references.
   Disabling eq_cache, failure_cache, or whnf_no_unfolding_cache individually does NOT fix it.
-  Fix: only use force_shift_shallow for non-App whnf results; App results still use
-  force_shift_aux. Pi/Lambda consumers use view_expr which transparently handles Shifts.
+  Initial fix: only use force_shift_shallow for non-App whnf results; App results use
+  force_shift_aux. Later resolved fully: making force_shift_shallow recurse into App's
+  fun AND arg (see below) made it safe for all result types, and force_shift_aux was deleted.
   Note: `infer` successfully returns mk_shift results because infer results go through
   whnf (which forces Shifts) before reaching def_eq.
 
