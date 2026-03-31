@@ -568,15 +568,19 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             (depth - e_lb) as usize
         };
         let canon = self.ctx.canonical_hash(e);
+        let is_check = flag == InferFlag::Check;
         if let Some(bucket) = self.tc_cache.infer_cache.get(bucket_idx) {
-            if let Some(&(stored_input, stored_result, stored_depth)) = bucket.get(&canon) {
-                if stored_input == e && stored_depth == depth {
-                    return stored_result;
-                }
-                if depth >= stored_depth {
-                    let delta = depth - stored_depth;
-                    if delta > 0 && self.ctx.shift_eq(stored_input, e, delta) {
-                        return self.ctx.mk_shift(stored_result, delta);
+            if let Some(&(stored_input, stored_result, stored_depth, checked)) = bucket.get(&canon) {
+                // A Check entry can serve both flags; an InferOnly entry can only serve InferOnly.
+                if checked || !is_check {
+                    if stored_input == e && stored_depth == depth {
+                        return stored_result;
+                    }
+                    if depth >= stored_depth {
+                        let delta = depth - stored_depth;
+                        if delta > 0 && self.ctx.shift_eq(stored_input, e, delta) {
+                            return self.ctx.mk_shift(stored_result, delta);
+                        }
                     }
                 }
             }
@@ -602,9 +606,12 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             Shift { .. } => unreachable!("Shift handled before cache lookup")
         };
         if let Some(bucket) = self.tc_cache.infer_cache.get_mut(bucket_idx) {
-            // Prefer entry at lower depth (better for future shift hits)
-            if bucket.get(&canon).map_or(true, |&(_, _, sd)| depth < sd) {
-                bucket.insert(canon, (e, r, depth));
+            // Prefer: (1) checked over unchecked, (2) lower depth (better for shift hits)
+            let dominated = bucket.get(&canon).map_or(true, |&(_, _, sd, sc)| {
+                (is_check && !sc) || (is_check == sc && depth < sd)
+            });
+            if dominated {
+                bucket.insert(canon, (e, r, depth, is_check));
             }
         }
         r

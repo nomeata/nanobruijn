@@ -1113,10 +1113,12 @@ pub(crate) struct TcCache<'t> {
     /// Bucket 0 is for closed expressions (never evicted).
     /// Buckets 1..depth are for open expressions at each canonical depth.
     /// bucket_idx: 0 for closed, `depth - fvar_lb` for open.
-    /// Each map keys by canonical hash → (stored_input, stored_result, stored_depth).
+    /// Each map keys by canonical hash → (stored_input, stored_result, stored_depth, checked).
+    /// `checked=true` means the entry was stored by a Check pass and can serve both Check
+    /// and InferOnly queries. `checked=false` can only serve InferOnly queries.
     /// On hit, verify with shift_eq and apply delta via mk_shift.
     /// Push/pop follows local_ctx for O(1) eviction.
-    pub(crate) infer_cache: Vec<FxHashMap<(u64, u64), (ExprPtr<'t>, ExprPtr<'t>, u16)>>,
+    pub(crate) infer_cache: Vec<FxHashMap<(u64, u64), (ExprPtr<'t>, ExprPtr<'t>, u16, bool)>>,
 }
 
 impl<'t> TcCache<'t> {
