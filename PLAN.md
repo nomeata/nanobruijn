@@ -54,8 +54,8 @@ No full traversal (`force_shift_aux`) needed in the whnf cache hit path.
 
 `unfold_apps` returns lazy (Shift-wrapped) args: accumulates cutoff=0 shifts through the App
 spine and wraps each arg with `mk_shift` instead of full traversal. O(n_args) instead of
-O(n_args × expr_size). Companion fix: `inst_aux` shallow-forces substitution values with
-`force_shift_shallow` at offset=0, preventing cascading Shift wrappers in inst_beta results.
+O(n_args × expr_size). `inst_aux` uses `mk_shift(val, offset)` for substitution values —
+fully lazy, no forcing needed since all comparisons use `sem_eq`.
 
 `view_expr(e)` is a view function that transparently handles Shift nodes: returns `Expr<'t>`
 with Shift pushed one level inside via `force_shift_shallow`. Never returns `Shift` variant;
@@ -65,17 +65,25 @@ Used by: `unfold_apps_fun`, `unfold_apps_stack`, `inst_forall_params`, `infer_ap
 infer_sort_of, reduce_proj, strong_reduce, iota_reduce_recursor, reduce_quot, is_sort_zero,
 try_eta_expansion_aux, get_bignum_from_expr, get_bignum_succ_from_expr).
 
-`force_shift_aux` (full O(n) traversal) retained for `inst_aux` only — shallow forcing
-of substitution values causes ExprPtr identity divergence on large workloads (init 54k decls).
-All other shift forcing uses `force_shift_shallow` (one-level push) or `mk_shift` (O(1) wrapper).
+`force_shift_aux` has been deleted. All shifting uses `mk_shift` (O(1) wrapper) or
+`force_shift_shallow` (one-level push). `inst_aux` uses `mk_shift(val, offset)` for
+substitution value shifting — fully lazy, no traversal.
 `force_shift_shallow` handles nested Shift with mismatched cutoff via two sequential
 shallow forces.
 
-`inst_aux` val shifting uses `force_shift_aux(val, offset, 0)` (full deep traversal).
-`force_shift_shallow` was attempted but leaves Shift wrappers on grandchildren that
-produce different ExprPtrs, cascading through caches. `mk_shift` (fully lazy) also fails
-because `Shift(Lambda, k, 0)` and `Lambda(Shift_ty, Shift_body)` are semantically
-equivalent but have different ExprPtrs.
+### Semantic equality (sem_eq)
+
+`sem_eq(a, b)` checks structural equality modulo internal Shift wrappers. Implemented
+as `shift_eq(a, b, 0)` with the delta=0 short-circuit removed. Traverses the expression
+structure, absorbing Shift nodes into the comparison delta. This replaces pointer equality
+(`a == b`) throughout the system for all correctness-critical comparisons.
+
+`shift_eq_aux` now handles Shift on the b-side when `amount > delta` by reversing the
+comparison: `shift(a, delta) == shift(inner_b, amount)` iff `shift(inner_b, amount - delta) == a`.
+
+Used in: `def_eq_quick_check`, all cache collision guards (eq_cache, failure_cache,
+defeq_open_lookup), whnf/whnf_no_unfolding cache hits, infer cache hits,
+`try_unfold_proj_app`, `strong_reduce`, `def_eq_nat`.
 
 `whnf_no_unfolding_aux` uses `view_expr` for the Lambda body-collection loop (handles
 Shift-wrapped bodies from `force_shift_shallow` results) and `force_shift_shallow` in the
@@ -101,14 +109,11 @@ delta-encoded linked list: `{0, 3, 7}` → `[0, 2, 3]` (head = lb, subsequent = 
 
 Canonical hash = `(struct_hash, normalized FVarList hash)`.
 
-**WHNF cache**: keyed by canonical hash; on hit, verify with `shift_eq` (non-allocating
-traversal), then apply delta via `force_shift_shallow`. Shift-invariant hit currently
-disabled for whnf_cache (same ExprPtr divergence issue).
+**WHNF cache**: keyed by canonical hash; on hit, verify with `sem_eq` (same-depth) or
+`shift_eq` + `force_shift_shallow` (cross-depth). Both paths now enabled.
 
-**whnf_no_unfolding cache**: keyed by canonical hash; exact-pointer hits only.
-Shift-invariant hits (force_shift_shallow on result) disabled — causes ExprPtr identity
-divergence on init (54k decls). `whnf_no_unfolding` peels top-level Shifts
-(shift-equivariance) before cache lookup, which is the main benefit.
+**whnf_no_unfolding cache**: keyed by canonical hash; `sem_eq` for same-depth hits.
+`whnf_no_unfolding` also peels top-level Shifts (shift-equivariance) before cache lookup.
 
 **Infer cache**: unified stack of maps. Bucket 0 holds closed expressions (never evicted).
 Buckets 1..depth hold open expressions, indexed by `bucket_idx = depth - fvar_lb`.
@@ -125,9 +130,7 @@ then serves as the base for future shifted lookups.
 
 **DefEq cache (closed expressions)**: `eq_cache` and `failure_cache` use
 `FxHashMap<((u64,u64),(u64,u64)), (ExprPtr, ExprPtr)>` — canonical hash pair as key,
-stored ExprPtrs as collision guard. On hit, verify exact pointer match (no shift_eq
-needed since inst_aux produces Shift-free results via force_shift_aux). Replaced the
-old `UnionFind` eq_cache (which provided transitivity but not shift-invariance) and
+stored ExprPtrs verified via `sem_eq`. Replaced the old `UnionFind` eq_cache and
 `FxHashSet<(ExprPtr, ExprPtr)>` failure_cache. The UnionFind module is now deleted.
 
 **DefEq cache (open expressions)**: same stack-of-maps design as the infer cache.
@@ -251,23 +254,16 @@ all shifting uses `force_shift_shallow` (one-level push) or `mk_shift` (O(1) wra
   single-sided Shift comparisons is cheap (non-allocating) and correct. This makes def_eq
   robust against Shift-wrapped inputs from infer (which returns mk_shift results).
 
-- **force_shift_shallow/mk_shift in inst_aux causes init regression**: Replacing
-  `force_shift_aux` with `force_shift_shallow` or `mk_shift` for substitution value
-  shifting in inst_aux passes all 112 arena tests but fails on init (54k declarations).
-  Making eq_cache and failure_cache shift-tolerant (canonical hash keys with collision
-  guards) was attempted but does NOT fix the issue — the problem is pervasive: Shift
-  wrappers at arbitrary depths break pointer equality assumptions throughout the system
-  (whnf_cache, pattern matching, unfold_apps decomposition, etc.). The root cause:
-  any non-deep shifting produces different ExprPtrs than full forcing, cascading through
-  ALL pointer-equality-dependent code paths. inst_aux must use force_shift_aux (full deep
-  traversal) until every pointer comparison in the system is made shift-transparent.
-
-- **whnf_no_unfolding shift-invariant cache hits cause init regression**: Using
-  `force_shift_shallow(stored_result, delta, 0)` for shift-invariant cache hits in
-  whnf_no_unfolding_cache produces shifted results with internal Shift wrappers. Same
-  ExprPtr identity divergence issue — passes arena tests, fails init. Shift-peeling
-  (equivariance) and canonical-hash keying (exact pointer hit) are safe; only the
-  shifted-result path is problematic.
+- **ExprPtr identity divergence requires sem_eq, not just cache fixes**: Replacing
+  `force_shift_aux` with `mk_shift` in inst_aux initially failed even after making
+  eq_cache/failure_cache shift-tolerant. The problem was pervasive: pointer equality
+  (`==`) was used throughout the system — cache collision guards, whnf cache hits,
+  def_eq_quick_check, try_unfold_proj_app change detection, strong_reduce, shift_eq_aux
+  base cases. The fix: introduce `sem_eq` (semantic equality modulo Shift wrappers)
+  and replace ALL pointer equality comparisons. Also required fixing shift_eq_aux to
+  not short-circuit at delta=0, and adding b-side Shift handling for amount > delta.
+  Once all comparisons became shift-transparent, mk_shift in inst_aux works and
+  force_shift_aux was deleted entirely.
 
 ## References
 
