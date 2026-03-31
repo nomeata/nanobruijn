@@ -4,7 +4,6 @@ use crate::level::Level;
 use crate::name::Name;
 use crate::pretty_printer::{PpOptions, PrettyPrinter};
 use crate::tc::TypeChecker;
-use crate::union_find::UnionFind;
 use crate::unique_hasher::UniqueHasher;
 use indexmap::{IndexMap, IndexSet};
 use num_bigint::BigUint;
@@ -1151,9 +1150,13 @@ pub(crate) struct TcCache<'t> {
     pub(crate) whnf_cache: FxHashMap<(u64, u64), (ExprPtr<'t>, ExprPtr<'t>, u16)>,
     /// Shift-invariant whnf_no_unfolding cache: same design as whnf_cache.
     pub(crate) whnf_no_unfolding_cache: FxHashMap<(u64, u64), (ExprPtr<'t>, ExprPtr<'t>, u16)>,
-    pub(crate) eq_cache: UnionFind<ExprPtr<'t>>,
-    /// A cache of congruence failures during the lazy delta step procedure.
-    pub(crate) failure_cache: FxHashSet<(ExprPtr<'t>, ExprPtr<'t>)>,
+    /// Shift-invariant positive def_eq cache for closed expressions.
+    /// Keyed by ordered pair of canonical hashes. Value: (stored_x, stored_y).
+    /// On hit, verify stored pointers match query pointers exactly (collision guard).
+    pub(crate) eq_cache: FxHashMap<((u64, u64), (u64, u64)), (ExprPtr<'t>, ExprPtr<'t>)>,
+    /// Shift-invariant failure cache for closed expressions (congruence failures).
+    /// Same design as eq_cache.
+    pub(crate) failure_cache: FxHashMap<((u64, u64), (u64, u64)), (ExprPtr<'t>, ExprPtr<'t>)>,
     /// Shift-invariant def_eq cache for open expressions (positive results).
     /// Organized as a stack of maps indexed by bucket_idx = depth - min(fvar_lb(x), fvar_lb(y)).
     /// Key: ordered pair of canonical hashes. Value: (stored_x, stored_y, stored_depth).
@@ -1181,8 +1184,8 @@ impl<'t> TcCache<'t> {
         Self {
             whnf_cache: new_fx_hash_map(),
             whnf_no_unfolding_cache: new_fx_hash_map(),
-            eq_cache: UnionFind::new(),
-            failure_cache: new_fx_hash_set(),
+            eq_cache: new_fx_hash_map(),
+            failure_cache: new_fx_hash_map(),
             defeq_pos_open: Vec::new(),
             defeq_neg_open: Vec::new(),
             strong_cache: new_unique_hash_map(),

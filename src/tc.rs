@@ -893,14 +893,13 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             // Shift-invariant cache lookup: canonical hash keyed.
             let cur_canon = self.ctx.canonical_hash(cur);
             let cur_bvar_ub = self.ctx.num_loose_bvars(cur);
-            if let Some(&(stored_input, stored_result, stored_bvar_ub)) = self.tc_cache.whnf_no_unfolding_cache.get(&cur_canon) {
+            if let Some(&(stored_input, stored_result, _stored_bvar_ub)) = self.tc_cache.whnf_no_unfolding_cache.get(&cur_canon) {
                 if stored_input == cur {
                     break stored_result;
                 }
-                // Shift-invariant hit disabled: force_shift_shallow on whnf_no_unfolding
-                // results causes ExprPtr identity divergence on init (54k decls).
-                // Same root cause as the whnf_cache App result issue documented in PLAN.md.
-                // The shift-peeling at the top still provides shift-equivariance benefits.
+                // Shift-invariant hits are handled by shift-peeling at the top of this function:
+                // Shift(e, k, 0) → whnf(e) then apply shift to result.
+                // No additional shift-invariant matching needed here.
             }
             let (e_fun, args) = self.ctx.unfold_apps(cur);
             match self.ctx.read_expr(e_fun) {
@@ -1135,7 +1134,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             }
         };
         if result {
-            self.tc_cache.eq_cache.union(x, y);
+            self.eq_cache_insert(x, y);
             self.defeq_open_store_pos(x, y);
         }
         result
@@ -1337,7 +1336,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             }
             _ => {}
         }
-        if self.tc_cache.eq_cache.check_uf_eq(x, y) {
+        if self.eq_cache_contains(x, y) {
             return Some(true)
         }
         // Shift-invariant positive def_eq cache for open expressions
@@ -1354,9 +1353,12 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
     }
 
     fn failure_cache_contains(&mut self, x: ExprPtr<'t>, y: ExprPtr<'t>) -> bool {
-        let pr = if x.get_hash() <= y.get_hash() { (x, y) } else { (y, x) };
-        if self.tc_cache.failure_cache.contains(&pr) {
-            return true;
+        let (key, swapped) = self.defeq_canon_key(x, y);
+        if let Some(&(stored_a, stored_b)) = self.tc_cache.failure_cache.get(&key) {
+            let (qx, qy) = if swapped { (y, x) } else { (x, y) };
+            if stored_a == qx && stored_b == qy {
+                return true;
+            }
         }
         if self.defeq_open_lookup(&self.tc_cache.defeq_neg_open, x, y) {
             return true;
@@ -1365,8 +1367,9 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
     }
 
     fn failure_cache_insert(&mut self, x: ExprPtr<'t>, y: ExprPtr<'t>) {
-        let pr = if x.get_hash() <= y.get_hash() { (x, y) } else { (y, x) };
-        self.tc_cache.failure_cache.insert(pr);
+        let (key, swapped) = self.defeq_canon_key(x, y);
+        let (a, b) = if swapped { (y, x) } else { (x, y) };
+        self.tc_cache.failure_cache.insert(key, (a, b));
         self.defeq_open_store_neg(x, y);
     }
 
@@ -1387,6 +1390,25 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         let y_lb = if y_nlbv > 0 { self.ctx.fvar_lb(self.ctx.read_expr(y).get_fvar_list()) } else { u16::MAX };
         let min_lb = x_lb.min(y_lb);
         Some((depth - 1 - min_lb) as usize)
+    }
+
+    /// Canonical-hash-keyed eq_cache lookup for closed expressions.
+    /// Uses exact pointer match to guard against hash collisions.
+    fn eq_cache_contains(&self, x: ExprPtr<'t>, y: ExprPtr<'t>) -> bool {
+        let (key, swapped) = self.defeq_canon_key(x, y);
+        if let Some(&(stored_a, stored_b)) = self.tc_cache.eq_cache.get(&key) {
+            let (qx, qy) = if swapped { (y, x) } else { (x, y) };
+            stored_a == qx && stored_b == qy
+        } else {
+            false
+        }
+    }
+
+    /// Canonical-hash-keyed eq_cache insert for closed expressions.
+    fn eq_cache_insert(&mut self, x: ExprPtr<'t>, y: ExprPtr<'t>) {
+        let (key, swapped) = self.defeq_canon_key(x, y);
+        let (a, b) = if swapped { (y, x) } else { (x, y) };
+        self.tc_cache.eq_cache.insert(key, (a, b));
     }
 
     /// Ordered canonical hash key for a pair of expressions.

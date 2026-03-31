@@ -123,13 +123,20 @@ depth than the current query, we cannot reuse it (would need an "unshift"/shift-
 operation we don't have); instead we recompute and store at the lower depth, which
 then serves as the base for future shifted lookups.
 
+**DefEq cache (closed expressions)**: `eq_cache` and `failure_cache` use
+`FxHashMap<((u64,u64),(u64,u64)), (ExprPtr, ExprPtr)>` — canonical hash pair as key,
+stored ExprPtrs as collision guard. On hit, verify exact pointer match (no shift_eq
+needed since inst_aux produces Shift-free results via force_shift_aux). Replaced the
+old `UnionFind` eq_cache (which provided transitivity but not shift-invariance) and
+`FxHashSet<(ExprPtr, ExprPtr)>` failure_cache. The UnionFind module is now deleted.
+
 **DefEq cache (open expressions)**: same stack-of-maps design as the infer cache.
 Keyed by ordered pair of canonical hashes `((u64,u64), (u64,u64))`.
 `bucket_idx = depth - min(fvar_lb(x), fvar_lb(y))` — uses the deeper (more recently
-bound) of the two arguments. Separate positive (eq_cache) and negative (failure_cache)
-stacks. On hit, verify with `shift_eq` for both sides of the pair. Result is a boolean
-(no delta to apply). The existing UnionFind eq_cache and HashSet failure_cache are kept
-for closed expressions. On init: ~39K shift-invariant hits out of ~913K open stores.
+bound) of the two arguments. Separate positive (defeq_pos_open) and negative
+(defeq_neg_open) stacks. On hit, verify with `shift_eq` for both sides of the pair.
+Result is a boolean (no delta to apply). On init: ~39K shift-invariant hits out of
+~913K open stores.
 
 ### Infrastructure
 
@@ -244,13 +251,16 @@ all shifting uses `force_shift_shallow` (one-level push) or `mk_shift` (O(1) wra
   single-sided Shift comparisons is cheap (non-allocating) and correct. This makes def_eq
   robust against Shift-wrapped inputs from infer (which returns mk_shift results).
 
-- **force_shift_shallow in inst_aux causes init regression**: Replacing `force_shift_aux`
-  with `force_shift_shallow` for substitution value shifting in inst_aux passes all 112
-  arena tests but fails on init (54k declarations). The root cause: force_shift_shallow
-  leaves Shift wrappers on grandchildren, producing different ExprPtrs than full forcing.
-  These different pointers cascade through downstream caches (infer, def_eq, whnf),
-  eventually causing type errors. The arena tests are too small to trigger the divergent
-  cache paths. inst_aux must use force_shift_aux (full deep traversal) for correctness.
+- **force_shift_shallow/mk_shift in inst_aux causes init regression**: Replacing
+  `force_shift_aux` with `force_shift_shallow` or `mk_shift` for substitution value
+  shifting in inst_aux passes all 112 arena tests but fails on init (54k declarations).
+  Making eq_cache and failure_cache shift-tolerant (canonical hash keys with collision
+  guards) was attempted but does NOT fix the issue — the problem is pervasive: Shift
+  wrappers at arbitrary depths break pointer equality assumptions throughout the system
+  (whnf_cache, pattern matching, unfold_apps decomposition, etc.). The root cause:
+  any non-deep shifting produces different ExprPtrs than full forcing, cascading through
+  ALL pointer-equality-dependent code paths. inst_aux must use force_shift_aux (full deep
+  traversal) until every pointer comparison in the system is made shift-transparent.
 
 - **whnf_no_unfolding shift-invariant cache hits cause init regression**: Using
   `force_shift_shallow(stored_result, delta, 0)` for shift-invariant cache hits in
