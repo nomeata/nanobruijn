@@ -109,11 +109,12 @@ Canonical hash = `(struct_hash, normalized FVarList hash)`.
 verify with `shift_eq` (non-allocating traversal), then apply delta via `force_shift_shallow`.
 `whnf_no_unfolding` also peels top-level Shifts (shift-equivariance) before cache lookup.
 
-**Infer cache (open expressions)**: organized as a stack of maps indexed by
-`bucket_idx = depth - 1 - fvar_lb` (the shallowest context entry the expression depends
-on). Each map keys by canonical hash → (stored_input, stored_result, stored_depth).
+**Infer cache**: unified stack of maps. Bucket 0 holds closed expressions (never evicted).
+Buckets 1..depth hold open expressions, indexed by `bucket_idx = depth - fvar_lb`.
+Each map keys by canonical hash → (stored_input, stored_result, stored_depth).
 On hit, verify with `shift_eq`, apply delta via `mk_shift`. Stack push/pop follows
-`push_local`/`pop_local` for O(1) eviction (replaces O(n) `retain` scan).
+`push_local`/`pop_local` for O(1) eviction. Replaces the old three-cache design
+(infer_cache_check, infer_cache_no_check, infer_open_cache).
 Entries in shallow buckets survive push/pop of deeper context entries (correct, since
 they only depend on the unchanged shallow context). If an entry was stored at a deeper
 depth than the current query, we cannot reuse it (would need an "unshift"/shift-down
@@ -122,7 +123,7 @@ then serves as the base for future shifted lookups.
 
 **DefEq cache (open expressions)**: same stack-of-maps design as the infer cache.
 Keyed by ordered pair of canonical hashes `((u64,u64), (u64,u64))`.
-`bucket_idx = depth - 1 - min(fvar_lb(x), fvar_lb(y))` — uses the deeper (more recently
+`bucket_idx = depth - min(fvar_lb(x), fvar_lb(y))` — uses the deeper (more recently
 bound) of the two arguments. Separate positive (eq_cache) and negative (failure_cache)
 stacks. On hit, verify with `shift_eq` for both sides of the pair. Result is a boolean
 (no delta to apply). The existing UnionFind eq_cache and HashSet failure_cache are kept
