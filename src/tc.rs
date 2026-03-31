@@ -182,7 +182,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
     /// Push a binder type onto the local context (entering a binder).
     fn push_local(&mut self, ty: ExprPtr<'t>) {
         self.local_ctx.push(ty);
-        self.tc_cache.infer_open_cache.push(new_fx_hash_map());
+        self.tc_cache.infer_cache.push(new_fx_hash_map());
         self.tc_cache.defeq_pos_open.push(new_fx_hash_map());
         self.tc_cache.defeq_neg_open.push(new_fx_hash_map());
     }
@@ -190,7 +190,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
     /// Pop a binder type from the local context (exiting a binder).
     fn pop_local(&mut self) {
         self.local_ctx.pop().expect("pop_local: empty context");
-        self.tc_cache.infer_open_cache.pop();
+        self.tc_cache.infer_cache.pop();
         self.tc_cache.defeq_pos_open.pop();
         self.tc_cache.defeq_neg_open.pop();
     }
@@ -199,7 +199,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
     fn restore_depth(&mut self, depth: usize) {
         if self.local_ctx.len() > depth {
             self.local_ctx.truncate(depth);
-            self.tc_cache.infer_open_cache.truncate(depth);
+            self.tc_cache.infer_cache.truncate(depth + 1); // +1 for base bucket
             self.tc_cache.defeq_pos_open.truncate(depth);
             self.tc_cache.defeq_neg_open.truncate(depth);
         }
@@ -544,12 +544,12 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             if cutoff == 0 {
                 let new_depth = self.local_ctx.len() - amount as usize;
                 let saved_locals = self.local_ctx.split_off(new_depth);
-                let saved_cache = self.tc_cache.infer_open_cache.split_off(new_depth);
+                let saved_cache = self.tc_cache.infer_cache.split_off(new_depth + 1); // +1 for base bucket
                 let saved_pos = self.tc_cache.defeq_pos_open.split_off(new_depth);
                 let saved_neg = self.tc_cache.defeq_neg_open.split_off(new_depth);
                 let inner_type = self.infer(inner, flag);
                 self.local_ctx.extend(saved_locals);
-                self.tc_cache.infer_open_cache.extend(saved_cache);
+                self.tc_cache.infer_cache.extend(saved_cache);
                 self.tc_cache.defeq_pos_open.extend(saved_pos);
                 self.tc_cache.defeq_neg_open.extend(saved_neg);
                 return self.ctx.mk_shift(inner_type, amount);
@@ -558,38 +558,25 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                 return self.infer(forced, flag);
             }
         }
-        // Only use cache for closed expressions (no loose bvars), since
-        // the result of inferring an expression with free Vars depends on
-        // the local context depth.
-        let cacheable = self.ctx.num_loose_bvars(e) == 0;
+        // Shift-invariant infer cache: bucket 0 for closed, bucket (depth - fvar_lb) for open.
         let depth = self.local_ctx.len() as u16;
-        if cacheable {
-            if let Some(cached) = self.tc_cache.infer_cache_check.get(&e).copied() {
-                return cached
-            }
-            if flag == InferFlag::InferOnly {
-                if let Some(cached) = self.tc_cache.infer_cache_no_check.get(&e).copied() {
-                    return cached
-                }
-            }
+        let bucket_idx = if self.ctx.num_loose_bvars(e) == 0 {
+            0
         } else {
-            // Shift-invariant cache for open expressions, organized as a stack by canonical depth.
             let e_fvl = self.ctx.read_expr(e).get_fvar_list();
             let e_lb = self.ctx.fvar_lb(e_fvl);
-            // bucket_idx = depth - 1 - lb: the shallowest context entry this expr depends on.
-            // Shift-invariant: shift(e, k) at depth+k has the same bucket_idx.
-            let bucket_idx = (depth - 1 - e_lb) as usize;
-            let canon = self.ctx.canonical_hash(e);
-            if let Some(bucket) = self.tc_cache.infer_open_cache.get(bucket_idx) {
-                if let Some(&(stored_input, stored_result, stored_depth)) = bucket.get(&canon) {
-                    if stored_input == e && stored_depth == depth {
-                        return stored_result;
-                    }
-                    if depth >= stored_depth {
-                        let delta = depth - stored_depth;
-                        if delta > 0 && self.ctx.shift_eq(stored_input, e, delta) {
-                            return self.ctx.mk_shift(stored_result, delta);
-                        }
+            (depth - e_lb) as usize
+        };
+        let canon = self.ctx.canonical_hash(e);
+        if let Some(bucket) = self.tc_cache.infer_cache.get(bucket_idx) {
+            if let Some(&(stored_input, stored_result, stored_depth)) = bucket.get(&canon) {
+                if stored_input == e && stored_depth == depth {
+                    return stored_result;
+                }
+                if depth >= stored_depth {
+                    let delta = depth - stored_depth;
+                    if delta > 0 && self.ctx.shift_eq(stored_input, e, delta) {
+                        return self.ctx.mk_shift(stored_result, delta);
                     }
                 }
             }
@@ -614,25 +601,10 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             }
             Shift { .. } => unreachable!("Shift handled before cache lookup")
         };
-        if cacheable {
-            match flag {
-                InferFlag::InferOnly => {
-                    self.tc_cache.infer_cache_no_check.insert(e, r);
-                }
-                InferFlag::Check => {
-                    self.tc_cache.infer_cache_check.insert(e, r);
-                }
-            }
-        } else {
-            let e_fvl = self.ctx.read_expr(e).get_fvar_list();
-            let e_lb = self.ctx.fvar_lb(e_fvl);
-            let bucket_idx = (depth - 1 - e_lb) as usize;
-            let canon = self.ctx.canonical_hash(e);
-            if let Some(bucket) = self.tc_cache.infer_open_cache.get_mut(bucket_idx) {
-                // Prefer entry at lower depth (better for future shift hits)
-                if bucket.get(&canon).map_or(true, |&(_, _, sd)| depth < sd) {
-                    bucket.insert(canon, (e, r, depth));
-                }
+        if let Some(bucket) = self.tc_cache.infer_cache.get_mut(bucket_idx) {
+            // Prefer entry at lower depth (better for future shift hits)
+            if bucket.get(&canon).map_or(true, |&(_, _, sd)| depth < sd) {
+                bucket.insert(canon, (e, r, depth));
             }
         }
         r

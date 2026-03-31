@@ -1090,11 +1090,9 @@ pub struct NameCache<'p> {
 }
 
 pub(crate) struct TcCache<'t> {
-    pub(crate) infer_cache_check: UniqueHashMap<ExprPtr<'t>, ExprPtr<'t>>,
-    pub(crate) infer_cache_no_check: UniqueHashMap<ExprPtr<'t>, ExprPtr<'t>>,
     /// Shift-invariant WHNF cache: keyed by canonical hash (struct_hash, fvar_normalize_hash),
     /// stores (input_expr, result_expr, bvar_ub). On hit, verify with shift_eq, then
-    /// force_shift_aux(result, delta) where delta = query_bvar_ub - stored_bvar_ub.
+    /// apply delta via force_shift_shallow.
     pub(crate) whnf_cache: FxHashMap<(u64, u64), (ExprPtr<'t>, ExprPtr<'t>, u16)>,
     /// Shift-invariant whnf_no_unfolding cache: same design as whnf_cache.
     pub(crate) whnf_no_unfolding_cache: FxHashMap<(u64, u64), (ExprPtr<'t>, ExprPtr<'t>, u16)>,
@@ -1102,7 +1100,7 @@ pub(crate) struct TcCache<'t> {
     /// A cache of congruence failures during the lazy delta step procedure.
     pub(crate) failure_cache: FxHashSet<(ExprPtr<'t>, ExprPtr<'t>)>,
     /// Shift-invariant def_eq cache for open expressions (positive results).
-    /// Organized as a stack of maps indexed by bucket_idx = depth - 1 - min(fvar_lb(x), fvar_lb(y)).
+    /// Organized as a stack of maps indexed by bucket_idx = depth - min(fvar_lb(x), fvar_lb(y)).
     /// Key: ordered pair of canonical hashes. Value: (stored_x, stored_y, stored_depth).
     /// On hit, verify with shift_eq for both sides. Result is always true (positive).
     pub(crate) defeq_pos_open: Vec<FxHashMap<((u64, u64), (u64, u64)), (ExprPtr<'t>, ExprPtr<'t>, u16)>>,
@@ -1111,19 +1109,19 @@ pub(crate) struct TcCache<'t> {
     pub(crate) defeq_neg_open: Vec<FxHashMap<((u64, u64), (u64, u64)), (ExprPtr<'t>, ExprPtr<'t>, u16)>>,
     /// Strong reduction is not used during type-checking, this is more of a library/inspection feature.
     pub(crate) strong_cache: UniqueHashMap<(ExprPtr<'t>, bool, bool), ExprPtr<'t>>,
-    /// Shift-invariant infer cache for open expressions, organized as a stack.
-    /// `infer_open_cache[cd-1]` stores entries at canonical depth `cd = depth - fvar_lb`.
+    /// Shift-invariant infer cache, organized as a stack of maps.
+    /// Bucket 0 is for closed expressions (never evicted).
+    /// Buckets 1..depth are for open expressions at each canonical depth.
+    /// bucket_idx: 0 for closed, `depth - fvar_lb` for open.
     /// Each map keys by canonical hash → (stored_input, stored_result, stored_depth).
     /// On hit, verify with shift_eq and apply delta via mk_shift.
     /// Push/pop follows local_ctx for O(1) eviction.
-    pub(crate) infer_open_cache: Vec<FxHashMap<(u64, u64), (ExprPtr<'t>, ExprPtr<'t>, u16)>>,
+    pub(crate) infer_cache: Vec<FxHashMap<(u64, u64), (ExprPtr<'t>, ExprPtr<'t>, u16)>>,
 }
 
 impl<'t> TcCache<'t> {
     pub(crate) fn new() -> Self {
         Self {
-            infer_cache_check: new_unique_hash_map(),
-            infer_cache_no_check: new_unique_hash_map(),
             whnf_cache: new_fx_hash_map(),
             whnf_no_unfolding_cache: new_fx_hash_map(),
             eq_cache: UnionFind::new(),
@@ -1131,18 +1129,19 @@ impl<'t> TcCache<'t> {
             defeq_pos_open: Vec::new(),
             defeq_neg_open: Vec::new(),
             strong_cache: new_unique_hash_map(),
-            infer_open_cache: Vec::new(),
+            infer_cache: vec![new_fx_hash_map()], // bucket 0 = closed expressions
         }
     }
 
     pub(crate) fn clear(&mut self) {
-        self.infer_cache_check.clear();
-        self.infer_cache_no_check.clear();
         self.whnf_cache.clear();
         self.whnf_no_unfolding_cache.clear();
         self.eq_cache.clear();
         self.failure_cache.clear();
         self.strong_cache.clear();
+        // Keep bucket 0 (closed), clear it, drop open buckets
+        self.infer_cache.truncate(1);
+        self.infer_cache[0].clear();
     }
 }
 
