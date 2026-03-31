@@ -295,6 +295,9 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
                     if rel_idx < n_substs {
                         // Within substitution range: replace with subst (in reverse order).
                         // Shift the value up by `offset` to account for binders we traversed.
+                        // Use force_shift_shallow instead of mk_shift to avoid ExprPtr identity
+                        // divergence — Shift(Lambda, k, 0) vs Lambda(Shift_ty, Shift_body) have
+                        // different ExprPtrs that cascade through caches causing wrong results.
                         let val = substs[substs.len() - 1 - rel_idx as usize];
                         if offset > 0 {
                             self.force_shift_shallow(val, offset, 0)

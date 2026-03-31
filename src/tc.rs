@@ -917,7 +917,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                 }
                 Lambda { .. } if !args.is_empty() => {
                     let (mut e, mut n_args) = (e_fun, 0usize);
-                    while let (Lambda { body, .. }, [_arg, _rest @ ..]) = (self.ctx.read_expr(e), &args[n_args..]) {
+                    while let (Lambda { body, .. }, [_arg, _rest @ ..]) = (self.ctx.view_expr(e), &args[n_args..]) {
                         n_args += 1;
                         e = body;
                     }
@@ -957,8 +957,8 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                 }
                 App { .. } => panic!(),
                 Local { .. } | NatLit { .. } | StringLit { .. } => break self.ctx.foldl_apps(e_fun, args.into_iter()),
-                Shift { .. } => {
-                    let forced = self.ctx.force_shift(e_fun);
+                Shift { inner, amount, cutoff, .. } => {
+                    let forced = self.ctx.force_shift_shallow(inner, amount, cutoff);
                     let next = self.ctx.foldl_apps(forced, args.into_iter());
                     if !cheap_proj { cache_entries.push(cur); }
                     cur = next;

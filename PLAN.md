@@ -69,13 +69,20 @@ try_eta_expansion_aux, get_bignum_from_expr, get_bignum_succ_from_expr).
 
 Remaining `force_shift_aux` call sites (outside its own implementation):
 - **force_shift** convenience wrapper (util.rs): called from `unfold_apps_fun`, `unfold_apps_stack`,
-  `shift_expr_aux`, `inductive.rs` (2 sites), `tc.rs` whnf_no_unfolding_aux.
+  `shift_expr_aux`, `inductive.rs` (2 sites).
 - **force_shift_shallow itself** (util.rs): forces inner Shift with mismatched cutoff
   (via two sequential shallow forces instead of one full force).
 
-`inst_aux` val shifting now uses `force_shift_shallow(val, offset, 0)` instead of
-`force_shift_aux`. The `force_shift` pre-forcing of subst values (for lazy unfold_apps)
-was also removed — Shift-wrapped subst values are handled by downstream consumers.
+`inst_aux` val shifting uses `force_shift_shallow(val, offset, 0)` instead of
+`force_shift_aux`. Using `mk_shift` (fully lazy) was attempted but fails due to ExprPtr
+identity divergence — `Shift(Lambda, k, 0)` and `Lambda(Shift_ty, Shift_body)` are
+semantically equivalent but have different ExprPtrs, cascading through caches.
+The `force_shift` pre-forcing of subst values (for lazy unfold_apps) was removed —
+Shift-wrapped subst values from `unfold_apps` are handled by `force_shift_shallow`.
+
+`whnf_no_unfolding_aux` uses `view_expr` for the Lambda body-collection loop (handles
+Shift-wrapped bodies from `force_shift_shallow` results) and `force_shift_shallow` in the
+Shift arm (was `force_shift`).
 
 ### Shift-invariant hashing and caching
 
@@ -212,9 +219,11 @@ the full expression tree creating new nodes.
   was insufficient — Shift-wrapped args in foldl_apps output create different ExprPtrs that
   cascade through def_eq/eq_cache/failure_cache causing type errors.
 
-- **Lazy unfold_apps requires companion fix**: `inst_aux` must `force_shift` subst
-  values at offset=0, otherwise Shift wrappers propagate through inst_beta creating expressions
-  with embedded Shifts that cascade through the system.
+- **Lazy unfold_apps requires companion fix**: `inst_aux` must shallow-force subst
+  values, otherwise Shift wrappers propagate through inst_beta. Using `mk_shift` (fully lazy)
+  was attempted but fails because `Shift(Lambda, k, 0)` and `Lambda(Shift_ty, Shift_body)`
+  have different ExprPtrs despite being semantically equivalent, causing cache identity
+  divergence throughout the system. `force_shift_shallow` is the minimum viable forcing level.
 
 - **shift_eq must track binder depth**: The old shift_eq checked `j == i + delta` for all Var
   nodes, including bound vars inside Pi/Lambda bodies. This is wrong: bound Var(0) in a Pi body
