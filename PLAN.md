@@ -104,6 +104,14 @@ depth than the current query, we cannot reuse it (would need an "unshift"/shift-
 operation we don't have); instead we recompute and store at the lower depth, which
 then serves as the base for future shifted lookups.
 
+**DefEq cache (open expressions)**: same stack-of-maps design as the infer cache.
+Keyed by ordered pair of canonical hashes `((u64,u64), (u64,u64))`.
+`bucket_idx = depth - 1 - min(fvar_lb(x), fvar_lb(y))` — uses the deeper (more recently
+bound) of the two arguments. Separate positive (eq_cache) and negative (failure_cache)
+stacks. On hit, verify with `shift_eq` for both sides of the pair. Result is a boolean
+(no delta to apply). The existing UnionFind eq_cache and HashSet failure_cache are kept
+for closed expressions. On init: ~39K shift-invariant hits out of ~913K open stores.
+
 ### Infrastructure
 
 - `stacker` crate for dynamic stack growth (deep recursion on mathlib)
@@ -136,11 +144,6 @@ the full expression tree creating new nodes.
 
 - **Fix mathlib OOM**: instrument memory per-declaration, find what's blowing up;
   consider periodic cache eviction or more compact expression representation
-
-- **Extend shift-invariant caching to def_eq cache** (whnf and infer done)
-
-- **DefEq cache with canonical keys**: current union-find doesn't support shift-invariant
-  lookup; switch to HashMap with canonical keys + delta
 
 - **Remove dead locally-nameless code** (Local variant, FVarId, abstr, etc.)
 

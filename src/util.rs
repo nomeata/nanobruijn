@@ -1190,6 +1190,14 @@ pub(crate) struct TcCache<'t> {
     pub(crate) eq_cache: UnionFind<ExprPtr<'t>>,
     /// A cache of congruence failures during the lazy delta step procedure.
     pub(crate) failure_cache: FxHashSet<(ExprPtr<'t>, ExprPtr<'t>)>,
+    /// Shift-invariant def_eq cache for open expressions (positive results).
+    /// Organized as a stack of maps indexed by bucket_idx = depth - 1 - min(fvar_lb(x), fvar_lb(y)).
+    /// Key: ordered pair of canonical hashes. Value: (stored_x, stored_y, stored_depth).
+    /// On hit, verify with shift_eq for both sides. Result is always true (positive).
+    pub(crate) defeq_pos_open: Vec<FxHashMap<((u64, u64), (u64, u64)), (ExprPtr<'t>, ExprPtr<'t>, u16)>>,
+    /// Shift-invariant failure cache for open expressions (congruence failures).
+    /// Same structure as defeq_pos_open. Result is always false (negative).
+    pub(crate) defeq_neg_open: Vec<FxHashMap<((u64, u64), (u64, u64)), (ExprPtr<'t>, ExprPtr<'t>, u16)>>,
     /// Strong reduction is not used during type-checking, this is more of a library/inspection feature.
     pub(crate) strong_cache: UniqueHashMap<(ExprPtr<'t>, bool, bool), ExprPtr<'t>>,
     /// Shift-invariant infer cache for open expressions, organized as a stack.
@@ -1209,6 +1217,8 @@ impl<'t> TcCache<'t> {
             whnf_no_unfolding_cache: new_unique_hash_map(),
             eq_cache: UnionFind::new(),
             failure_cache: new_fx_hash_set(),
+            defeq_pos_open: Vec::new(),
+            defeq_neg_open: Vec::new(),
             strong_cache: new_unique_hash_map(),
             infer_open_cache: Vec::new(),
         }

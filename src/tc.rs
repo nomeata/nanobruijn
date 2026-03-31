@@ -4,11 +4,12 @@ use crate::expr::Expr;
 use crate::level::Level;
 use crate::util::{
     nat_div, nat_mod, nat_sub, nat_gcd, nat_land, nat_lor,
-    nat_xor, nat_shr, nat_shl, new_fx_hash_map, ExportFile, ExprPtr, LevelPtr,
+    nat_xor, nat_shr, nat_shl, new_fx_hash_map, ExportFile, ExprPtr, FxHashMap, LevelPtr,
     LevelsPtr, NamePtr, TcCache, TcCtx, StringPtr
 };
 use std::error::Error;
 use num_traits::pow::Pow;
+
 
 use DeltaResult::*;
 use Expr::*;
@@ -182,12 +183,16 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
     fn push_local(&mut self, ty: ExprPtr<'t>) {
         self.local_ctx.push(ty);
         self.tc_cache.infer_open_cache.push(new_fx_hash_map());
+        self.tc_cache.defeq_pos_open.push(new_fx_hash_map());
+        self.tc_cache.defeq_neg_open.push(new_fx_hash_map());
     }
 
     /// Pop a binder type from the local context (exiting a binder).
     fn pop_local(&mut self) {
         self.local_ctx.pop().expect("pop_local: empty context");
         self.tc_cache.infer_open_cache.pop();
+        self.tc_cache.defeq_pos_open.pop();
+        self.tc_cache.defeq_neg_open.pop();
     }
 
     /// Restore local context to a previous depth.
@@ -195,6 +200,8 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         if self.local_ctx.len() > depth {
             self.local_ctx.truncate(depth);
             self.tc_cache.infer_open_cache.truncate(depth);
+            self.tc_cache.defeq_pos_open.truncate(depth);
+            self.tc_cache.defeq_neg_open.truncate(depth);
         }
     }
 
@@ -538,9 +545,13 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                 let new_depth = self.local_ctx.len() - amount as usize;
                 let saved_locals = self.local_ctx.split_off(new_depth);
                 let saved_cache = self.tc_cache.infer_open_cache.split_off(new_depth);
+                let saved_pos = self.tc_cache.defeq_pos_open.split_off(new_depth);
+                let saved_neg = self.tc_cache.defeq_neg_open.split_off(new_depth);
                 let inner_type = self.infer(inner, flag);
                 self.local_ctx.extend(saved_locals);
                 self.tc_cache.infer_open_cache.extend(saved_cache);
+                self.tc_cache.defeq_pos_open.extend(saved_pos);
+                self.tc_cache.defeq_neg_open.extend(saved_neg);
                 return self.ctx.mk_shift(inner_type, amount);
             } else {
                 let forced = self.ctx.force_shift_aux(inner, amount, cutoff);
@@ -1116,6 +1127,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         };
         if result {
             self.tc_cache.eq_cache.union(x, y);
+            self.defeq_open_store_pos(x, y);
         }
         result
     }
@@ -1319,6 +1331,10 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         if self.tc_cache.eq_cache.check_uf_eq(x, y) {
             return Some(true)
         }
+        // Shift-invariant positive def_eq cache for open expressions
+        if self.defeq_open_lookup(&self.tc_cache.defeq_pos_open, x, y) {
+            return Some(true)
+        }
         if let Some(r) = self.def_eq_sort(x, y) {
             return Some(r)
         }
@@ -1328,14 +1344,123 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         None
     }
 
-    fn failure_cache_contains(&self, x: ExprPtr<'t>, y: ExprPtr<'t>) -> bool {
+    fn failure_cache_contains(&mut self, x: ExprPtr<'t>, y: ExprPtr<'t>) -> bool {
         let pr = if x.get_hash() <= y.get_hash() { (x, y) } else { (y, x) };
-        self.tc_cache.failure_cache.contains(&pr)
+        if self.tc_cache.failure_cache.contains(&pr) {
+            return true;
+        }
+        if self.defeq_open_lookup(&self.tc_cache.defeq_neg_open, x, y) {
+            return true;
+        }
+        false
     }
 
     fn failure_cache_insert(&mut self, x: ExprPtr<'t>, y: ExprPtr<'t>) {
         let pr = if x.get_hash() <= y.get_hash() { (x, y) } else { (y, x) };
         self.tc_cache.failure_cache.insert(pr);
+        self.defeq_open_store_neg(x, y);
+    }
+
+    /// Compute bucket index for shift-invariant def_eq cache.
+    /// Returns None if both expressions are closed (use global cache instead).
+    fn defeq_bucket_idx(&self, x: ExprPtr<'t>, y: ExprPtr<'t>) -> Option<usize> {
+        let depth = self.local_ctx.len() as u16;
+        let x_nlbv = self.ctx.num_loose_bvars(x);
+        let y_nlbv = self.ctx.num_loose_bvars(y);
+        if x_nlbv == 0 && y_nlbv == 0 {
+            return None;
+        }
+        if depth == 0 {
+            return None;
+        }
+        // Use u16::MAX for closed expressions so they don't constrain the bucket
+        let x_lb = if x_nlbv > 0 { self.ctx.fvar_lb(self.ctx.read_expr(x).get_fvar_list()) } else { u16::MAX };
+        let y_lb = if y_nlbv > 0 { self.ctx.fvar_lb(self.ctx.read_expr(y).get_fvar_list()) } else { u16::MAX };
+        let min_lb = x_lb.min(y_lb);
+        Some((depth - 1 - min_lb) as usize)
+    }
+
+    /// Ordered canonical hash key for a pair of expressions.
+    fn defeq_canon_key(&self, x: ExprPtr<'t>, y: ExprPtr<'t>) -> (((u64, u64), (u64, u64)), bool) {
+        let cx = self.ctx.canonical_hash(x);
+        let cy = self.ctx.canonical_hash(y);
+        if cx <= cy {
+            ((cx, cy), false)
+        } else {
+            ((cy, cx), true)
+        }
+    }
+
+    /// Look up in a shift-invariant def_eq cache (positive or negative).
+    fn defeq_open_lookup(
+        &self,
+        cache: &[FxHashMap<((u64, u64), (u64, u64)), (ExprPtr<'t>, ExprPtr<'t>, u16)>],
+        x: ExprPtr<'t>,
+        y: ExprPtr<'t>,
+    ) -> bool {
+        let Some(bucket_idx) = self.defeq_bucket_idx(x, y) else { return false };
+        let Some(bucket) = cache.get(bucket_idx) else { return false };
+        let (key, swapped) = self.defeq_canon_key(x, y);
+        let Some(&(stored_a, stored_b, stored_depth)) = bucket.get(&key) else { return false };
+        let depth = self.local_ctx.len() as u16;
+        let (qx, qy) = if swapped { (y, x) } else { (x, y) };
+        // Exact match
+        if stored_a == qx && stored_b == qy && stored_depth == depth {
+            return true;
+        }
+        // Shift-invariant match
+        if depth >= stored_depth {
+            let delta = depth - stored_depth;
+            if delta > 0 {
+                if self.ctx.shift_eq(stored_a, qx, delta) && self.ctx.shift_eq(stored_b, qy, delta) {
+                    return true;
+                }
+                // Try swapped assignment if canonical hashes are equal
+                if self.ctx.canonical_hash(x) == self.ctx.canonical_hash(y)
+                    && self.ctx.shift_eq(stored_a, qy, delta)
+                    && self.ctx.shift_eq(stored_b, qx, delta)
+                {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    /// Store in a shift-invariant def_eq cache (positive or negative).
+    fn defeq_open_store_pos(&mut self, x: ExprPtr<'t>, y: ExprPtr<'t>) {
+        Self::defeq_open_store_impl(self.ctx, &mut self.tc_cache.defeq_pos_open, &self.local_ctx, x, y);
+    }
+
+    fn defeq_open_store_neg(&mut self, x: ExprPtr<'t>, y: ExprPtr<'t>) {
+        Self::defeq_open_store_impl(self.ctx, &mut self.tc_cache.defeq_neg_open, &self.local_ctx, x, y);
+    }
+
+    fn defeq_open_store_impl(
+        ctx: &mut TcCtx<'t, 'p>,
+        cache: &mut Vec<FxHashMap<((u64, u64), (u64, u64)), (ExprPtr<'t>, ExprPtr<'t>, u16)>>,
+        local_ctx: &[ExprPtr<'t>],
+        x: ExprPtr<'t>,
+        y: ExprPtr<'t>,
+    ) {
+        let depth = local_ctx.len() as u16;
+        let x_nlbv = ctx.num_loose_bvars(x);
+        let y_nlbv = ctx.num_loose_bvars(y);
+        if x_nlbv == 0 && y_nlbv == 0 { return; }
+        if depth == 0 { return; }
+        let x_lb = if x_nlbv > 0 { ctx.fvar_lb(ctx.read_expr(x).get_fvar_list()) } else { u16::MAX };
+        let y_lb = if y_nlbv > 0 { ctx.fvar_lb(ctx.read_expr(y).get_fvar_list()) } else { u16::MAX };
+        let min_lb = x_lb.min(y_lb);
+        let bucket_idx = (depth - 1 - min_lb) as usize;
+        let cx = ctx.canonical_hash(x);
+        let cy = ctx.canonical_hash(y);
+        let (key, swapped) = if cx <= cy { ((cx, cy), false) } else { ((cy, cx), true) };
+        let (sx, sy) = if swapped { (y, x) } else { (x, y) };
+        if let Some(bucket) = cache.get_mut(bucket_idx) {
+            if bucket.get(&key).map_or(true, |&(_, _, sd)| depth < sd) {
+                bucket.insert(key, (sx, sy, depth));
+            }
+        }
     }
 
     fn try_eq_const_app(
