@@ -913,8 +913,13 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
                 }
             }
             Expr::App { fun, arg, .. } => {
-                let fun = self.mk_shift_cutoff(fun, amount, cutoff);
-                let arg = self.mk_shift_cutoff(arg, amount, cutoff);
+                // Recurse into both fun and arg to keep the App spine AND args shift-free.
+                // fun recursion: unfold_apps sees real App nodes, not Shift-wrapped Apps.
+                // arg recursion: args are real constructors, not Shift wrappers, so
+                // foldl_apps reassembly produces the same ExprPtrs regardless of
+                // whether the input was shallow-shifted or fully-forced.
+                let fun = self.force_shift_shallow(fun, amount, cutoff);
+                let arg = self.force_shift_shallow(arg, amount, cutoff);
                 self.mk_app(fun, arg)
             }
             Expr::Pi { binder_name, binder_style, binder_type, body, .. } => {

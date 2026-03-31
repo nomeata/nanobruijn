@@ -30,7 +30,9 @@ This is exactly a deferred `force_shift_aux(inner, amount, cutoff)`.
 - `mk_shift_cutoff`: general version with cutoff parameter. Collapses when cutoffs match:
   `Shift(Shift(e, j, c), k, c) → Shift(e, j+k, c)`. Cannot collapse different cutoffs.
 - `force_shift_shallow(e, amount, cutoff)`: pushes shift one level into constructor.
-  App → `App(Shift(fun, k, c), Shift(arg, k, c))`.
+  App → recurses on both `fun` and `arg`: `App(shallow(fun), shallow(arg))`.
+  This ensures the entire App spine AND all args are shift-free (real constructors),
+  with Shift wrappers only on grandchildren. O(spine_length) work.
   Lambda/Pi → `Lambda(Shift(ty, k, c), Shift(body, k, c+1))` — fully lazy, no traversal.
   This is the key advantage of cutoff: binder bodies get `cutoff+1` instead of requiring
   a full `shift_expr(body, amount, cutoff+1)` traversal.
@@ -43,19 +45,16 @@ This is exactly a deferred `force_shift_aux(inner, amount, cutoff)`.
 - `shift_eq` handles cutoff=0 Shift nodes; returns false for cutoff>0 (conservative).
 
 **Current state**: whnf uses `force_shift_shallow` on results from both the direct
-Shift-peeling path and the shift-invariant cache hit path (for non-App results).
-App results still require `force_shift_aux` (full traversal) because `unfold_apps`
-decomposes the App spine, and Shift-wrapped args create different ExprPtrs that
-cause downstream cache/path divergence. Pi/Lambda/Var consumers use `view_expr`
-which transparently handles Shift-wrapped children, so shallow shifting is safe.
+Shift-peeling path and the shift-invariant cache hit path for ALL result types
+(including App). This is possible because `force_shift_shallow` recurses into App's
+`fun` and `arg`, ensuring the entire App spine and all args are real constructors
+(not Shift wrappers). Only grandchildren of the spine nodes carry Shift wrappers.
+This eliminates the last `force_shift_aux` call in the whnf cache hit path.
 
 `unfold_apps` returns lazy (Shift-wrapped) args: accumulates cutoff=0 shifts through the App
 spine and wraps each arg with `mk_shift` instead of `force_shift_aux`. O(n_args) instead of
-O(n_args × expr_size). Two companion fixes ensure correctness:
-1. `inst_aux` forces substitution values with `force_shift` at offset=0, preventing cascading
-   Shift wrappers in inst_beta results.
-2. The whnf shift-invariant cache uses `force_shift_aux` for App results (not
-   `force_shift_shallow`), because unfold_apps produces different ExprPtrs.
+O(n_args × expr_size). Companion fix: `inst_aux` forces substitution values with
+`force_shift` at offset=0, preventing cascading Shift wrappers in inst_beta results.
 
 `view_expr(e)` is a view function that transparently handles Shift nodes: returns `Expr<'t>`
 with Shift pushed one level inside via `force_shift_shallow`. Never returns `Shift` variant;
@@ -66,8 +65,6 @@ infer_sort_of, reduce_proj, strong_reduce, iota_reduce_recursor, reduce_quot, is
 try_eta_expansion_aux, get_bignum_from_expr, get_bignum_succ_from_expr).
 
 Remaining `force_shift_aux` call sites (outside its own implementation):
-- **whnf cache hit for App results** (tc.rs): Pi/Lambda use force_shift_shallow (O(1)),
-  but App results still need full traversal. This is the remaining dominant cost.
 - **inst_aux val shifting**: `force_shift_aux(val, offset, 0)` for shifting subst values up.
   Needed for canonical results.
 - **cutoff>0 Shifts** (unfold_apps, whnf, infer_inner): rare, unavoidable without lazy cutoff>0.
@@ -133,12 +130,6 @@ the full expression tree creating new nodes.
 
 ## TODO
 
-- **Eliminate force_shift_aux for App whnf cache hits**: On init, 57% of whnf shift-hits
-  are non-App (now O(1) via force_shift_shallow), 43% are App (still O(n) force_shift_aux).
-  Total shift-hits: ~81K. Approaches: (a) make unfold_apps normalize output so Shift-wrapped
-  and fully-forced args produce the same ExprPtrs, (b) make downstream caches shift-invariant,
-  or (c) "medium force": fully force the App spine args but leave deeper children as Shift nodes.
-
 - **mk_shift_cutoff optimizations** (implemented, verify on larger workloads):
   - Short-circuit: if cutoff > fvar_ub, expression has no free vars above cutoff → no-op
   - Cutoff normalization: if fvar_lb >= cutoff, normalize cutoff to 0 for more collapsing
@@ -203,19 +194,17 @@ the full expression tree creating new nodes.
   The underlying issue is the same as shallowish force: to reuse shift results across
   depths, you'd need to return Shift-wrapped results, but inner Shift nodes break def_eq.
 
-- **force_shift_shallow on whnf results WORKS** (previously thought impossible):
-  Using `force_shift_shallow` instead of `force_shift_aux` on whnf results preserves the
-  top-level constructor tag (Pi/Lambda/App) while keeping children as lazy Shift nodes.
-  The key insight: whnf consumers pattern-match on the top-level tag, not on children.
-  Children flow into infer/def_eq/inst_beta which can handle Shift nodes.
-  However, making unfold_apps return Shift-wrapped args still breaks (see TODO).
+- **force_shift_shallow on whnf results WORKS for ALL types** (including App):
+  Making `force_shift_shallow` recurse into App's `fun` AND `arg` (not just wrapping with
+  mk_shift_cutoff) ensures the entire App spine and all args are real constructors. Only
+  grandchildren carry Shift wrappers. This produces ExprPtrs consistent with fresh computation
+  because unfold_apps → foldl_apps reassembly sees the same args. Key: recursing on `fun` alone
+  was insufficient — Shift-wrapped args in foldl_apps output create different ExprPtrs that
+  cascade through def_eq/eq_cache/failure_cache causing type errors.
 
-- **Lazy unfold_apps requires two companion fixes**: (1) `inst_aux` must `force_shift` subst
+- **Lazy unfold_apps requires companion fix**: `inst_aux` must `force_shift` subst
   values at offset=0, otherwise Shift wrappers propagate through inst_beta creating expressions
-  with embedded Shifts that cascade through the system. (2) The whnf shift-invariant cache must
-  use `force_shift_aux` (full traversal) not `force_shift_shallow`, because Shift-wrapped whnf
-  results produce structurally different ExprPtrs that change cache behavior in def_eq and
-  infer_proj, eventually causing type errors. With both fixes, lazy unfold_apps works correctly.
+  with embedded Shifts that cascade through the system.
 
 - **shift_eq must track binder depth**: The old shift_eq checked `j == i + delta` for all Var
   nodes, including bound vars inside Pi/Lambda bodies. This is wrong: bound Var(0) in a Pi body
