@@ -897,13 +897,10 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                 if stored_input == cur {
                     break stored_result;
                 }
-                if cur_bvar_ub >= stored_bvar_ub {
-                    let delta = cur_bvar_ub - stored_bvar_ub;
-                    if delta > 0 && self.ctx.shift_eq(stored_input, cur, delta) {
-                        let shifted = self.ctx.force_shift_shallow(stored_result, delta, 0);
-                        break shifted;
-                    }
-                }
+                // Shift-invariant hit disabled: force_shift_shallow on whnf_no_unfolding
+                // results causes ExprPtr identity divergence on init (54k decls).
+                // Same root cause as the whnf_cache App result issue documented in PLAN.md.
+                // The shift-peeling at the top still provides shift-equivariance benefits.
             }
             let (e_fun, args) = self.ctx.unfold_apps(cur);
             match self.ctx.read_expr(e_fun) {
