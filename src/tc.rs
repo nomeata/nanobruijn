@@ -114,11 +114,23 @@ impl<'p> ExportFile<'p> {
     /// Check all declarations in this export file using a single thread.
     pub(crate) fn check_all_declars_serial(&self) {
         let total = self.declars.len();
+        let start = std::time::Instant::now();
+        let mut last_report = start;
         for (i, declar) in self.declars.values().enumerate() {
-            if i % 10000 == 0 {
-                eprintln!("[{}/{}]", i, total);
+            let decl_start = std::time::Instant::now();
+            if i % 1000 == 0 {
+                let elapsed = decl_start.duration_since(start).as_millis();
+                let delta = decl_start.duration_since(last_report).as_millis();
+                eprintln!("[{}/{} {}ms +{}ms]", i, total, elapsed, delta);
+                last_report = decl_start;
             }
             self.check_declar(declar);
+            let decl_time = decl_start.elapsed().as_millis();
+            if decl_time > 1000 {
+                self.with_ctx(|ctx| {
+                    eprintln!("  SLOW #{}: {:?} took {}ms", i, ctx.debug_print(declar.info().name), decl_time);
+                });
+            }
         }
     }
 
@@ -834,6 +846,10 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             }
         }
         if total_shift > 0 {
+            if self.local_ctx.is_empty() {
+                let r = self.whnf(e);
+                return self.ctx.mk_shift(r, total_shift);
+            }
             let new_depth = self.local_ctx.len() - total_shift as usize;
             let saved_locals = self.local_ctx.split_off(new_depth);
             let saved_infer = self.tc_cache.infer_cache.split_off(new_depth + 1);
@@ -901,6 +917,10 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             }
         }
         if total_shift > 0 {
+            if self.local_ctx.is_empty() {
+                let r = self.whnf_no_unfolding_aux(e, cheap_proj);
+                return self.ctx.push_shift(r, total_shift, 0);
+            }
             let new_depth = self.local_ctx.len() - total_shift as usize;
             let saved_locals = self.local_ctx.split_off(new_depth);
             let saved_infer = self.tc_cache.infer_cache.split_off(new_depth + 1);
