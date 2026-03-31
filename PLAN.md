@@ -40,9 +40,12 @@ This is exactly a deferred `force_shift_aux(inner, amount, cutoff)`.
   adds k to first entry >= cutoff, shares tail. O(1) for cutoff=0, O(position) for cutoff>0.
 - `force_shift_aux`: full traversal when needed (now uses cutoff from Shift nodes)
 - `force_shift`: convenience wrapper that forces a top-level Shift node (any cutoff)
-- `infer_inner` handles cutoff=0 Shift without forcing via context-shrinking. For cutoff>0, forces first.
-- whnf peels cutoff=0 Shifts iteratively; forces cutoff>0 Shifts.
-- `shift_eq` handles cutoff=0 Shift nodes; returns false for cutoff>0 (conservative).
+- `infer_inner` handles cutoff=0 Shift without forcing via context-shrinking. For cutoff>0, shallow-forces first.
+- whnf peels cutoff=0 Shifts iteratively; shallow-forces cutoff>0 Shifts.
+- `shift_eq` handles Shift nodes where the Shift's cutoff matches the comparison cutoff.
+  Amounts are additive: `shift_eq_aux(Shift(e, k, c), b, delta, c)` checks `shift_eq_aux(e, b, delta+k, c)`.
+  Works because `force_shift_shallow` creates `cutoff+1` on binder bodies and `shift_eq_aux`
+  increments its cutoff under binders in sync. Returns false for mismatched cutoffs (conservative).
 
 **Current state**: whnf uses `force_shift_shallow` on results from both the direct
 Shift-peeling path and the shift-invariant cache hit path for ALL result types
@@ -67,8 +70,9 @@ try_eta_expansion_aux, get_bignum_from_expr, get_bignum_succ_from_expr).
 Remaining `force_shift_aux` call sites (outside its own implementation):
 - **inst_aux val shifting**: `force_shift_aux(val, offset, 0)` for shifting subst values up.
   Needed for canonical results.
-- **cutoff>0 Shifts** (unfold_apps, whnf, infer_inner): rare, unavoidable without lazy cutoff>0.
-- **force_shift_shallow itself** (util.rs): forces inner Shift with mismatched cutoff.
+- **force_shift** convenience wrapper (util.rs): called from `unfold_apps_fun` and `inst_aux`.
+- **force_shift_shallow itself** (util.rs): forces inner Shift with mismatched cutoff
+  (via two sequential shallow forces instead of one full force).
 
 ### Shift-invariant hashing and caching
 
@@ -214,8 +218,9 @@ the full expression tree creating new nodes.
   should compare as 0 == 0, not 0 == 0+delta. Fixed by adding a `cutoff` parameter that
   increments under binders. The old bug was masked because expressions rarely had Shift wrappers
   inside binder bodies (no force_shift_shallow on whnf results). The Shift handling in shift_eq
-  is restricted to cutoff=0 (composition of cutoff=0 Shifts is additive; cutoff>0 requires
-  conservative fallback to false).
+  was initially restricted to cutoff=0. Later generalized: Shift handling works for any cutoff
+  matching the comparison cutoff (amounts are additive when cutoffs match). Mismatched cutoffs
+  still fall back to false (conservative).
 
 - **shift_eq in def_eq_quick_check works**: Adding `shift_eq(inner, other_side, amount)` for
   single-sided Shift comparisons is cheap (non-allocating) and correct. This makes def_eq

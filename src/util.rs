@@ -900,8 +900,8 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
                     // Collapse: Shift(Shift(inner, prev, c), amount, c) → shallow(inner, prev+amount, c)
                     self.force_shift_shallow(inner, prev + amount, cutoff)
                 } else {
-                    // Different cutoffs — force inner first, then shallow outer
-                    let forced = self.force_shift_aux(inner, prev, prev_cutoff);
+                    // Different cutoffs — shallow-force inner first, then shallow outer
+                    let forced = self.force_shift_shallow(inner, prev, prev_cutoff);
                     self.force_shift_shallow(forced, amount, cutoff)
                 }
             }

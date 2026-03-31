@@ -564,8 +564,8 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
                     e = inner;
                 }
                 Shift { inner, amount, cutoff, .. } => {
-                    // Force the cutoff>0 shift, then apply accumulated pending shift
-                    let forced = self.force_shift_aux(inner, amount, cutoff);
+                    // Shallow-force the cutoff>0 shift, then apply accumulated pending shift
+                    let forced = self.force_shift_shallow(inner, amount, cutoff);
                     if pending_shift > 0 {
                         e = self.mk_shift(forced, pending_shift);
                         pending_shift = 0;
@@ -978,10 +978,13 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
                 n1 == n2 && l1 == l2,
             (NatLit { ptr: p1, .. }, NatLit { ptr: p2, .. }) => p1 == p2,
             (StringLit { ptr: p1, .. }, StringLit { ptr: p2, .. }) => p1 == p2,
-            (Shift { inner, amount, cutoff: 0, .. }, _) if cutoff == 0 =>
-                self.shift_eq_aux(inner, b, delta + amount, 0),
-            (_, Shift { inner, amount, cutoff: 0, .. }) if cutoff == 0 && amount <= delta =>
-                self.shift_eq_aux(a, inner, delta - amount, 0),
+            // Shift with matching cutoff: amounts are additive.
+            // force_shift_shallow creates cutoff=c+1 on binder bodies, matching
+            // shift_eq_aux's own cutoff increment under binders.
+            (Shift { inner, amount, cutoff: sc, .. }, _) if sc == cutoff =>
+                self.shift_eq_aux(inner, b, delta + amount, cutoff),
+            (_, Shift { inner, amount, cutoff: sc, .. }) if sc == cutoff && amount <= delta =>
+                self.shift_eq_aux(a, inner, delta - amount, cutoff),
             _ => false,
         }
     }

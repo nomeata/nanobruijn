@@ -554,7 +554,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                 self.tc_cache.defeq_neg_open.extend(saved_neg);
                 return self.ctx.mk_shift(inner_type, amount);
             } else {
-                let forced = self.ctx.force_shift_aux(inner, amount, cutoff);
+                let forced = self.ctx.force_shift_shallow(inner, amount, cutoff);
                 return self.infer(forced, flag);
             }
         }
@@ -845,8 +845,8 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                 total_shift += amount;
                 e = inner;
             } else {
-                // Force the cutoff>0 shift, then continue peeling
-                e = self.ctx.force_shift_aux(inner, amount, cutoff);
+                // Shallow-force the cutoff>0 shift, then continue peeling
+                e = self.ctx.force_shift_shallow(inner, amount, cutoff);
             }
         }
         if total_shift > 0 {
