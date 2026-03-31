@@ -921,61 +921,6 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         }
     }
 
-    /// Full deep traversal: force all Shift nodes, producing a Shift-free expression.
-    /// Uses shift_cache for memoization. O(n) in expression size.
-    pub(crate) fn force_shift_aux(&mut self, e: ExprPtr<'t>, amount: u16, cutoff: u16) -> ExprPtr<'t> {
-        stacker::maybe_grow(64 * 1024, 2 * 1024 * 1024, || self.force_shift_aux_inner(e, amount, cutoff))
-    }
-
-    fn force_shift_aux_inner(&mut self, e: ExprPtr<'t>, amount: u16, cutoff: u16) -> ExprPtr<'t> {
-        if amount == 0 || self.num_loose_bvars(e) <= cutoff {
-            return e
-        }
-        if let Some(&cached) = self.expr_cache.shift_cache.get(&(e, amount, cutoff)) {
-            return cached;
-        }
-        let calcd = match self.read_expr(e) {
-            Expr::Sort { .. } | Expr::Const { .. } | Expr::Local { .. } | Expr::StringLit { .. } | Expr::NatLit { .. } => panic!(),
-            Expr::Shift { inner, amount: prev, cutoff: prev_cutoff, .. } => {
-                let forced = self.force_shift_aux(inner, prev, prev_cutoff);
-                self.force_shift_aux(forced, amount, cutoff)
-            }
-            Expr::Var { dbj_idx, .. } => {
-                if dbj_idx >= cutoff {
-                    self.mk_var(dbj_idx + amount)
-                } else {
-                    e
-                }
-            }
-            Expr::App { fun, arg, .. } => {
-                let fun = self.force_shift_aux(fun, amount, cutoff);
-                let arg = self.force_shift_aux(arg, amount, cutoff);
-                self.mk_app(fun, arg)
-            }
-            Expr::Pi { binder_name, binder_style, binder_type, body, .. } => {
-                let binder_type = self.force_shift_aux(binder_type, amount, cutoff);
-                let body = self.force_shift_aux(body, amount, cutoff + 1);
-                self.mk_pi(binder_name, binder_style, binder_type, body)
-            }
-            Expr::Lambda { binder_name, binder_style, binder_type, body, .. } => {
-                let binder_type = self.force_shift_aux(binder_type, amount, cutoff);
-                let body = self.force_shift_aux(body, amount, cutoff + 1);
-                self.mk_lambda(binder_name, binder_style, binder_type, body)
-            }
-            Expr::Let { binder_name, binder_type, val, body, nondep, .. } => {
-                let binder_type = self.force_shift_aux(binder_type, amount, cutoff);
-                let val = self.force_shift_aux(val, amount, cutoff);
-                let body = self.force_shift_aux(body, amount, cutoff + 1);
-                self.mk_let(binder_name, binder_type, val, body, nondep)
-            }
-            Expr::Proj { ty_name, idx, structure, .. } => {
-                let structure = self.force_shift_aux(structure, amount, cutoff);
-                self.mk_proj(ty_name, idx, structure)
-            }
-        };
-        self.expr_cache.shift_cache.insert((e, amount, cutoff), calcd);
-        calcd
-    }
 
     /// View an expression with Shift pushed one level inside.
     /// Never returns `Expr::Shift` — children may be Shift-wrapped.

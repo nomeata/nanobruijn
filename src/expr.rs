@@ -298,13 +298,8 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
                         // Force any Shift wrappers so inst results are structurally canonical
                         // (avoids cascading Shift wrappers from lazy unfold_apps).
                         let val = substs[substs.len() - 1 - rel_idx as usize];
-                        let val = if let Expr::Shift { inner, amount: sh_amt, cutoff: sh_cut, .. } = self.read_expr(val) {
-                            self.force_shift_aux(inner, sh_amt, sh_cut)
-                        } else {
-                            val
-                        };
                         if offset > 0 {
-                            self.force_shift_aux(val, offset, 0)
+                            self.mk_shift(val, offset)
                         } else {
                             val
                         }
@@ -937,30 +932,68 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
 
     pub(crate) fn fvar_list_of(&self, e: ExprPtr<'t>) -> FVarList<'t> { self.read_expr(e).get_fvar_list() }
 
-    /// Check if `b` equals `force_shift_aux(a, delta, cutoff)` without allocating.
+    /// Check if `b` equals `shift(a, delta)` without allocating.
     /// Used to verify shift-invariant cache hits.
-    /// `cutoff` tracks binder depth: Var indices < cutoff are bound and should NOT be shifted.
     pub(crate) fn shift_eq(&self, a: ExprPtr<'t>, b: ExprPtr<'t>, delta: u16) -> bool {
-        let result = self.shift_eq_aux(a, b, delta, 0);
-        if result {
-            // Verify: force_shift_aux(a, delta, 0) should equal b
-            // (Can't call force_shift_aux here since we're &self, not &mut self)
-        }
-        result
+        self.shift_eq_aux(a, b, delta, 0)
+    }
+
+    /// Semantic equality: checks if `a` and `b` are equal modulo internal Shift wrappers.
+    /// Unlike pointer equality (`a == b`), this traverses the structure to handle
+    /// expressions built by `force_shift_shallow` or `mk_shift` that are semantically
+    /// identical but have different ExprPtrs.
+    pub(crate) fn sem_eq(&self, a: ExprPtr<'t>, b: ExprPtr<'t>) -> bool {
+        self.shift_eq_aux(a, b, 0, 0)
     }
 
     fn shift_eq_aux(&self, a: ExprPtr<'t>, b: ExprPtr<'t>, delta: u16, cutoff: u16) -> bool {
         use crate::expr::Expr::*;
-        if delta == 0 { return a == b; }
-        if self.num_loose_bvars(a) <= cutoff {
-            return a == b;
+        // Fast path: pointer equality. Valid when delta=0 (no shift needed)
+        // or when a has no free vars above cutoff (shift is a no-op on a).
+        if a == b {
+            if delta == 0 { return true; }
+            if self.num_loose_bvars(a) <= cutoff { return true; }
         }
-        // Also check num_loose_bvars(b): b should have indices shifted by delta
-        // If b's nlbv is unexpectedly low, something might be wrong
-        if self.num_loose_bvars(b) <= cutoff {
-            // b has no free vars above cutoff, but a does — they can't be shifts of each other
+        // Strip Shift wrappers before structural comparison.
+        // This must come before the nlbv early-outs since Shift nodes change
+        // the effective delta.
+        match (self.read_expr(a), self.read_expr(b)) {
+            // a-side Shift: absorb amount into delta
+            (Shift { inner, amount, cutoff: sc, .. }, _) if sc == cutoff =>
+                return self.shift_eq_aux(inner, b, delta + amount, cutoff),
+            // b-side Shift: subtract from delta or reverse comparison
+            (_, Shift { inner, amount, cutoff: sc, .. }) if sc == cutoff => {
+                return if amount <= delta {
+                    self.shift_eq_aux(a, inner, delta - amount, cutoff)
+                } else {
+                    // amount > delta: shift(a, delta) == shift(inner, amount)
+                    // iff shift(inner, amount - delta) == a
+                    self.shift_eq_aux(inner, a, amount - delta, cutoff)
+                };
+            }
+            _ => {}
+        }
+        // After stripping Shifts: if a has no free vars above cutoff,
+        // shift(a, delta) == a, so we need a == b semantically (delta=0).
+        if self.num_loose_bvars(a) <= cutoff {
+            if self.num_loose_bvars(b) <= cutoff {
+                // Both closed at cutoff. With Shifts already stripped, check structure.
+                return if delta == 0 { self.shift_eq_struct(a, b, 0, cutoff) } else { a == b };
+            }
+            // a is closed but b isn't (after stripping Shifts) — can't be equal
             return false;
         }
+        if self.num_loose_bvars(b) <= cutoff {
+            // b has no free vars above cutoff, but a does — can't be equal
+            return false;
+        }
+        // Structural comparison (no Shift nodes on either side at this point)
+        self.shift_eq_struct(a, b, delta, cutoff)
+    }
+
+    /// Structural comparison for shift_eq, assuming top-level Shifts already stripped.
+    fn shift_eq_struct(&self, a: ExprPtr<'t>, b: ExprPtr<'t>, delta: u16, cutoff: u16) -> bool {
+        use crate::expr::Expr::*;
         match (self.read_expr(a), self.read_expr(b)) {
             (Var { dbj_idx: i, .. }, Var { dbj_idx: j, .. }) => {
                 if i >= cutoff {
@@ -991,13 +1024,18 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
                 n1 == n2 && l1 == l2,
             (NatLit { ptr: p1, .. }, NatLit { ptr: p2, .. }) => p1 == p2,
             (StringLit { ptr: p1, .. }, StringLit { ptr: p2, .. }) => p1 == p2,
-            // Shift with matching cutoff: amounts are additive.
-            // force_shift_shallow creates cutoff=c+1 on binder bodies, matching
-            // shift_eq_aux's own cutoff increment under binders.
+            // Shift nodes that weren't stripped (mismatched cutoff) —
+            // fall through from shift_eq_aux if cutoff didn't match.
+            // Handle by stripping and adjusting delta.
             (Shift { inner, amount, cutoff: sc, .. }, _) if sc == cutoff =>
                 self.shift_eq_aux(inner, b, delta + amount, cutoff),
-            (_, Shift { inner, amount, cutoff: sc, .. }) if sc == cutoff && amount <= delta =>
-                self.shift_eq_aux(a, inner, delta - amount, cutoff),
+            (_, Shift { inner, amount, cutoff: sc, .. }) if sc == cutoff => {
+                if amount <= delta {
+                    self.shift_eq_aux(a, inner, delta - amount, cutoff)
+                } else {
+                    self.shift_eq_aux(inner, a, amount - delta, cutoff)
+                }
+            }
             _ => false,
         }
     }
