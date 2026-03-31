@@ -68,10 +68,11 @@ infer_sort_of, reduce_proj, strong_reduce, iota_reduce_recursor, reduce_quot, is
 try_eta_expansion_aux, get_bignum_from_expr, get_bignum_succ_from_expr).
 
 Remaining `force_shift_aux` call sites (outside its own implementation):
-- **force_shift** convenience wrapper (util.rs): called from `unfold_apps_fun`, `unfold_apps_stack`,
-  `shift_expr_aux`, `inductive.rs` (2 sites).
+- **force_shift** convenience wrapper (util.rs): now dead code (no callers).
 - **force_shift_shallow itself** (util.rs): forces inner Shift with mismatched cutoff
   (via two sequential shallow forces instead of one full force).
+All former `force_shift` callers (`unfold_apps_fun`, `unfold_apps_stack`, `abstr_aux`,
+`inductive.rs` replace_all_nested/restore_replace) now use `force_shift_shallow` instead.
 
 `inst_aux` val shifting uses `force_shift_shallow(val, offset, 0)` instead of
 `force_shift_aux`. Using `mk_shift` (fully lazy) was attempted but fails due to ExprPtr
@@ -105,7 +106,7 @@ delta-encoded linked list: `{0, 3, 7}` → `[0, 2, 3]` (head = lb, subsequent = 
 Canonical hash = `(struct_hash, normalized FVarList hash)`.
 
 **WHNF cache**: keyed by canonical hash; on hit, verify with `shift_eq` (non-allocating
-traversal), then apply delta via `force_shift_aux`.
+traversal), then apply delta via `force_shift_shallow`.
 
 **Infer cache (open expressions)**: organized as a stack of maps indexed by
 `bucket_idx = depth - 1 - fvar_lb` (the shallowest context entry the expression depends

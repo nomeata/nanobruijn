@@ -449,9 +449,9 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
                     let structure = self.abstr_aux(structure, locals, offset);
                     self.mk_proj(ty_name, idx, structure)
                 }
-                Shift { .. } => {
-                    let forced = self.force_shift(e);
-                    self.abstr_aux(forced, locals, offset)
+                Shift { inner, amount, cutoff, .. } => {
+                    let shallow = self.force_shift_shallow(inner, amount, cutoff);
+                    self.abstr_aux(shallow, locals, offset)
                 }
                 Var { .. } | Sort { .. } | Const { .. } => panic!("should flag as no locals"),
             };
@@ -544,11 +544,17 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
     }
 
     /// From `f a_0 .. a_N`, return `f`
+    /// The returned head has any top-level Shift pushed one level inside.
     pub fn unfold_apps_fun(&mut self, mut e: ExprPtr<'t>) -> ExprPtr<'t> {
         loop {
             match self.view_expr(e) {
                 App { fun, .. } => e = fun,
-                _ => return self.force_shift(e),
+                _ => {
+                    if let Expr::Shift { inner, amount, cutoff, .. } = self.read_expr(e) {
+                        return self.force_shift_shallow(inner, amount, cutoff);
+                    }
+                    return e;
+                }
             }
         }
     }
@@ -623,7 +629,9 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
                     e = fun;
                 }
                 _ => {
-                    e = self.force_shift(e);
+                    if let Expr::Shift { inner, amount, cutoff, .. } = self.read_expr(e) {
+                        e = self.force_shift_shallow(inner, amount, cutoff);
+                    }
                     break
                 }
             }
