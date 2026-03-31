@@ -295,11 +295,9 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
                     if rel_idx < n_substs {
                         // Within substitution range: replace with subst (in reverse order).
                         // Shift the value up by `offset` to account for binders we traversed.
-                        // Force any Shift wrappers so inst results are structurally canonical
-                        // (avoids cascading Shift wrappers from lazy unfold_apps).
-                        let val = self.force_shift(substs[substs.len() - 1 - rel_idx as usize]);
+                        let val = substs[substs.len() - 1 - rel_idx as usize];
                         if offset > 0 {
-                            self.force_shift_aux(val, offset, 0)
+                            self.force_shift_shallow(val, offset, 0)
                         } else {
                             val
                         }

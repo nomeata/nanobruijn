@@ -68,11 +68,14 @@ infer_sort_of, reduce_proj, strong_reduce, iota_reduce_recursor, reduce_quot, is
 try_eta_expansion_aux, get_bignum_from_expr, get_bignum_succ_from_expr).
 
 Remaining `force_shift_aux` call sites (outside its own implementation):
-- **inst_aux val shifting**: `force_shift_aux(val, offset, 0)` for shifting subst values up.
-  Needed for canonical results.
-- **force_shift** convenience wrapper (util.rs): called from `unfold_apps_fun` and `inst_aux`.
+- **force_shift** convenience wrapper (util.rs): called from `unfold_apps_fun`, `unfold_apps_stack`,
+  `shift_expr_aux`, `inductive.rs` (2 sites), `tc.rs` whnf_no_unfolding_aux.
 - **force_shift_shallow itself** (util.rs): forces inner Shift with mismatched cutoff
   (via two sequential shallow forces instead of one full force).
+
+`inst_aux` val shifting now uses `force_shift_shallow(val, offset, 0)` instead of
+`force_shift_aux`. The `force_shift` pre-forcing of subst values (for lazy unfold_apps)
+was also removed — Shift-wrapped subst values are handled by downstream consumers.
 
 ### Shift-invariant hashing and caching
 
