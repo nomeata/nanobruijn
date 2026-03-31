@@ -39,7 +39,9 @@ This is exactly a deferred `force_shift_aux(inner, amount, cutoff)`.
 - `fvar_shift_cutoff`: shifts FVarList entries >= cutoff by k. Walks to the cutoff point,
   adds k to first entry >= cutoff, shares tail. O(1) for cutoff=0, O(position) for cutoff>0.
 - `infer_inner` handles cutoff=0 Shift without forcing via context-shrinking. For cutoff>0, shallow-forces first.
-- whnf peels cutoff=0 Shifts iteratively; shallow-forces cutoff>0 Shifts.
+- whnf/whnf_no_unfolding peel cutoff=0 Shifts iteratively; shallow-force cutoff>0 Shifts.
+  Must also shrink local_ctx (save/restore) because whnf can indirectly call infer
+  (via reduce_rec → to_ctor_when_k).
 - `shift_eq` handles Shift nodes where the Shift's cutoff matches the comparison cutoff.
   Amounts are additive: `shift_eq_aux(Shift(e, k, c), b, delta, c)` checks `shift_eq_aux(e, b, delta+k, c)`.
   Works because `push_shift` creates `cutoff+1` on binder bodies and `shift_eq_aux`
@@ -159,7 +161,7 @@ Result is a boolean (no delta to apply). On init: ~39K shift-invariant hits out 
 |-----------|--------------------------|------------------|
 | Init (54k decls, 310MB) | 21s | ~27s |
 | app-lam N=4000 | 8.3s | 10ms (830x faster) |
-| Mathlib (630k decls, 4.9GB) | works (<9GB) | OOM-killed at ~120k decls |
+| Mathlib (630k decls, 4.9GB) | works (<9GB) | in progress (past 120k crash, running) |
 
 Profile (init, pre-deletion baseline, 375B instructions): `force_shift_aux` was the
 dominant cost — shift cache had ~40% hit rate (8M hits, 12M misses). Now deleted;
@@ -249,6 +251,16 @@ all shifting uses `push_shift` (one-level push) or `mk_shift` (O(1) wrapper).
   was initially restricted to cutoff=0. Later generalized: Shift handling works for any cutoff
   matching the comparison cutoff (amounts are additive when cutoffs match). Mismatched cutoffs
   still fall back to false (conservative).
+
+- **whnf/whnf_no_unfolding Shift stripping must shrink local_ctx**: Stripping top-level
+  Shift wrappers for shift-equivariant processing is correct in principle, but whnf can
+  indirectly call `infer` (via `reduce_rec → to_ctor_when_k → infer_then_whnf`) which
+  depends on `local_ctx`. Without shrinking local_ctx before recursing, the inner
+  expression's bvars reference wrong context entries, causing type mismatches (e.g.,
+  structure type inferred as `Eq` instead of `ULift` in mathlib). Fix: save/restore
+  `local_ctx` and depth-indexed caches when stripping Shifts, matching the pattern used
+  in `infer_inner`. The original nanoda doesn't have this issue because it never creates
+  Shift wrappers.
 
 - **shift_eq in def_eq_quick_check works**: Adding `shift_eq(inner, other_side, amount)` for
   single-sided Shift comparisons is cheap (non-allocating) and correct. This makes def_eq
