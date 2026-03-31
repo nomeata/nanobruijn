@@ -65,15 +65,17 @@ Used by: `unfold_apps_fun`, `unfold_apps_stack`, `inst_forall_params`, `infer_ap
 infer_sort_of, reduce_proj, strong_reduce, iota_reduce_recursor, reduce_quot, is_sort_zero,
 try_eta_expansion_aux, get_bignum_from_expr, get_bignum_succ_from_expr).
 
-`force_shift` and `force_shift_aux` (full O(n) traversal) have been deleted.
-All shift forcing now uses `force_shift_shallow` (one-level push) or `mk_shift` (O(1) wrapper).
+`force_shift_aux` (full O(n) traversal) retained for `inst_aux` only — shallow forcing
+of substitution values causes ExprPtr identity divergence on large workloads (init 54k decls).
+All other shift forcing uses `force_shift_shallow` (one-level push) or `mk_shift` (O(1) wrapper).
 `force_shift_shallow` handles nested Shift with mismatched cutoff via two sequential
 shallow forces.
 
-`inst_aux` val shifting uses `force_shift_shallow(val, offset, 0)`. Using `mk_shift`
-(fully lazy) was attempted but fails due to ExprPtr identity divergence —
-`Shift(Lambda, k, 0)` and `Lambda(Shift_ty, Shift_body)` are semantically equivalent
-but have different ExprPtrs, cascading through caches.
+`inst_aux` val shifting uses `force_shift_aux(val, offset, 0)` (full deep traversal).
+`force_shift_shallow` was attempted but leaves Shift wrappers on grandchildren that
+produce different ExprPtrs, cascading through caches. `mk_shift` (fully lazy) also fails
+because `Shift(Lambda, k, 0)` and `Lambda(Shift_ty, Shift_body)` are semantically
+equivalent but have different ExprPtrs.
 
 `whnf_no_unfolding_aux` uses `view_expr` for the Lambda body-collection loop (handles
 Shift-wrapped bodies from `force_shift_shallow` results) and `force_shift_shallow` in the
@@ -99,9 +101,14 @@ delta-encoded linked list: `{0, 3, 7}` → `[0, 2, 3]` (head = lb, subsequent = 
 
 Canonical hash = `(struct_hash, normalized FVarList hash)`.
 
-**WHNF cache** and **whnf_no_unfolding cache**: both keyed by canonical hash; on hit,
-verify with `shift_eq` (non-allocating traversal), then apply delta via `force_shift_shallow`.
-`whnf_no_unfolding` also peels top-level Shifts (shift-equivariance) before cache lookup.
+**WHNF cache**: keyed by canonical hash; on hit, verify with `shift_eq` (non-allocating
+traversal), then apply delta via `force_shift_shallow`. Shift-invariant hit currently
+disabled for whnf_cache (same ExprPtr divergence issue).
+
+**whnf_no_unfolding cache**: keyed by canonical hash; exact-pointer hits only.
+Shift-invariant hits (force_shift_shallow on result) disabled — causes ExprPtr identity
+divergence on init (54k decls). `whnf_no_unfolding` peels top-level Shifts
+(shift-equivariance) before cache lookup, which is the main benefit.
 
 **Infer cache**: unified stack of maps. Bucket 0 holds closed expressions (never evicted).
 Buckets 1..depth hold open expressions, indexed by `bucket_idx = depth - fvar_lb`.
@@ -236,6 +243,21 @@ all shifting uses `force_shift_shallow` (one-level push) or `mk_shift` (O(1) wra
 - **shift_eq in def_eq_quick_check works**: Adding `shift_eq(inner, other_side, amount)` for
   single-sided Shift comparisons is cheap (non-allocating) and correct. This makes def_eq
   robust against Shift-wrapped inputs from infer (which returns mk_shift results).
+
+- **force_shift_shallow in inst_aux causes init regression**: Replacing `force_shift_aux`
+  with `force_shift_shallow` for substitution value shifting in inst_aux passes all 112
+  arena tests but fails on init (54k declarations). The root cause: force_shift_shallow
+  leaves Shift wrappers on grandchildren, producing different ExprPtrs than full forcing.
+  These different pointers cascade through downstream caches (infer, def_eq, whnf),
+  eventually causing type errors. The arena tests are too small to trigger the divergent
+  cache paths. inst_aux must use force_shift_aux (full deep traversal) for correctness.
+
+- **whnf_no_unfolding shift-invariant cache hits cause init regression**: Using
+  `force_shift_shallow(stored_result, delta, 0)` for shift-invariant cache hits in
+  whnf_no_unfolding_cache produces shifted results with internal Shift wrappers. Same
+  ExprPtr identity divergence issue — passes arena tests, fails init. Shift-peeling
+  (equivariance) and canonical-hash keying (exact pointer hit) are safe; only the
+  shifted-result path is problematic.
 
 ## References
 
