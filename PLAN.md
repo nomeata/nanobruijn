@@ -133,13 +133,11 @@ the full expression tree creating new nodes.
 
 ## TODO
 
-- **Eliminate force_shift_aux for App whnf cache hits**: Pi/Lambda cache hits now use
-  force_shift_shallow (O(1)), but App results still need force_shift_aux (O(n)) because
-  unfold_apps decomposes the spine and Shift-wrapped args cause ExprPtr divergence.
-  Approaches: (a) make unfold_apps normalize its output so Shift-wrapped and fully-forced
-  args produce the same ExprPtrs, (b) make downstream caches (eq_cache, failure_cache,
-  whnf_no_unfolding_cache) shift-invariant, or (c) handle App results with a "medium force"
-  that fully forces the App spine but leaves non-spine children as Shift nodes.
+- **Eliminate force_shift_aux for App whnf cache hits**: On init, 57% of whnf shift-hits
+  are non-App (now O(1) via force_shift_shallow), 43% are App (still O(n) force_shift_aux).
+  Total shift-hits: ~81K. Approaches: (a) make unfold_apps normalize output so Shift-wrapped
+  and fully-forced args produce the same ExprPtrs, (b) make downstream caches shift-invariant,
+  or (c) "medium force": fully force the App spine args but leave deeper children as Shift nodes.
 
 - **mk_shift_cutoff optimizations** (implemented, verify on larger workloads):
   - Short-circuit: if cutoff > fvar_ub, expression has no free vars above cutoff → no-op
