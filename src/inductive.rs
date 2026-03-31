@@ -644,7 +644,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                     self.ctx.mk_proj(ty_name, idx, structure)
                 }
                 Shift { inner, amount, cutoff, .. } => {
-                    let shallow = self.ctx.force_shift_shallow(inner, amount, cutoff);
+                    let shallow = self.ctx.push_shift(inner, amount, cutoff);
                     self.replace_all_nested(shallow, st, outgoing_params)
                 }
             }
@@ -1449,7 +1449,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                     self.ctx.mk_app(fun, arg)
                 }
                 Shift { inner, amount, cutoff, .. } => {
-                    let shallow = self.ctx.force_shift_shallow(inner, amount, cutoff);
+                    let shallow = self.ctx.push_shift(inner, amount, cutoff);
                     self.restore_replace(shallow, local_params, st, specialized_rec_names_to_unspecialized_rec_names)
                 }
             },

@@ -856,10 +856,10 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
     }
 
     /// Shallow shift: peel one level of constructor, wrapping children in lazy Shift nodes.
-    /// `force_shift_shallow(Shift(Pi(ty, body), k))` → `Pi(Shift(ty, k), Shift(body, k+1))`
+    /// `push_shift(Shift(Pi(ty, body), k))` → `Pi(Shift(ty, k), Shift(body, k+1))`
     /// O(1) per binder node vs O(n) for full traversal. For App, recurses into both fun
     /// and arg to keep the App spine shift-free. Returns e unchanged if no shift needed.
-    pub fn force_shift_shallow(&mut self, e: ExprPtr<'t>, amount: u16, cutoff: u16) -> ExprPtr<'t> {
+    pub fn push_shift(&mut self, e: ExprPtr<'t>, amount: u16, cutoff: u16) -> ExprPtr<'t> {
         if amount == 0 {
             return e;
         }
@@ -871,11 +871,11 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
             Expr::Shift { inner, amount: prev, cutoff: prev_cutoff, .. } => {
                 if prev_cutoff == cutoff {
                     // Collapse: Shift(Shift(inner, prev, c), amount, c) → shallow(inner, prev+amount, c)
-                    self.force_shift_shallow(inner, prev + amount, cutoff)
+                    self.push_shift(inner, prev + amount, cutoff)
                 } else {
                     // Different cutoffs — shallow-force inner first, then shallow outer
-                    let forced = self.force_shift_shallow(inner, prev, prev_cutoff);
-                    self.force_shift_shallow(forced, amount, cutoff)
+                    let forced = self.push_shift(inner, prev, prev_cutoff);
+                    self.push_shift(forced, amount, cutoff)
                 }
             }
             Expr::Var { dbj_idx, .. } => {
@@ -891,8 +891,8 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
                 // arg recursion: args are real constructors, not Shift wrappers, so
                 // foldl_apps reassembly produces the same ExprPtrs regardless of
                 // whether the input was shallow-shifted or fully-forced.
-                let fun = self.force_shift_shallow(fun, amount, cutoff);
-                let arg = self.force_shift_shallow(arg, amount, cutoff);
+                let fun = self.push_shift(fun, amount, cutoff);
+                let arg = self.push_shift(arg, amount, cutoff);
                 self.mk_app(fun, arg)
             }
             Expr::Pi { binder_name, binder_style, binder_type, body, .. } => {
@@ -916,7 +916,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
                 self.mk_proj(ty_name, idx, structure)
             }
             Expr::Sort { .. } | Expr::Const { .. } | Expr::Local { .. } | Expr::StringLit { .. } | Expr::NatLit { .. } => {
-                panic!("force_shift_shallow on closed expression")
+                panic!("push_shift on closed expression")
             }
         }
     }
@@ -925,11 +925,11 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
     /// View an expression with Shift pushed one level inside.
     /// Never returns `Expr::Shift` — children may be Shift-wrapped.
     /// Replaces the common `force_shift(e); match read_expr(e)` pattern
-    /// with the cheaper `match view_expr(e)` (O(1) per node via force_shift_shallow).
+    /// with the cheaper `match view_expr(e)` (O(1) per node via push_shift).
     pub fn view_expr(&mut self, e: ExprPtr<'t>) -> Expr<'t> {
         match self.read_expr(e) {
             Expr::Shift { inner, amount, cutoff, .. } => {
-                let shallow = self.force_shift_shallow(inner, amount, cutoff);
+                let shallow = self.push_shift(inner, amount, cutoff);
                 self.read_expr(shallow)
             }
             other => other
@@ -1091,7 +1091,7 @@ pub struct NameCache<'p> {
 pub(crate) struct TcCache<'t> {
     /// Shift-invariant WHNF cache: keyed by canonical hash (struct_hash, fvar_normalize_hash),
     /// stores (input_expr, result_expr, bvar_ub). On hit, verify with shift_eq, then
-    /// apply delta via force_shift_shallow.
+    /// apply delta via push_shift.
     pub(crate) whnf_cache: FxHashMap<(u64, u64), (ExprPtr<'t>, ExprPtr<'t>, u16)>,
     /// Shift-invariant whnf_no_unfolding cache: same design as whnf_cache.
     pub(crate) whnf_no_unfolding_cache: FxHashMap<(u64, u64), (ExprPtr<'t>, ExprPtr<'t>, u16)>,

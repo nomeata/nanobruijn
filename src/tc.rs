@@ -554,7 +554,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                 self.tc_cache.defeq_neg_open.extend(saved_neg);
                 return self.ctx.mk_shift(inner_type, amount);
             } else {
-                let forced = self.ctx.force_shift_shallow(inner, amount, cutoff);
+                let forced = self.ctx.push_shift(inner, amount, cutoff);
                 return self.infer(forced, flag);
             }
         }
@@ -825,12 +825,12 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                 e = inner;
             } else {
                 // Shallow-force the cutoff>0 shift, then continue peeling
-                e = self.ctx.force_shift_shallow(inner, amount, cutoff);
+                e = self.ctx.push_shift(inner, amount, cutoff);
             }
         }
         if total_shift > 0 {
             let r = self.whnf(e);
-            return self.ctx.force_shift_shallow(r, total_shift, 0);
+            return self.ctx.mk_shift(r, total_shift);
         }
         // Shift-invariant cache: keyed by canonical hash.
         // On hit, verify structural equality up to shift, then apply delta.
@@ -847,7 +847,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             if e_bvar_ub >= stored_bvar_ub {
                 let delta = e_bvar_ub - stored_bvar_ub;
                 if delta > 0 && self.ctx.shift_eq(stored_input, e, delta) {
-                    return self.ctx.force_shift_shallow(stored_result, delta, 0);
+                    return self.ctx.mk_shift(stored_result, delta);
                 }
             }
         }
@@ -881,12 +881,12 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                 total_shift += amount;
                 e = inner;
             } else {
-                e = self.ctx.force_shift_shallow(inner, amount, cutoff);
+                e = self.ctx.push_shift(inner, amount, cutoff);
             }
         }
         if total_shift > 0 {
             let r = self.whnf_no_unfolding_aux(e, cheap_proj);
-            return self.ctx.force_shift_shallow(r, total_shift, 0);
+            return self.ctx.push_shift(r, total_shift, 0);
         }
         // Iterative version: tail-recursive calls become loop iterations.
         // We track original inputs to cache on exit.
@@ -960,7 +960,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                 App { .. } => panic!(),
                 Local { .. } | NatLit { .. } | StringLit { .. } => break self.ctx.foldl_apps(e_fun, args.into_iter()),
                 Shift { inner, amount, cutoff, .. } => {
-                    let forced = self.ctx.force_shift_shallow(inner, amount, cutoff);
+                    let forced = self.ctx.push_shift(inner, amount, cutoff);
                     let next = self.ctx.foldl_apps(forced, args.into_iter());
                     if !cheap_proj { cache_entries.push(cur); }
                     cur = next;
@@ -1120,7 +1120,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                     } else {
                         let (xn0, yn0) = (x_n, y_n);
                         let (x_n, y_n) = (self.whnf_no_unfolding(xn0), self.whnf_no_unfolding(yn0));
-                        if x_n != xn0 || y_n != yn0 {
+                        if !self.ctx.sem_eq(x_n, xn0) || !self.ctx.sem_eq(y_n, yn0) {
                             self.def_eq(x_n, y_n)
                         } else {
                             self.def_eq_app(x_n, y_n)

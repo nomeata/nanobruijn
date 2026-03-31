@@ -449,7 +449,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
                     self.mk_proj(ty_name, idx, structure)
                 }
                 Shift { inner, amount, cutoff, .. } => {
-                    let shallow = self.force_shift_shallow(inner, amount, cutoff);
+                    let shallow = self.push_shift(inner, amount, cutoff);
                     self.abstr_aux(shallow, locals, offset)
                 }
                 Var { .. } | Sort { .. } | Const { .. } => panic!("should flag as no locals"),
@@ -550,7 +550,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
                 App { fun, .. } => e = fun,
                 _ => {
                     if let Expr::Shift { inner, amount, cutoff, .. } = self.read_expr(e) {
-                        return self.force_shift_shallow(inner, amount, cutoff);
+                        return self.push_shift(inner, amount, cutoff);
                     }
                     return e;
                 }
@@ -571,7 +571,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
                 }
                 Shift { inner, amount, cutoff, .. } => {
                     // Shallow-force the cutoff>0 shift, then apply accumulated pending shift
-                    let forced = self.force_shift_shallow(inner, amount, cutoff);
+                    let forced = self.push_shift(inner, amount, cutoff);
                     if pending_shift > 0 {
                         e = self.mk_shift(forced, pending_shift);
                         pending_shift = 0;
@@ -629,7 +629,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
                 }
                 _ => {
                     if let Expr::Shift { inner, amount, cutoff, .. } = self.read_expr(e) {
-                        e = self.force_shift_shallow(inner, amount, cutoff);
+                        e = self.push_shift(inner, amount, cutoff);
                     }
                     break
                 }
@@ -940,7 +940,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
 
     /// Semantic equality: checks if `a` and `b` are equal modulo internal Shift wrappers.
     /// Unlike pointer equality (`a == b`), this traverses the structure to handle
-    /// expressions built by `force_shift_shallow` or `mk_shift` that are semantically
+    /// expressions built by `push_shift` or `mk_shift` that are semantically
     /// identical but have different ExprPtrs.
     pub(crate) fn sem_eq(&self, a: ExprPtr<'t>, b: ExprPtr<'t>) -> bool {
         self.shift_eq_aux(a, b, 0, 0)
