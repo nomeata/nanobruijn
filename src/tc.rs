@@ -528,7 +528,10 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                 }
                 binder_type
             }
-            _ => panic!("Ran out of constructor telescope getting field")
+            other => panic!("Ran out of constructor telescope getting field: ty_name={:?}, struct_ty_name={:?}, idx={}, num_params={}, struct_ty={:?}, ctor_ty_whnf={:?}, variant={}",
+                self.ctx.debug_print(_ty_name), self.ctx.debug_print(struct_ty_name),
+                idx, num_params, self.ctx.debug_print(structure_ty), self.ctx.debug_print(reduced),
+                match other { Sort {..} => "Sort", Const {..} => "Const", App {..} => "App", Lambda {..} => "Lambda", _ => "other" })
         }
     }
 
@@ -817,6 +820,8 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         }
         // whnf is shift-equivariant: whnf(Shift(e, k, 0)) = shift(whnf(e), k)
         // Peel off cutoff=0 Shift nodes (iteratively). For cutoff>0, force first.
+        // Must also shrink local_ctx because whnf can indirectly call infer
+        // (via reduce_rec → to_ctor_when_k) which depends on local_ctx.
         let mut total_shift: u16 = 0;
         let mut e = e;
         while let Shift { inner, amount, cutoff, .. } = self.ctx.read_expr(e) {
@@ -829,7 +834,16 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             }
         }
         if total_shift > 0 {
+            let new_depth = self.local_ctx.len() - total_shift as usize;
+            let saved_locals = self.local_ctx.split_off(new_depth);
+            let saved_infer = self.tc_cache.infer_cache.split_off(new_depth + 1);
+            let saved_pos = self.tc_cache.defeq_pos_open.split_off(new_depth);
+            let saved_neg = self.tc_cache.defeq_neg_open.split_off(new_depth);
             let r = self.whnf(e);
+            self.local_ctx.extend(saved_locals);
+            self.tc_cache.infer_cache.extend(saved_infer);
+            self.tc_cache.defeq_pos_open.extend(saved_pos);
+            self.tc_cache.defeq_neg_open.extend(saved_neg);
             return self.ctx.mk_shift(r, total_shift);
         }
         // Shift-invariant cache: keyed by canonical hash.
@@ -874,6 +888,8 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
 
     fn whnf_no_unfolding_aux(&mut self, e: ExprPtr<'t>, cheap_proj: bool) -> ExprPtr<'t> {
         // whnf_no_unfolding is shift-equivariant: peel top-level Shifts.
+        // Must also shrink local_ctx because reduce_rec → to_ctor_when_k → infer
+        // depends on local_ctx.
         let mut total_shift: u16 = 0;
         let mut e = e;
         while let Shift { inner, amount, cutoff, .. } = self.ctx.read_expr(e) {
@@ -885,7 +901,16 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             }
         }
         if total_shift > 0 {
+            let new_depth = self.local_ctx.len() - total_shift as usize;
+            let saved_locals = self.local_ctx.split_off(new_depth);
+            let saved_infer = self.tc_cache.infer_cache.split_off(new_depth + 1);
+            let saved_pos = self.tc_cache.defeq_pos_open.split_off(new_depth);
+            let saved_neg = self.tc_cache.defeq_neg_open.split_off(new_depth);
             let r = self.whnf_no_unfolding_aux(e, cheap_proj);
+            self.local_ctx.extend(saved_locals);
+            self.tc_cache.infer_cache.extend(saved_infer);
+            self.tc_cache.defeq_pos_open.extend(saved_pos);
+            self.tc_cache.defeq_neg_open.extend(saved_neg);
             return self.ctx.push_shift(r, total_shift, 0);
         }
         // Iterative version: tail-recursive calls become loop iterations.
