@@ -73,27 +73,44 @@ substitution value shifting — fully lazy, no traversal.
 `push_shift` handles nested Shift with mismatched cutoff via two sequential
 shallow forces.
 
-### Canonicalize and canon_eq (replaces sem_eq)
+### sem_eq (replaces canon_eq and pointer equality)
 
-`canonicalize(e)` fully resolves all Shift wrappers in an expression tree, memoized in
-`expr_cache.canon_cache`. Due to arena hash-consing (`alloc_expr` deduplicates),
-`canonicalize(a) == canonicalize(b)` iff the expressions are semantically equal modulo shifts.
+`sem_eq(a, b)` = `shift_eq_aux(a, b, 0, 0)` — structural walk that transparently handles
+Shift wrappers by accumulating deltas. No allocation, no new node creation. Replaces all
+pointer equality (`==`) and `canon_eq` comparisons throughout the system.
 
-`canon_eq(a, b)` checks `a == b || canonicalize(a) == canonicalize(b)` — pointer equality
-first, then canonicalize both sides. Replaces `sem_eq` throughout the system.
-
-**Key optimization**: `whnf`, `whnf_no_unfolding`, and `whnf_no_unfolding_cheap_proj` all
-canonicalize their results before returning. This ensures downstream code (especially def_eq)
-can rely on pointer equality for already-reduced expressions, reducing canonicalize calls from
-11M to much fewer (most comparisons are pointer-equal after whnf canonicalization).
+Used in: `def_eq_quick_check`, all cache collision guards (eq_cache, failure_cache,
+defeq_open_lookup), whnf/whnf_no_unfolding cache hits, infer cache hits,
+`try_unfold_proj_app`, `strong_reduce`, `def_eq_nat`.
 
 `shift_eq_aux` handles Shift on the b-side when `amount > delta` by reversing the
 comparison: `shift(a, delta) == shift(inner_b, amount)` iff `shift(inner_b, amount - delta) == a`.
 Still used for cross-depth shift-invariant cache lookups (delta > 0).
 
-Used in: `def_eq_quick_check`, all cache collision guards (eq_cache, failure_cache,
-defeq_open_lookup), whnf/whnf_no_unfolding cache hits, infer cache hits,
-`try_unfold_proj_app`, `strong_reduce`, `def_eq_nat`.
+**Dead code pending removal**: `canonicalize`, `canon_eq`, `resolve_shifts_for_whnf`.
+These are superseded by `sem_eq` and the lighter-weight `resolve_shifts`.
+
+### resolve_shifts (selective shift resolution)
+
+`resolve_shifts(e)` / `resolve_shifts_aux(e, sh_amt, sh_cut)` pushes all Shift wrappers
+down to leaves (Var nodes), creating new shift-free expression nodes. Memoized via
+`canon_cache`. Unlike `canonicalize`, this is only applied selectively:
+- `whnf_no_unfolding` and `whnf_no_unfolding_cheap_proj` resolve shifts on results
+- `whnf` (with unfolding) resolves shifts on final results before caching
+- NOT applied on every expression comparison (that's `sem_eq`'s job)
+
+### Lazy zeta in whnf Let case
+
+whnf_no_unfolding_aux handles `Let { val, body, .. }` lazily: pushes the let-binding
+onto local_ctx, reduces the body in the extended context, pops, then `inst_beta(result, [val])`
+on the much smaller whnf result. This avoids unbounded inst_beta growth on deeply nested lets.
+
+When whnf encounters `Var(k)` pointing to a let-binding (`lookup_var_value`), it performs
+zeta reduction: unfolds to the shifted let value and continues reducing.
+
+**Cache soundness**: With zeta reduction, `whnf(Shift(e, k)) ≠ Shift(whnf(e), k)` when
+shifted vars point to different let-bindings. The whnf cache `shift_eq` optimization is
+guarded by `context_range_is_let_free(e_bvar_ub)`.
 
 `whnf_no_unfolding_aux` uses `view_expr` for the Lambda body-collection loop (handles
 Shift-wrapped bodies from `push_shift` results) and `push_shift` in the
@@ -167,7 +184,7 @@ Result is a boolean (no delta to apply). On init: ~39K shift-invariant hits out 
 
 | Benchmark | nanoda (locally nameless) | lean-slop-kernel |
 |-----------|--------------------------|------------------|
-| Init (54k decls, 310MB) | 26s | 31s (1.19x) |
+| Init (54k decls, 310MB) | 26s | 33s (1.27x) |
 | app-lam N=4000 | 8.3s | 10ms (830x faster) |
 | Mathlib (630k decls, 4.9GB) | ~16min (est.) | ~65min (est. ~4x) |
 | sheafedSpaceMap_comp (worst case) | ~2s | 12s (6x) |
@@ -187,12 +204,12 @@ We should **not** be slower due to missed cache hits. If we are, we need to find
 the cache miss, not paper over it with heuristics (DAG size thresholds, degraded mode,
 timeouts, etc.).
 
-**No forced canonicalization**: The whole point of Shift nodes is to avoid traversals.
-We must never canonicalize (force all Shifts deep) on the critical path (e.g., before
-cache lookups). The `struct_hash` is already shift-invariant by design (Shift nodes
-inherit their inner expression's struct_hash), so canonical hashes match for shifted
-and unshifted versions. Cache lookups should work without forcing. If they don't, the
-bug is in the cache verification logic (canon_eq/shift_eq), not a reason to force.
+**Minimal shift resolution**: The whole point of Shift nodes is to avoid traversals.
+We use `sem_eq` (non-allocating structural walk) for all equality comparisons, avoiding
+deep canonicalization. `resolve_shifts` is applied only to whnf results (needed for cache
+convergence with lazy zeta Let reduction), not on every comparison. The `struct_hash` is
+shift-invariant by design (Shift nodes inherit their inner's struct_hash), so canonical
+hashes match for shifted and unshifted versions.
 
 **Approach**: Add tracing/instrumentation to both nanoda and our checker to compare cache
 hit rates side-by-side. nanoda's TC code is included in this project (module `nanoda_tc`)
@@ -291,36 +308,46 @@ exist in the referenced bvar range. Pointer-equal and `canon_eq` lookups remain 
 at the same depth. The infer cache `shift_eq` is unconditionally safe (types don't depend
 on zeta reduction — `infer(Shift(e, delta))` = `Shift(infer(e), delta)` always holds).
 
-**Limitation with de Bruijn indices**: For general code (not just deep chains), let-in-context
-creates too many Shift wrappers via zeta reduction. Each zeta unfolding creates
-`shift_expr(val, k+1, 0)`, and these shifted values go through `canonicalize` for cache
-lookups, creating new expression nodes. On some Init declarations (`Char.ofOrdinal._proof_3`),
-this triggers the 500K canonicalization node limit and OOM. The official Lean kernel avoids
-this because locally-nameless fvars don't need shifting for let-value lookups.
+**Fundamental blocker with Shift wrappers**: Always-let-in-context in `infer_let` causes
+whnf non-convergence on certain declarations (e.g., #19275, #19313). The Shift-wrapper
+representation creates fundamentally different reduction paths compared to explicit
+substitution:
+1. Each whnf iteration creates new expressions via beta reduction
+2. These get Shift wrappers from context operations
+3. resolve_shifts creates canonical forms
+4. But unfold_def produces different terms because the reduced forms differ
+5. Cycle continues indefinitely — whnf_beta_reductions grow linearly without converging
 
-**Solution**: Threshold-gated hybrid. Let chains with depth ≥ 50 use let-in-context
-(where O(N²) cascade matters). Shallower chains use eager `inst_beta` (more cache-friendly).
+The official Lean kernel avoids this because locally-nameless fvars don't need shifting
+for let-value lookups — reduction paths are identical regardless of let-in-context.
 
-| Benchmark | Eager only | Let-in-context (threshold=50) |
-|-----------|-----------|------------------------------|
-| Init (54k decls) | 31s | 31s (no regression) |
-| shift-cascade N=1000 | 139ms | 2ms (70x faster) |
+**Current state**: `infer_let` uses eager `inst_beta(body, [val])`. The lazy zeta approach
+in whnf Let case (push/pop/inst_beta on reduced result) works correctly and avoids
+nested-let cascade. Together these handle all Init declarations.
+
+| Benchmark | Eager infer_let + lazy whnf Let |
+|-----------|--------------------------------|
+| Init (54k decls) | 33s |
+| shift-cascade N=1000 | ~2ms |
 
 ## TODO
 
+- **Remove dead code**: `canonicalize`, `canon_eq`, `resolve_shifts_for_whnf`,
+  `canon_degraded`, `sem_eq_cache` — all superseded by `sem_eq` + `resolve_shifts`.
+  Also: thread_local profiling counters, dead locally-nameless code (Local variant,
+  FVarId, abstr, etc.)
+
 - **Reduce inst_aux traversal count**: The 4.8x gap (938K vs 196K) is the main pathological-
-  case blocker, but general performance is now 1.19x. Ideas:
+  case blocker, but general performance is now ~1.27x. Ideas:
   - Persistent inst_cache across inst_beta calls (include subst in key)
   - Size-bounded eager shift (resolve small vals, defer large ones)
   - Avoid creating Shift wrappers for subst vals that will be immediately consumed by whnf
 
-- **Reduce canonicalize calls**: canon_eq is called ~9K times for cache verification.
-  Consider cheaper verification (e.g., pointer equality after whnf, or hash-only comparison).
-
-- **Remove dead code**: `sem_eq` (now unused, replaced by `canon_eq`), thread_local
-  profiling counters, `struct_hash`/`fvar_list_of` (unused)
-
-- **Remove dead locally-nameless code** (Local variant, FVarId, abstr, etc.)
+- **Investigate always-let-in-context alternatives**: Current eager infer_let works but
+  doesn't avoid O(N²) cascade for deep lets in infer. Options:
+  - Accept the limitation (whnf lazy zeta already handles the cascade for reduction)
+  - Find a convergence-preserving approach to Shift-aware let-in-context
+  - Consider hybrid: de Bruijn + locally-nameless for let-bound vars only
 
 - **Fill in Theory.lean sorry's**: `decode_shift`, `fvars_shift_zero`
 
