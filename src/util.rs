@@ -185,9 +185,6 @@ pub struct ExprCache<'t> {
     pub(crate) abstr_cache: FxHashMap<(ExprPtr<'t>, u16), ExprPtr<'t>>,
     /// Caches (e, amount, cutoff) |-> output for shifting.
     pub(crate) shift_cache: FxHashMap<(ExprPtr<'t>, u16, u16), ExprPtr<'t>>,
-    /// Caches canonicalize: ExprPtr -> ExprPtr (fully Shift-resolved).
-    /// Due to arena hash-consing, canonicalize(a) == canonicalize(b) iff sem_eq(a, b).
-    pub(crate) canon_cache: FxHashMap<ExprPtr<'t>, ExprPtr<'t>>,
     /// Cache for abstr_aux_levels (nanoda TC): (expr, start_pos, num_open_binders) -> expr
     pub(crate) abstr_cache_levels: FxHashMap<(ExprPtr<'t>, u16, u16), ExprPtr<'t>>,
 }
@@ -200,7 +197,6 @@ impl<'t> ExprCache<'t> {
             subst_cache: new_fx_hash_map(),
             dsubst_cache: new_fx_hash_map(),
             shift_cache: new_fx_hash_map(),
-            canon_cache: new_fx_hash_map(),
             abstr_cache_levels: new_fx_hash_map(),
         }
     }
@@ -1071,92 +1067,6 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         }
     }
 
-
-    /// Deep shift resolution: push all Shift wrappers down to leaves (Var nodes).
-    /// Creates new expression nodes to ensure the result contains no Shift wrappers.
-    /// Used on whnf results to enable cache convergence with let-in-context.
-    /// Cached via canon_cache for efficiency.
-    pub fn resolve_shifts(&mut self, e: ExprPtr<'t>) -> ExprPtr<'t> {
-        // Fast path: no Shift node at top → check if any sub-expressions need resolving
-        if !matches!(self.read_expr(e), Expr::Shift { .. }) {
-            // For non-Shift nodes, check canon_cache
-            if let Some(&cached) = self.expr_cache.canon_cache.get(&e) {
-                return cached;
-            }
-        }
-        let result = self.resolve_shifts_aux(e, 0, 0);
-        self.expr_cache.canon_cache.insert(e, result);
-        result
-    }
-
-    fn resolve_shifts_aux(&mut self, e: ExprPtr<'t>, sh_amt: u16, sh_cut: u16) -> ExprPtr<'t> {
-        let expr = self.read_expr(e);
-        // Fast path: closed expressions are unaffected by shifts
-        match expr {
-            Expr::Sort { .. } | Expr::Const { .. } | Expr::Local { .. }
-            | Expr::StringLit { .. } | Expr::NatLit { .. } => return e,
-            _ => {}
-        }
-        // Peel Shift wrappers, accumulating shift amount
-        if let Expr::Shift { inner, amount, cutoff, .. } = expr {
-            if cutoff == sh_cut {
-                return self.resolve_shifts_aux(inner, sh_amt + amount, sh_cut);
-            } else {
-                let forced = self.push_shift(inner, amount, cutoff);
-                return self.resolve_shifts_aux(forced, sh_amt, sh_cut);
-            }
-        }
-        // No shift pending and no Shift at top: check canon_cache
-        if sh_amt == 0 {
-            if let Some(&cached) = self.expr_cache.canon_cache.get(&e) {
-                return cached;
-            }
-        }
-        // Early exit: no loose bvars above cutoff means shift is a no-op
-        let nlbv = expr.num_loose_bvars();
-        if sh_amt > 0 && nlbv <= sh_cut {
-            return self.resolve_shifts_aux(e, 0, 0);
-        }
-        let result = match expr {
-            Expr::Var { dbj_idx, .. } => {
-                if sh_amt > 0 && dbj_idx >= sh_cut {
-                    self.mk_var(dbj_idx + sh_amt)
-                } else {
-                    e
-                }
-            }
-            Expr::App { fun, arg, .. } => {
-                let fun = self.resolve_shifts_aux(fun, sh_amt, sh_cut);
-                let arg = self.resolve_shifts_aux(arg, sh_amt, sh_cut);
-                self.mk_app(fun, arg)
-            }
-            Expr::Pi { binder_name, binder_style, binder_type, body, .. } => {
-                let binder_type = self.resolve_shifts_aux(binder_type, sh_amt, sh_cut);
-                let body = self.resolve_shifts_aux(body, sh_amt, sh_cut + 1);
-                self.mk_pi(binder_name, binder_style, binder_type, body)
-            }
-            Expr::Lambda { binder_name, binder_style, binder_type, body, .. } => {
-                let binder_type = self.resolve_shifts_aux(binder_type, sh_amt, sh_cut);
-                let body = self.resolve_shifts_aux(body, sh_amt, sh_cut + 1);
-                self.mk_lambda(binder_name, binder_style, binder_type, body)
-            }
-            Expr::Let { binder_name, binder_type, val, body, nondep, .. } => {
-                let binder_type = self.resolve_shifts_aux(binder_type, sh_amt, sh_cut);
-                let val = self.resolve_shifts_aux(val, sh_amt, sh_cut);
-                let body = self.resolve_shifts_aux(body, sh_amt, sh_cut + 1);
-                self.mk_let(binder_name, binder_type, val, body, nondep)
-            }
-            Expr::Proj { ty_name, idx, structure, .. } => {
-                let structure = self.resolve_shifts_aux(structure, sh_amt, sh_cut);
-                self.mk_proj(ty_name, idx, structure)
-            }
-            _ => e, // Sort, Const, etc. already handled above
-        };
-        if sh_amt == 0 {
-            self.expr_cache.canon_cache.insert(e, result);
-        }
-        result
-    }
 
     /// View an expression with Shift pushed one level inside.
     /// Never returns `Expr::Shift` — children may be Shift-wrapped.
