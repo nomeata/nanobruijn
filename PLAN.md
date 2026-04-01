@@ -167,7 +167,7 @@ Result is a boolean (no delta to apply). On init: ~39K shift-invariant hits out 
 
 | Benchmark | nanoda (locally nameless) | lean-slop-kernel |
 |-----------|--------------------------|------------------|
-| Init (54k decls, 310MB) | 24s | 35s (1.5x) |
+| Init (54k decls, 310MB) | 26s | 33s (1.27x) |
 | app-lam N=4000 | 8.3s | 10ms (830x faster) |
 | Mathlib (630k decls, 4.9GB) | ~16min (est.) | ~65min (est. ~4x) |
 | sheafedSpaceMap_comp (worst case) | ~2s | 12s (6x) |
@@ -227,7 +227,37 @@ push_shift on Shift nodes) + alloc_expr. Nanoda does: read_expr + match + recurs
 the number of operations (better caching at higher levels) is more impactful than optimizing
 each operation.
 
+### Combined inst_shift_aux optimization
+
+`inst_aux` now carries pending shift parameters `(sh_amt, sh_cut)` instead of creating
+intermediate Shift wrapper expressions when distributing shifts to children. When encountering
+`Shift { inner, amount, cutoff }`, it recurses on `inner` directly with the shift params.
+
+| Metric (init 54k decls) | Before | After |
+|--------------------------|--------|-------|
+| Wall time | 54s (2.1x nanoda) | 33s (1.27x nanoda) |
+
+| Metric (#122833, 10s timeout) | Before | After |
+|-------------------------------|--------|-------|
+| alloc_expr at timeout | 1,386K | 1,044K |
+| inst_aux work nodes | 936K | 938K |
+| Progress (def_eq) | 13,867 (~95%) | 13,867 (~95%) |
+
+The optimization reduces alloc_expr calls (~25% fewer intermediate Shift wrappers) but
+doesn't reduce inst_aux traversal count — the shift TC still traverses ~4.8x more inst_aux
+nodes than nanoda (938K vs 196K). This is fundamental: Shift wrappers in the expression tree
+add layers that inst_aux must traverse through, even with the combined approach.
+
+**Canonicalize-on-inst-result experiment**: Adding `canonicalize(result)` after inst_beta
+made things much worse (376K canon calls, only 37% progress at timeout). The cost of deep
+canonicalization on every inst_beta result far exceeds the benefit of preventing cascading.
+
 ## TODO
+
+- **Reduce inst_aux traversal count**: The 4.8x gap is the main blocker. Ideas:
+  - Avoid creating Shift wrappers in the first place (eagerly resolve at creation time for small exprs?)
+  - Shallow canonicalize at inst_beta callsites that produce whnf-consumed results
+  - Fuse shift resolution into whnf rather than doing separate canonicalize passes
 
 - **Reduce canonicalize calls**: canon_eq is called ~9K times for cache verification.
   Consider cheaper verification (e.g., pointer equality after whnf, or hash-only comparison).

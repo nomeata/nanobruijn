@@ -173,7 +173,7 @@ pub struct ExprCache<'t> {
     /// Caches (e, offset) |-> output for instantiation. This cache is reset
     /// before every new call to `inst`, so there's no need to cache the sequence
     /// of substitutions.
-    pub(crate) inst_cache: FxHashMap<(ExprPtr<'t>, u16), ExprPtr<'t>>,
+    pub(crate) inst_cache: FxHashMap<(ExprPtr<'t>, u16, u16, u16), ExprPtr<'t>>,
     /// Caches (e, ks, vs) |-> output for level substitution.
     pub(crate) subst_cache: FxHashMap<(ExprPtr<'t>, LevelsPtr<'t>, LevelsPtr<'t>), ExprPtr<'t>>,
     pub(crate) dsubst_cache: FxHashMap<(ExprPtr<'t>, LevelsPtr<'t>, LevelsPtr<'t>), ExprPtr<'t>>,
@@ -328,9 +328,9 @@ pub struct TcTrace {
 
 impl std::fmt::Display for TcTrace {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "def_eq={} whnf={} infer={} inst={} | hits: whnf={} eq={} infer={} infer_hash={} infer_vfail={} | canon={}/{} ps={}/{} ceq={} | inst_aux={}/{}/{}",
+        write!(f, "def_eq={} whnf={} infer={} inst={} alloc={} | hits: whnf={} eq={} infer={} infer_hash={} infer_vfail={} | canon={}/{} ps={}/{} ceq={} | inst_aux={}/{}/{}",
             self.def_eq_calls, self.whnf_calls, self.infer_calls,
-            self.inst_calls,
+            self.inst_calls, self.alloc_expr_calls,
             self.whnf_cache_hits, self.eq_cache_hits, self.infer_cache_hits,
             self.infer_cache_hash_hit, self.infer_cache_verify_fail,
             self.canon_calls, self.canon_cache_hits,
@@ -473,6 +473,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
     /// already stored, forego the allocation and return a pointer to the previously inserted
     /// element. Checks the longer-lived storage first.
     pub fn alloc_expr(&mut self, e: Expr<'t>) -> ExprPtr<'t> {
+        self.trace.alloc_expr_calls += 1;
         if let Some(idx) = self.export_file.dag.exprs.get_index_of(&e) {
             Ptr::from(DagMarker::ExportFile, idx)
         } else {
