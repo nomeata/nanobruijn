@@ -80,9 +80,12 @@ pub struct TypeChecker<'x, 't, 'p> {
     pub(crate) declar_info: Option<DeclarInfo<'t>>,
     /// Local typing context for de Bruijn variables.
     /// `local_ctx[0]` is the type of `Var(0)` (most recently bound variable).
-    /// Types are stored as they appear in the binder (valid at the depth before the binder).
+    /// Each entry is `(type, optional_value)`:
+    /// - `None` for lambda/pi binders
+    /// - `Some(val)` for let-bindings (enables lazy zeta reduction)
+    /// Types/values are stored as they appear in the binder (valid at the depth before the binder).
     /// When looking up `Var(k)`, we shift `local_ctx[k]` up by `k+1`.
-    pub(crate) local_ctx: Vec<ExprPtr<'t>>,
+    pub(crate) local_ctx: Vec<(ExprPtr<'t>, Option<ExprPtr<'t>>)>,
 }
 
 impl<'p> ExportFile<'p> {
@@ -246,24 +249,57 @@ impl<'p> ExportFile<'p> {
 
 impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
     pub fn new(dag: &'x mut TcCtx<'t, 'p>, env: &'x Env<'x, 't>, declar_info: Option<DeclarInfo<'t>>) -> Self {
-        Self { ctx: dag, env, tc_cache: TcCache::new(), declar_info, local_ctx: Vec::new() }
+        Self { ctx: dag, env, tc_cache: TcCache::new(), declar_info, local_ctx: Vec::new(),  }
     }
 
     /// Look up the type of Var(k) in the local context, shifting it to be valid at
     /// the current depth.
     fn lookup_var(&mut self, dbj_idx: u16) -> ExprPtr<'t> {
         let depth = self.local_ctx.len();
-        let ty = self.local_ctx[depth - 1 - dbj_idx as usize];
+        let (ty, _) = self.local_ctx[depth - 1 - dbj_idx as usize];
         // ty was valid at depth (depth - 1 - dbj_idx), i.e., before the
         // binder that introduced Var(dbj_idx). To make it valid at current depth,
         // we shift up by dbj_idx + 1.
         self.ctx.shift_expr(ty, dbj_idx + 1, 0)
     }
 
-    /// Push a binder type onto the local context (entering a binder).
+    /// Look up the value of a let-bound Var(k), shifted to be valid at current depth.
+    /// Returns None for lambda/pi binders.
+    fn lookup_var_value(&mut self, dbj_idx: u16) -> Option<ExprPtr<'t>> {
+        let depth = self.local_ctx.len();
+        let (_, val_opt) = self.local_ctx[depth - 1 - dbj_idx as usize];
+        val_opt.map(|val| self.ctx.shift_expr(val, dbj_idx + 1, 0))
+    }
+
+    /// Check whether context positions referencing bvars 0..bvar_ub-1 at current
+    /// depth are all non-let. Used to guard shift_eq in whnf cache: if any position
+    /// is a let-binding, zeta reduction makes whnf non-shift-equivariant.
+    fn context_range_is_let_free(&self, bvar_ub: u16) -> bool {
+        let depth = self.local_ctx.len();
+        for k in 0..bvar_ub as usize {
+            if depth > k && self.local_ctx[depth - 1 - k].1.is_some() {
+                return false;
+            }
+        }
+        true
+    }
+
+    /// Push a lambda/pi binder onto the local context.
     fn push_local(&mut self, ty: ExprPtr<'t>) {
-        self.local_ctx.push(ty);
+        self.local_ctx.push((ty, None));
         self.tc_cache.infer_cache.push(new_fx_hash_map());
+        self.tc_cache.whnf_cache.push(new_fx_hash_map());
+        self.tc_cache.whnf_no_unfolding_cache.push(new_fx_hash_map());
+        self.tc_cache.defeq_pos_open.push(new_fx_hash_map());
+        self.tc_cache.defeq_neg_open.push(new_fx_hash_map());
+    }
+
+    /// Push a let-binding onto the local context (type + value).
+    fn push_local_let(&mut self, ty: ExprPtr<'t>, val: ExprPtr<'t>) {
+        self.local_ctx.push((ty, Some(val)));
+        self.tc_cache.infer_cache.push(new_fx_hash_map());
+        self.tc_cache.whnf_cache.push(new_fx_hash_map());
+        self.tc_cache.whnf_no_unfolding_cache.push(new_fx_hash_map());
         self.tc_cache.defeq_pos_open.push(new_fx_hash_map());
         self.tc_cache.defeq_neg_open.push(new_fx_hash_map());
     }
@@ -272,6 +308,8 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
     fn pop_local(&mut self) {
         self.local_ctx.pop().expect("pop_local: empty context");
         self.tc_cache.infer_cache.pop();
+        self.tc_cache.whnf_cache.pop();
+        self.tc_cache.whnf_no_unfolding_cache.pop();
         self.tc_cache.defeq_pos_open.pop();
         self.tc_cache.defeq_neg_open.pop();
     }
@@ -281,6 +319,8 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         if self.local_ctx.len() > depth {
             self.local_ctx.truncate(depth);
             self.tc_cache.infer_cache.truncate(depth + 1); // +1 for base bucket
+            self.tc_cache.whnf_cache.truncate(depth + 1);
+            self.tc_cache.whnf_no_unfolding_cache.truncate(depth + 1);
             self.tc_cache.defeq_pos_open.truncate(depth);
             self.tc_cache.defeq_neg_open.truncate(depth);
         }
@@ -630,11 +670,15 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                 let new_depth = self.local_ctx.len() - amount as usize;
                 let saved_locals = self.local_ctx.split_off(new_depth);
                 let saved_cache = self.tc_cache.infer_cache.split_off(new_depth + 1); // +1 for base bucket
+                let saved_whnf = self.tc_cache.whnf_cache.split_off(new_depth + 1);
+                let saved_whnf_nu = self.tc_cache.whnf_no_unfolding_cache.split_off(new_depth + 1);
                 let saved_pos = self.tc_cache.defeq_pos_open.split_off(new_depth);
                 let saved_neg = self.tc_cache.defeq_neg_open.split_off(new_depth);
                 let inner_type = self.infer(inner, flag);
                 self.local_ctx.extend(saved_locals);
                 self.tc_cache.infer_cache.extend(saved_cache);
+                self.tc_cache.whnf_cache.extend(saved_whnf);
+                self.tc_cache.whnf_no_unfolding_cache.extend(saved_whnf_nu);
                 self.tc_cache.defeq_pos_open.extend(saved_pos);
                 self.tc_cache.defeq_neg_open.extend(saved_neg);
                 return self.ctx.mk_shift(inner_type, amount);
@@ -837,8 +881,26 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             // assert that the type annotation of the let value is appropriate.
             self.assert_def_eq(val_ty, binder_type);
         }
-        let body = self.ctx.inst_beta(body, &[val]);
-        self.infer(body, flag)
+        // Use let-in-context for deep let chains to avoid O(N²) cascading
+        // substitution. For shallow chains, eager substitution is more
+        // efficient because it avoids Shift wrapper proliferation.
+        let mut let_depth = 0u32;
+        {
+            let mut b = body;
+            while let Let { body: inner, .. } = self.ctx.read_expr(b) {
+                let_depth += 1;
+                b = inner;
+            }
+        }
+        if let_depth >= 50 {
+            self.push_local_let(binder_type, val);
+            let result = self.infer(body, flag);
+            self.pop_local();
+            self.ctx.inst_beta(result, &[val])
+        } else {
+            let body = self.ctx.inst_beta(body, &[val]);
+            self.infer(body, flag)
+        }
     }
     
     // Not well tested, used for introspection/debugging.
@@ -929,33 +991,42 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             let new_depth = self.local_ctx.len() - total_shift as usize;
             let saved_locals = self.local_ctx.split_off(new_depth);
             let saved_infer = self.tc_cache.infer_cache.split_off(new_depth + 1);
+            let saved_whnf = self.tc_cache.whnf_cache.split_off(new_depth + 1);
+            let saved_whnf_nu = self.tc_cache.whnf_no_unfolding_cache.split_off(new_depth + 1);
             let saved_pos = self.tc_cache.defeq_pos_open.split_off(new_depth);
             let saved_neg = self.tc_cache.defeq_neg_open.split_off(new_depth);
             let r = self.whnf(e);
             self.local_ctx.extend(saved_locals);
             self.tc_cache.infer_cache.extend(saved_infer);
+            self.tc_cache.whnf_cache.extend(saved_whnf);
+            self.tc_cache.whnf_no_unfolding_cache.extend(saved_whnf_nu);
             self.tc_cache.defeq_pos_open.extend(saved_pos);
             self.tc_cache.defeq_neg_open.extend(saved_neg);
             return self.ctx.mk_shift(r, total_shift);
         }
-        // Shift-invariant cache: keyed by canonical hash.
-        // On hit, verify structural equality up to shift, then apply delta.
+        // Stacked whnf cache: bucket 0 for closed, bucket at depth for open.
         let canon = self.ctx.canonical_hash(e);
         let e_bvar_ub = self.ctx.num_loose_bvars(e);
-        if let Some(&(stored_input, stored_result, stored_bvar_ub)) = self.tc_cache.whnf_cache.get(&canon) {
-            if stored_input == e {
-                self.ctx.trace.whnf_cache_hits += 1;
-                return stored_result;
-            }
-            if self.ctx.canon_eq(stored_input, e) {
-                self.ctx.trace.whnf_cache_hits += 1;
-                return stored_result;
-            }
-            if e_bvar_ub >= stored_bvar_ub {
-                let delta = e_bvar_ub - stored_bvar_ub;
-                if delta > 0 && self.ctx.shift_eq(stored_input, e, delta) {
+        let whnf_bucket_idx = if e_bvar_ub == 0 { 0 } else { self.local_ctx.len() };
+        if let Some(bucket) = self.tc_cache.whnf_cache.get(whnf_bucket_idx) {
+            if let Some(&(stored_input, stored_result, stored_bvar_ub)) = bucket.get(&canon) {
+                if stored_input == e {
                     self.ctx.trace.whnf_cache_hits += 1;
-                    return self.ctx.mk_shift(stored_result, delta);
+                    return stored_result;
+                }
+                if self.ctx.canon_eq(stored_input, e) {
+                    self.ctx.trace.whnf_cache_hits += 1;
+                    return stored_result;
+                }
+                // shift_eq: reuse whnf(stored) for e = Shift(stored, delta).
+                // Only sound when no let-bindings exist in the referenced
+                // bvar range, since zeta reduction breaks shift-equivariance.
+                if self.context_range_is_let_free(e_bvar_ub) && e_bvar_ub >= stored_bvar_ub {
+                    let delta = e_bvar_ub - stored_bvar_ub;
+                    if delta > 0 && self.ctx.shift_eq(stored_input, e, delta) {
+                        self.ctx.trace.whnf_cache_hits += 1;
+                        return self.ctx.mk_shift(stored_result, delta);
+                    }
                 }
             }
         }
@@ -968,8 +1039,10 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                 cursor = next_term;
             } else {
                 // Only store if no entry exists or if this bvar_ub is smaller (better for future shift hits)
-                if self.tc_cache.whnf_cache.get(&canon).map_or(true, |&(_, _, stored_bvar_ub)| e_bvar_ub < stored_bvar_ub) {
-                    self.tc_cache.whnf_cache.insert(canon, (e, whnfd, e_bvar_ub));
+                if let Some(bucket) = self.tc_cache.whnf_cache.get_mut(whnf_bucket_idx) {
+                    if bucket.get(&canon).map_or(true, |&(_, _, stored_bvar_ub)| e_bvar_ub < stored_bvar_ub) {
+                        bucket.insert(canon, (e, whnfd, e_bvar_ub));
+                    }
                 }
                 return whnfd
             }
@@ -1008,11 +1081,15 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             let new_depth = self.local_ctx.len() - total_shift as usize;
             let saved_locals = self.local_ctx.split_off(new_depth);
             let saved_infer = self.tc_cache.infer_cache.split_off(new_depth + 1);
+            let saved_whnf = self.tc_cache.whnf_cache.split_off(new_depth + 1);
+            let saved_whnf_nu = self.tc_cache.whnf_no_unfolding_cache.split_off(new_depth + 1);
             let saved_pos = self.tc_cache.defeq_pos_open.split_off(new_depth);
             let saved_neg = self.tc_cache.defeq_neg_open.split_off(new_depth);
             let r = self.whnf_no_unfolding_aux(e, cheap_proj);
             self.local_ctx.extend(saved_locals);
             self.tc_cache.infer_cache.extend(saved_infer);
+            self.tc_cache.whnf_cache.extend(saved_whnf);
+            self.tc_cache.whnf_no_unfolding_cache.extend(saved_whnf_nu);
             self.tc_cache.defeq_pos_open.extend(saved_pos);
             self.tc_cache.defeq_neg_open.extend(saved_neg);
             return self.ctx.push_shift(r, total_shift, 0);
@@ -1022,12 +1099,15 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         let mut cache_entries: Vec<ExprPtr<'t>> = Vec::new();
         let mut cur = e;
         let result = loop {
-            // Shift-invariant cache lookup: canonical hash keyed.
+            // Stacked whnf_no_unfolding cache lookup.
             let cur_canon = self.ctx.canonical_hash(cur);
             let cur_bvar_ub = self.ctx.num_loose_bvars(cur);
-            if let Some(&(stored_input, stored_result, _stored_bvar_ub)) = self.tc_cache.whnf_no_unfolding_cache.get(&cur_canon) {
-                if self.ctx.canon_eq(stored_input, cur) {
-                    break stored_result;
+            let wnu_bucket_idx = if cur_bvar_ub == 0 { 0 } else { self.local_ctx.len() };
+            if let Some(bucket) = self.tc_cache.whnf_no_unfolding_cache.get(wnu_bucket_idx) {
+                if let Some(&(stored_input, stored_result, _stored_bvar_ub)) = bucket.get(&cur_canon) {
+                    if stored_input == cur || self.ctx.canon_eq(stored_input, cur) {
+                        break stored_result;
+                    }
                 }
             }
             let (e_fun, args) = self.ctx.unfold_apps(cur);
@@ -1081,7 +1161,17 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                     } else {
                         break self.ctx.foldl_apps(e_fun, args.into_iter());
                     },
-                Var { .. } => break self.ctx.foldl_apps(e_fun, args.into_iter()),
+                Var { dbj_idx, .. } => {
+                    // Zeta reduction: if this var refers to a let-binding in context,
+                    // unfold it and continue reducing.
+                    if let Some(val) = self.lookup_var_value(dbj_idx) {
+                        let next = self.ctx.foldl_apps(val, args.into_iter());
+                        if !cheap_proj { cache_entries.push(cur); }
+                        cur = next;
+                        continue;
+                    }
+                    break self.ctx.foldl_apps(e_fun, args.into_iter());
+                }
                 Pi { .. } => {
                     debug_assert!(args.is_empty());
                     break e_fun;
@@ -1102,8 +1192,11 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             for entry in cache_entries {
                 let entry_canon = self.ctx.canonical_hash(entry);
                 let entry_bvar_ub = self.ctx.num_loose_bvars(entry);
-                if self.tc_cache.whnf_no_unfolding_cache.get(&entry_canon).map_or(true, |&(_, _, s)| entry_bvar_ub < s) {
-                    self.tc_cache.whnf_no_unfolding_cache.insert(entry_canon, (entry, result, entry_bvar_ub));
+                let entry_bucket_idx = if entry_bvar_ub == 0 { 0 } else { self.local_ctx.len() };
+                if let Some(bucket) = self.tc_cache.whnf_no_unfolding_cache.get_mut(entry_bucket_idx) {
+                    if bucket.get(&entry_canon).map_or(true, |&(_, _, s)| entry_bvar_ub < s) {
+                        bucket.insert(entry_canon, (entry, result, entry_bvar_ub));
+                    }
                 }
             }
         }
@@ -1212,8 +1305,9 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         true
     }
 
-    pub fn assert_def_eq(&mut self, u: ExprPtr<'t>, v: ExprPtr<'t>) { assert!(self.def_eq(u, v)) }
-
+    pub fn assert_def_eq(&mut self, u: ExprPtr<'t>, v: ExprPtr<'t>) {
+        assert!(self.def_eq(u, v))
+    }
     pub fn def_eq(&mut self, x: ExprPtr<'t>, y: ExprPtr<'t>) -> bool {
         self.ctx.trace.def_eq_calls += 1;
         self.ctx.check_heartbeat();
@@ -1582,7 +1676,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
     fn defeq_open_store_impl(
         ctx: &mut TcCtx<'t, 'p>,
         cache: &mut Vec<FxHashMap<((u64, u64), (u64, u64)), (ExprPtr<'t>, ExprPtr<'t>, u16)>>,
-        local_ctx: &[ExprPtr<'t>],
+        local_ctx: &[(ExprPtr<'t>, Option<ExprPtr<'t>>)],
         x: ExprPtr<'t>,
         y: ExprPtr<'t>,
     ) {

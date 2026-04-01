@@ -265,6 +265,47 @@ for substitution values under binders. These Shift wrappers cascade — subseque
 calls must traverse through them, creating more wrappers. This is the fundamental cost of
 deferred shifts. Nanoda's locally-nameless approach substitutes fvars that don't need shifting.
 
+### Let-in-context (partial: threshold-gated)
+
+The kernel processes `let x := val in body` by substituting val for Var(0) in body
+via `inst_beta`. For nested let chains, this creates O(N²) cascading substitution work
+because each substitution must traverse Shift wrappers from previous substitutions.
+
+**Let-in-context approach**: Instead of eager substitution, push `(type, Some(val))` onto
+`local_ctx` and infer body at depth+1. When whnf encounters `Var(k)` pointing to a
+let-binding, it performs "zeta reduction": unfolds to the shifted let value. After inference,
+`inst_beta(result, [val])` brings the result type back to the caller's depth.
+
+Infrastructure added:
+- `local_ctx` changed from `Vec<ExprPtr>` to `Vec<(ExprPtr, Option<ExprPtr>)>` (type + optional value)
+- `lookup_var_value(k)`: returns shifted let-value if context position is a let-binding
+- `push_local_let(ty, val)` / updated `pop_local()`: manage let entries in context
+- `context_range_is_let_free(bvar_ub)`: guards whnf cache shift_eq (see below)
+- Zeta reduction in whnf_no_unfolding_aux `Var` case: unfolds let-bound vars
+- Stacked whnf caches: `Vec<FxHashMap>` per depth (like infer/defeq caches), invalidated on pop
+
+**Cache soundness**: With zeta reduction, `whnf(Shift(e, k)) ≠ Shift(whnf(e), k)` when
+the shifted vars point to different let-bindings. The whnf cache `shift_eq` optimization
+is guarded by `context_range_is_let_free(e_bvar_ub)` — only fires when no let-bindings
+exist in the referenced bvar range. Pointer-equal and `canon_eq` lookups remain sound
+at the same depth. The infer cache `shift_eq` is unconditionally safe (types don't depend
+on zeta reduction — `infer(Shift(e, delta))` = `Shift(infer(e), delta)` always holds).
+
+**Limitation with de Bruijn indices**: For general code (not just deep chains), let-in-context
+creates too many Shift wrappers via zeta reduction. Each zeta unfolding creates
+`shift_expr(val, k+1, 0)`, and these shifted values go through `canonicalize` for cache
+lookups, creating new expression nodes. On some Init declarations (`Char.ofOrdinal._proof_3`),
+this triggers the 500K canonicalization node limit and OOM. The official Lean kernel avoids
+this because locally-nameless fvars don't need shifting for let-value lookups.
+
+**Solution**: Threshold-gated hybrid. Let chains with depth ≥ 50 use let-in-context
+(where O(N²) cascade matters). Shallower chains use eager `inst_beta` (more cache-friendly).
+
+| Benchmark | Eager only | Let-in-context (threshold=50) |
+|-----------|-----------|------------------------------|
+| Init (54k decls) | 31s | 31s (no regression) |
+| shift-cascade N=1000 | 139ms | 2ms (70x faster) |
+
 ## TODO
 
 - **Reduce inst_aux traversal count**: The 4.8x gap (938K vs 196K) is the main pathological-

@@ -1366,12 +1366,15 @@ pub struct NameCache<'p> {
 }
 
 pub(crate) struct TcCache<'t> {
-    /// Shift-invariant WHNF cache: keyed by canonical hash (struct_hash, fvar_normalize_hash),
-    /// stores (input_expr, result_expr, bvar_ub). On hit, verify with shift_eq, then
-    /// apply delta via push_shift.
-    pub(crate) whnf_cache: FxHashMap<(u64, u64), (ExprPtr<'t>, ExprPtr<'t>, u16)>,
-    /// Shift-invariant whnf_no_unfolding cache: same design as whnf_cache.
-    pub(crate) whnf_no_unfolding_cache: FxHashMap<(u64, u64), (ExprPtr<'t>, ExprPtr<'t>, u16)>,
+    /// Shift-invariant WHNF cache, organized as a stack of maps (like infer_cache).
+    /// Bucket 0: closed expressions (context-independent, never evicted by push/pop).
+    /// Buckets 1..depth: open expressions at each context depth.
+    /// With let-in-context, whnf is context-dependent for open expressions (zeta reduction),
+    /// so per-depth bucketing ensures stale results are evicted on pop_local.
+    /// Each map: canonical hash → (input_expr, result_expr, bvar_ub).
+    pub(crate) whnf_cache: Vec<FxHashMap<(u64, u64), (ExprPtr<'t>, ExprPtr<'t>, u16)>>,
+    /// Shift-invariant whnf_no_unfolding cache: same stacked design as whnf_cache.
+    pub(crate) whnf_no_unfolding_cache: Vec<FxHashMap<(u64, u64), (ExprPtr<'t>, ExprPtr<'t>, u16)>>,
     /// Shift-invariant positive def_eq cache for closed expressions.
     /// Keyed by ordered pair of canonical hashes. Value: (stored_x, stored_y).
     /// On hit, verify stored pointers match query pointers exactly (collision guard).
@@ -1404,8 +1407,8 @@ pub(crate) struct TcCache<'t> {
 impl<'t> TcCache<'t> {
     pub(crate) fn new() -> Self {
         Self {
-            whnf_cache: new_fx_hash_map(),
-            whnf_no_unfolding_cache: new_fx_hash_map(),
+            whnf_cache: vec![new_fx_hash_map()],              // bucket 0 = closed
+            whnf_no_unfolding_cache: vec![new_fx_hash_map()], // bucket 0 = closed
             eq_cache: new_fx_hash_map(),
             failure_cache: new_fx_hash_map(),
             defeq_pos_open: Vec::new(),
@@ -1416,8 +1419,10 @@ impl<'t> TcCache<'t> {
     }
 
     pub(crate) fn clear(&mut self) {
-        self.whnf_cache.clear();
-        self.whnf_no_unfolding_cache.clear();
+        self.whnf_cache.truncate(1);
+        self.whnf_cache[0].clear();
+        self.whnf_no_unfolding_cache.truncate(1);
+        self.whnf_no_unfolding_cache[0].clear();
         self.eq_cache.clear();
         self.failure_cache.clear();
         self.strong_cache.clear();
