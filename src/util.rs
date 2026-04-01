@@ -816,7 +816,6 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
     /// Collapses nested shifts and elides shifts on closed expressions.
     pub fn mk_shift(&mut self, inner: ExprPtr<'t>, amount: u16) -> ExprPtr<'t> {
         // Lazy shifts: create Shift wrapper nodes instead of traversing.
-        // Combined with shift-invariant WHNF cache (canonical hash + shift_eq verification).
         self.mk_shift_lazy(inner, amount)
     }
 
@@ -938,6 +937,14 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
             }
             other => other
         }
+    }
+
+    /// Semantic equality via canonicalization: checks pointer equality first,
+    /// then canonicalizes both sides and compares pointers.
+    /// More efficient than calling `canonicalize` twice when pointer equality succeeds.
+    #[inline]
+    pub fn canon_eq(&mut self, a: ExprPtr<'t>, b: ExprPtr<'t>) -> bool {
+        a == b || self.canonicalize(a) == self.canonicalize(b)
     }
 
     /// Fully resolve all Shift wrappers in an expression tree, returning
