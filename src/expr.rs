@@ -329,7 +329,13 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
                     return e;
                 }
                 Shift { inner, amount, cutoff, .. } => {
-                    // Nested shift: push the inner shift, then apply outer shift
+                    // Compose shifts when cutoffs match: Shift(inner, a2, c) with pending (a1, c) = (a1+a2, c)
+                    if cutoff == sh_cut {
+                        let r = self.inst_aux(inner, substs, offset, shift_down, sh_amt + amount, sh_cut);
+                        self.expr_cache.inst_cache.insert(cache_key, r);
+                        return r;
+                    }
+                    // Different cutoffs: push the inner shift, then apply outer shift
                     let forced = self.push_shift(inner, amount, cutoff);
                     let r = self.inst_aux(forced, substs, offset, shift_down, sh_amt, sh_cut);
                     self.expr_cache.inst_cache.insert(cache_key, r);
