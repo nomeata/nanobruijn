@@ -198,10 +198,39 @@ bug is in the cache verification logic (canon_eq/shift_eq), not a reason to forc
 hit rates side-by-side. nanoda's TC code is included in this project (module `nanoda_tc`)
 with a runtime flag to switch between checkers, making A/B comparison easy.
 
+### Tracing results (declaration #122833: colimitLimitToLimitColimit_surjective)
+
+| Counter | Shift TC (10s timeout) | Nanoda (82ms) |
+|---------|----------------------|---------------|
+| def_eq | 13,637 | 13,924 |
+| whnf | 2,447 | 2,942 |
+| infer | 16,440 | 15,695 |
+| inst/inst_beta | 15,887 | 17,941 |
+| infer cache hits | 12,386 | 11,707 |
+| whnf cache hits | 2,179 | 2,560 |
+| eq cache hits | 1,432 | 1,650 |
+| inst_aux nodes | 1,724,533 | ~1.8M (est.) |
+| canonicalize calls | 109,383 | N/A |
+| push_shift calls | 122,175 | N/A |
+| DAG growth | 69K→234K | ~0 |
+
+**Conclusion**: TC-level operation counts are comparable. Cache hit rates are comparable
+(infer hits even slightly better than nanoda). The bottleneck is **per-operation overhead**:
+- `inst_aux` with Shift handling (view_expr→push_shift) vs nanoda's plain read_expr
+- `canonicalize` traversals for cache verification (canon_eq) and whnf result normalization
+- `alloc_expr` HashMap lookups on the growing TcCtx DAG (69K→234K new expressions)
+- 93% of heartbeats are in inst_aux (substitution traversal)
+
+**Key insight**: the Shift approach has fundamentally higher constant factor per operation.
+Each node visit in inst_aux does: check_heartbeat + inst_cache lookup + view_expr (which may
+push_shift on Shift nodes) + alloc_expr. Nanoda does: read_expr + match + recurse. Reducing
+the number of operations (better caching at higher levels) is more impactful than optimizing
+each operation.
+
 ## TODO
 
-- **Tracing**: Instrument both nanoda TC and our TC to log cache hits/misses for whnf,
-  def_eq, infer. Compare on pathological declarations to find where we miss hits.
+- **Reduce canonicalize calls**: canon_eq is called ~9K times for cache verification.
+  Consider cheaper verification (e.g., pointer equality after whnf, or hash-only comparison).
 
 - **Remove dead code**: `sem_eq` (now unused, replaced by `canon_eq`), thread_local
   profiling counters, `struct_hash`/`fvar_list_of` (unused)
