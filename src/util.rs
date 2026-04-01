@@ -866,6 +866,10 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         if amount == 0 {
             return e;
         }
+        stacker::maybe_grow(64 * 1024, 2 * 1024 * 1024, || self.push_shift_inner(e, amount, cutoff))
+    }
+
+    fn push_shift_inner(&mut self, e: ExprPtr<'t>, amount: u16, cutoff: u16) -> ExprPtr<'t> {
         let expr = self.read_expr(e);
         if expr.num_loose_bvars() <= cutoff {
             return e;
@@ -956,7 +960,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         if let Some(&result) = self.expr_cache.canon_cache.get(&e) {
             return result;
         }
-        let result = match self.read_expr(e) {
+        let result = stacker::maybe_grow(64 * 1024, 2 * 1024 * 1024, || match self.read_expr(e) {
             Expr::Shift { inner, amount, cutoff, .. } => {
                 // Push shift one level, then canonicalize the result
                 let pushed = self.push_shift(inner, amount, cutoff);
@@ -990,7 +994,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
             // Leaf nodes: no Shift wrappers possible
             Expr::Var { .. } | Expr::Sort { .. } | Expr::Const { .. } |
             Expr::Local { .. } | Expr::NatLit { .. } | Expr::StringLit { .. } => e,
-        };
+        });
         self.expr_cache.canon_cache.insert(e, result);
         result
     }
