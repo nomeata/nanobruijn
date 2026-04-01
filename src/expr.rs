@@ -139,9 +139,12 @@ pub enum Expr<'a> {
     },
 }
 
-/// Free variable identifiers using unique IDs from a monotonically increasing counter.
+/// Free variable identifiers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum FVarId {
+    /// De Bruijn level — used by nanoda's locally-nameless approach.
+    DbjLevel(u16),
+    /// Unique ID from monotonically increasing counter.
     Unique(u32),
 }
 
@@ -465,6 +468,66 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
     pub fn abstr(&mut self, e: ExprPtr<'t>, locals: &[ExprPtr<'t>]) -> ExprPtr<'t> {
         self.expr_cache.abstr_cache.clear();
         self.abstr_aux(e, locals, 0u16)
+    }
+
+    /// Abstraction by deBruijn level: converts DbjLevel locals back to Var.
+    /// Used by nanoda's locally-nameless TC.
+    fn abstr_aux_levels(&mut self, e: ExprPtr<'t>, start_pos: u16, num_open_binders: u16) -> ExprPtr<'t> {
+        if !self.has_fvars(e) {
+            e
+        } else if let Some(cached) = self.expr_cache.abstr_cache_levels.get(&(e, start_pos, num_open_binders)) {
+            *cached
+        } else {
+            let calcd = match self.read_expr(e) {
+                Local { id: FVarId::DbjLevel(serial), .. } =>
+                    if serial < start_pos {
+                        e
+                    } else {
+                        self.fvar_to_bvar(num_open_binders, serial)
+                    },
+                Local { id: FVarId::Unique(..), .. } => e,
+                App { fun, arg, .. } => {
+                    let fun = self.abstr_aux_levels(fun, start_pos, num_open_binders);
+                    let arg = self.abstr_aux_levels(arg, start_pos, num_open_binders);
+                    self.mk_app(fun, arg)
+                }
+                Pi { binder_name, binder_style, binder_type, body, .. } => {
+                    let binder_type = self.abstr_aux_levels(binder_type, start_pos, num_open_binders);
+                    let body = self.abstr_aux_levels(body, start_pos, num_open_binders + 1);
+                    self.mk_pi(binder_name, binder_style, binder_type, body)
+                }
+                Lambda { binder_name, binder_style, binder_type, body, .. } => {
+                    let binder_type = self.abstr_aux_levels(binder_type, start_pos, num_open_binders);
+                    let body = self.abstr_aux_levels(body, start_pos, num_open_binders + 1);
+                    self.mk_lambda(binder_name, binder_style, binder_type, body)
+                }
+                Let { binder_name, binder_type, val, body, nondep, .. } => {
+                    let binder_type = self.abstr_aux_levels(binder_type, start_pos, num_open_binders);
+                    let val = self.abstr_aux_levels(val, start_pos, num_open_binders);
+                    let body = self.abstr_aux_levels(body, start_pos, num_open_binders + 1);
+                    self.mk_let(binder_name, binder_type, val, body, nondep)
+                }
+                StringLit { .. } | NatLit { .. } => panic!(),
+                Proj { ty_name, idx, structure, .. } => {
+                    let structure = self.abstr_aux_levels(structure, start_pos, num_open_binders);
+                    self.mk_proj(ty_name, idx, structure)
+                }
+                Shift { inner, amount, cutoff, .. } => {
+                    let shallow = self.push_shift(inner, amount, cutoff);
+                    self.abstr_aux_levels(shallow, start_pos, num_open_binders)
+                }
+                Var { .. } | Sort { .. } | Const { .. } => panic!("should flag as no locals"),
+            };
+            self.expr_cache.abstr_cache_levels.insert((e, start_pos, num_open_binders), calcd);
+            calcd
+        }
+    }
+
+    /// Abstract deBruijn-level free variables back to bound variables.
+    /// Used by nanoda's locally-nameless TC.
+    pub fn abstr_levels(&mut self, e: ExprPtr<'t>, start_pos: u16) -> ExprPtr<'t> {
+        self.expr_cache.abstr_cache_levels.clear();
+        self.abstr_aux_levels(e, start_pos, self.dbj_level_counter)
     }
 
     fn subst_aux(&mut self, e: ExprPtr<'t>, ks: LevelsPtr<'t>, vs: LevelsPtr<'t>) -> ExprPtr<'t> {

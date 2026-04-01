@@ -186,6 +186,8 @@ pub struct ExprCache<'t> {
     /// Caches canonicalize: ExprPtr -> ExprPtr (fully Shift-resolved).
     /// Due to arena hash-consing, canonicalize(a) == canonicalize(b) iff sem_eq(a, b).
     pub(crate) canon_cache: FxHashMap<ExprPtr<'t>, ExprPtr<'t>>,
+    /// Cache for abstr_aux_levels (nanoda TC): (expr, start_pos, num_open_binders) -> expr
+    pub(crate) abstr_cache_levels: FxHashMap<(ExprPtr<'t>, u16, u16), ExprPtr<'t>>,
 }
 
 impl<'t> ExprCache<'t> {
@@ -197,6 +199,7 @@ impl<'t> ExprCache<'t> {
             dsubst_cache: new_fx_hash_map(),
             shift_cache: new_fx_hash_map(),
             canon_cache: new_fx_hash_map(),
+            abstr_cache_levels: new_fx_hash_map(),
         }
     }
 }
@@ -246,6 +249,16 @@ impl<'p> ExportFile<'p> {
         f(&mut tc)
     }
 
+    pub fn with_nanoda_tc_and_declar<F, A>(&self, d: crate::env::DeclarInfo<'p>, f: F) -> A
+    where
+        F: FnOnce(&mut crate::nanoda_tc::NanodaTypeChecker<'_, '_, 'p>) -> A, {
+        let mut dag = LeanDag::new(&self.config);
+        let mut ctx = TcCtx::new(self, &mut dag);
+        let env = self.new_env(EnvLimit::ByName(d.name));
+        let mut tc = crate::nanoda_tc::NanodaTypeChecker::new(&mut ctx, &env, Some(d));
+        f(&mut tc)
+    }
+
     pub fn with_pp<F, A>(&self, f: F) -> A
     where
         F: FnOnce(&mut PrettyPrinter<'_, '_, 'p>) -> A, {
@@ -263,6 +276,9 @@ pub struct TcCtx<'t, 'p> {
     /// type checking a declaration. These are dropped once the declaration is verified, since
     /// they are no longer needed.
     pub(crate) dag: &'t mut LeanDag<'t>,
+    /// Non-monotonic deBruijn level counter (nanoda TC compatibility).
+    /// Tracks the current number of open binders.
+    pub(crate) dbj_level_counter: u16,
     /// Monotonically increasing counter for unique free variables. Any two free variables created
     /// with the `mk_unique` constructor are unique within their `(ExportFile, TcCtx)` pair.
     pub(crate) unique_counter: u32,
@@ -274,6 +290,11 @@ pub struct TcCtx<'t, 'p> {
     pub(crate) canon_degraded: bool,
     /// Positive sem_eq cache: pairs (a,b) known semantically equal (degraded mode).
     pub(crate) sem_eq_cache: FxHashSet<(ExprPtr<'t>, ExprPtr<'t>)>,
+    /// Heartbeat counter: incremented in hot paths. When a deadline is set,
+    /// checked periodically to enforce per-declaration timeouts.
+    pub(crate) heartbeat: u64,
+    /// Deadline for the current declaration (None = no timeout).
+    pub(crate) deadline: Option<std::time::Instant>,
 }
 
 impl<'t, 'p: 't> TcCtx<'t, 'p> {
@@ -281,11 +302,18 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         Self {
             export_file,
             dag: tdag,
+            dbj_level_counter: 0u16,
             unique_counter: 0u32,
             expr_cache: ExprCache::new(),
             eager_mode: false,
             canon_degraded: false,
             sem_eq_cache: new_fx_hash_set(),
+            heartbeat: 0,
+            deadline: if export_file.config.declaration_timeout_secs > 0 {
+                Some(std::time::Instant::now() + std::time::Duration::from_secs(export_file.config.declaration_timeout_secs))
+            } else {
+                None
+            },
         }
     }
 
@@ -818,6 +846,55 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         self.alloc_expr(Expr::Local { binder_name, binder_style, binder_type, id, hash, struct_hash, fvar_list })
     }
 
+    /// Construct a free variable representing a deBruijn level, incrementing the counter.
+    /// Used by nanoda's locally-nameless TC approach.
+    pub fn mk_dbj_level(
+        &mut self,
+        binder_name: NamePtr<'t>,
+        binder_style: BinderStyle,
+        binder_type: ExprPtr<'t>,
+    ) -> ExprPtr<'t> {
+        let level = self.dbj_level_counter;
+        self.dbj_level_counter += 1;
+        let id = FVarId::DbjLevel(level);
+        let hash = hash64!(crate::expr::LOCAL_HASH, binder_name, binder_style, binder_type, id);
+        let struct_hash = hash;
+        let fvar_list = None;
+        self.alloc_expr(Expr::Local { binder_name, binder_style, binder_type, id, hash, struct_hash, fvar_list })
+    }
+
+    /// Construct a free variable representing a deBruijn level, reusing a particular level
+    /// counter, without incrementing the counter.
+    pub fn remake_dbj_level(
+        &mut self,
+        binder_name: NamePtr<'t>,
+        binder_style: BinderStyle,
+        binder_type: ExprPtr<'t>,
+        level: u16,
+    ) -> ExprPtr<'t> {
+        let id = FVarId::DbjLevel(level);
+        let hash = hash64!(crate::expr::LOCAL_HASH, binder_name, binder_style, binder_type, id);
+        let struct_hash = hash;
+        let fvar_list = None;
+        self.alloc_expr(Expr::Local { binder_name, binder_style, binder_type, id, hash, struct_hash, fvar_list })
+    }
+
+    /// Decrement the deBruijn level counter when closing a binder.
+    pub(crate) fn replace_dbj_level(&mut self, e: ExprPtr<'t>) {
+        match self.read_expr(e) {
+            Expr::Local { id: FVarId::DbjLevel(level), .. } => {
+                debug_assert_eq!(level + 1, self.dbj_level_counter);
+                self.dbj_level_counter -= 1;
+            }
+            _ => panic!("replace_dbj_level didn't get a DbjLevel Local"),
+        }
+    }
+
+    /// Convert a deBruijn level to a deBruijn index (bound variable).
+    pub(crate) fn fvar_to_bvar(&mut self, num_open_binders: u16, dbj_level: u16) -> ExprPtr<'t> {
+        self.mk_var((num_open_binders - dbj_level) - 1)
+    }
+
     /// Create a delayed shift node: Shift(inner, amount) means all free Var indices
     /// in `inner` are shifted up by `amount`. O(1) — no traversal.
     /// Collapses nested shifts and elides shifts on closed expressions.
@@ -974,6 +1051,20 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
                     cur = self.push_shift(inner, amount, cutoff);
                 }
                 _ => return cur,
+            }
+        }
+    }
+
+    /// Check the heartbeat counter and panic if the deadline has passed.
+    /// Called from hot paths (whnf, def_eq).
+    #[inline]
+    pub fn check_heartbeat(&mut self) {
+        self.heartbeat += 1;
+        if self.heartbeat % 50_000 == 0 {
+            if let Some(deadline) = self.deadline {
+                if std::time::Instant::now() > deadline {
+                    panic!("declaration timeout exceeded");
+                }
             }
         }
     }
@@ -1348,6 +1439,10 @@ pub struct Config {
     /// this timeout are skipped with a warning.
     #[serde(default)]
     pub declaration_timeout_secs: u64,
+
+    /// Use nanoda's original locally-nameless type checker instead of the shift-based one.
+    #[serde(default)]
+    pub use_nanoda_tc: bool,
 }
 
 impl TryFrom<&Path> for Config {

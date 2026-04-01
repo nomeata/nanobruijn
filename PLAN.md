@@ -176,12 +176,25 @@ Profile (init, pre-deletion baseline, 375B instructions): `force_shift_aux` was 
 dominant cost — shift cache had ~40% hit rate (8M hits, 12M misses). Now deleted;
 all shifting uses `push_shift` (one-level push) or `mk_shift` (O(1) wrapper).
 
+## Design goal: match nanoda's cache behavior
+
+Our checker should have **at least all the cache hits/reuse as nanoda**. The only
+acceptable overhead vs nanoda is:
+- More expensive hash computation (canonical hash rather than pointer identity)
+- The cost of creating/carrying Shift wrappers
+
+We should **not** be slower due to missed cache hits. If we are, we need to find and fix
+the cache miss, not paper over it with heuristics (DAG size thresholds, degraded mode,
+timeouts, etc.).
+
+**Approach**: Add tracing/instrumentation to both nanoda and our checker to compare cache
+hit rates side-by-side. nanoda's TC code is included in this project (module `nanoda_tc`)
+with a runtime flag to switch between checkers, making A/B comparison easy.
+
 ## TODO
 
-- **Performance**: ~4x slower than original on mathlib. Main overhead from canonicalize
-  (resolving Shift wrappers). Investigate reducing Shift wrapper creation or faster
-  canonicalization. Consider: eagerly canonicalize cache keys at store time to reduce
-  canonicalize calls on lookup.
+- **Tracing**: Instrument both nanoda TC and our TC to log cache hits/misses for whnf,
+  def_eq, infer. Compare on pathological declarations to find where we miss hits.
 
 - **Remove dead code**: `sem_eq` (now unused, replaced by `canon_eq`), thread_local
   profiling counters, `struct_hash`/`fvar_list_of` (unused)
