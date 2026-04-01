@@ -322,14 +322,17 @@ pub struct TcTrace {
     pub inst_aux_cache_hits: u64,
     pub inst_aux_elided: u64,
     pub push_shift_cache_hits: u64,
+    pub infer_cache_hash_hit: u64,
+    pub infer_cache_verify_fail: u64,
 }
 
 impl std::fmt::Display for TcTrace {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "def_eq={} whnf={} infer={} inst={} | hits: whnf={} eq={} infer={} | canon={}/{} ps={}/{} ceq={} | inst_aux={}/{}/{}",
+        write!(f, "def_eq={} whnf={} infer={} inst={} | hits: whnf={} eq={} infer={} infer_hash={} infer_vfail={} | canon={}/{} ps={}/{} ceq={} | inst_aux={}/{}/{}",
             self.def_eq_calls, self.whnf_calls, self.infer_calls,
             self.inst_calls,
             self.whnf_cache_hits, self.eq_cache_hits, self.infer_cache_hits,
+            self.infer_cache_hash_hit, self.infer_cache_verify_fail,
             self.canon_calls, self.canon_cache_hits,
             self.push_shift_calls, self.push_shift_cache_hits,
             self.canon_eq_calls,
@@ -1102,12 +1105,15 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         if self.heartbeat % 10_000 == 0 {
             if let Some(deadline) = self.deadline {
                 if std::time::Instant::now() > deadline {
-                    eprintln!("  [timeout] heartbeat={} | {}", self.heartbeat, self.trace);
+                    eprintln!("  [timeout] heartbeat={} dag={} | {}", self.heartbeat, self.dag.exprs.len(), self.trace);
                     panic!("declaration timeout exceeded");
                 }
             }
-            if self.heartbeat % 1_000_000 == 0 {
-                eprintln!("  [heartbeat] {} | {}", self.heartbeat, self.trace);
+            if self.heartbeat % 100_000 == 0 {
+                if let Some(deadline) = self.deadline {
+                    let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+                    eprintln!("  [hb] {} rem={:.1}s dag={} | {}", self.heartbeat, remaining.as_secs_f32(), self.dag.exprs.len(), self.trace);
+                }
             }
         }
     }

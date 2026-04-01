@@ -656,6 +656,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         let is_check = flag == InferFlag::Check;
         if let Some(bucket) = self.tc_cache.infer_cache.get(bucket_idx) {
             if let Some(&(stored_input, stored_result, stored_depth, checked)) = bucket.get(&canon) {
+                self.ctx.trace.infer_cache_hash_hit += 1;
                 // A Check entry can serve both flags; an InferOnly entry can only serve InferOnly.
                 if checked || !is_check {
                     if stored_depth == depth && self.ctx.canon_eq(stored_input, e) {
@@ -665,10 +666,12 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                     if depth > stored_depth {
                         let delta = depth - stored_depth;
                         if self.ctx.shift_eq(stored_input, e, delta) {
+                            self.ctx.trace.infer_cache_hits += 1;
                             return self.ctx.mk_shift(stored_result, delta);
                         }
                     }
                 }
+                self.ctx.trace.infer_cache_verify_fail += 1;
             }
         }
         let r = match self.ctx.read_expr(e) {

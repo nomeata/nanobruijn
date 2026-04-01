@@ -294,10 +294,79 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
             *cached
         } else {
             let n_substs = substs.len() as u16;
-            let calcd = match self.view_expr(e) {
+            let calcd = match self.read_expr(e) {
                 // These expressions should be unreachable since they return `n_loose_bvars() == 0`
                 Sort { .. } | Const { .. } | Local { .. } | StringLit { .. } | NatLit { .. } => panic!(),
-                Shift { .. } => unreachable!("view_expr never returns Shift"),
+                Shift { inner, amount, cutoff, .. } => {
+                    // Distribute Shift into constructor children, avoiding push_shift's
+                    // App spine traversal. inst_aux handles each Shift-wrapped child recursively.
+                    match self.read_expr(inner) {
+                        App { fun, arg, .. } => {
+                            let sf = self.mk_shift_cutoff(fun, amount, cutoff);
+                            let sa = self.mk_shift_cutoff(arg, amount, cutoff);
+                            let fun = self.inst_aux(sf, substs, offset, shift_down);
+                            let arg = self.inst_aux(sa, substs, offset, shift_down);
+                            self.mk_app(fun, arg)
+                        }
+                        Pi { binder_name, binder_style, binder_type, body, .. } => {
+                            let st = self.mk_shift_cutoff(binder_type, amount, cutoff);
+                            let sb = self.mk_shift_cutoff(body, amount, cutoff + 1);
+                            let binder_type = self.inst_aux(st, substs, offset, shift_down);
+                            let body = self.inst_aux(sb, substs, offset + 1, shift_down);
+                            self.mk_pi(binder_name, binder_style, binder_type, body)
+                        }
+                        Lambda { binder_name, binder_style, binder_type, body, .. } => {
+                            let st = self.mk_shift_cutoff(binder_type, amount, cutoff);
+                            let sb = self.mk_shift_cutoff(body, amount, cutoff + 1);
+                            let binder_type = self.inst_aux(st, substs, offset, shift_down);
+                            let body = self.inst_aux(sb, substs, offset + 1, shift_down);
+                            self.mk_lambda(binder_name, binder_style, binder_type, body)
+                        }
+                        Let { binder_name, binder_type, val, body, nondep, .. } => {
+                            let st = self.mk_shift_cutoff(binder_type, amount, cutoff);
+                            let sv = self.mk_shift_cutoff(val, amount, cutoff);
+                            let sb = self.mk_shift_cutoff(body, amount, cutoff + 1);
+                            let binder_type = self.inst_aux(st, substs, offset, shift_down);
+                            let val = self.inst_aux(sv, substs, offset, shift_down);
+                            let body = self.inst_aux(sb, substs, offset + 1, shift_down);
+                            self.mk_let(binder_name, binder_type, val, body, nondep)
+                        }
+                        Proj { ty_name, idx, structure, .. } => {
+                            let ss = self.mk_shift_cutoff(structure, amount, cutoff);
+                            let structure = self.inst_aux(ss, substs, offset, shift_down);
+                            self.mk_proj(ty_name, idx, structure)
+                        }
+                        Var { dbj_idx, .. } => {
+                            // Shift(Var(j), k, c): if j >= c, var is j+k, else j
+                            let shifted_idx = if dbj_idx >= cutoff { dbj_idx + amount } else { dbj_idx };
+                            if shifted_idx < offset {
+                                // Below substitution window
+                                if shift_down { self.mk_var(shifted_idx) } else { self.mk_var(shifted_idx) }
+                            } else {
+                                let rel_idx = shifted_idx - offset;
+                                if rel_idx < n_substs {
+                                    let val = substs[substs.len() - 1 - rel_idx as usize];
+                                    if offset > 0 { self.mk_shift(val, offset) } else { val }
+                                } else if shift_down {
+                                    self.mk_var(shifted_idx - n_substs)
+                                } else {
+                                    // Beyond range, no shift_down: return original
+                                    e
+                                }
+                            }
+                        }
+                        // Nested Shift: collapse/force
+                        Shift { inner: inner2, amount: a2, cutoff: c2, .. } => {
+                            let forced = self.push_shift(inner2, a2, c2);
+                            let outer = self.mk_shift_cutoff(forced, amount, cutoff);
+                            let r = self.inst_aux(outer, substs, offset, shift_down);
+                            self.expr_cache.inst_cache.insert((e, offset), r);
+                            return r;
+                        }
+                        // Closed expressions: unreachable (caught by num_loose_bvars check)
+                        Sort { .. } | Const { .. } | Local { .. } | StringLit { .. } | NatLit { .. } => panic!(),
+                    }
+                }
                 Var { dbj_idx, .. } => {
                     debug_assert!(dbj_idx >= offset);
                     let rel_idx = dbj_idx - offset;
