@@ -73,15 +73,23 @@ substitution value shifting — fully lazy, no traversal.
 `push_shift` handles nested Shift with mismatched cutoff via two sequential
 shallow forces.
 
-### Semantic equality (sem_eq)
+### Canonicalize and canon_eq (replaces sem_eq)
 
-`sem_eq(a, b)` checks structural equality modulo internal Shift wrappers. Implemented
-as `shift_eq(a, b, 0)` with the delta=0 short-circuit removed. Traverses the expression
-structure, absorbing Shift nodes into the comparison delta. This replaces pointer equality
-(`a == b`) throughout the system for all correctness-critical comparisons.
+`canonicalize(e)` fully resolves all Shift wrappers in an expression tree, memoized in
+`expr_cache.canon_cache`. Due to arena hash-consing (`alloc_expr` deduplicates),
+`canonicalize(a) == canonicalize(b)` iff the expressions are semantically equal modulo shifts.
 
-`shift_eq_aux` now handles Shift on the b-side when `amount > delta` by reversing the
+`canon_eq(a, b)` checks `a == b || canonicalize(a) == canonicalize(b)` — pointer equality
+first, then canonicalize both sides. Replaces `sem_eq` throughout the system.
+
+**Key optimization**: `whnf`, `whnf_no_unfolding`, and `whnf_no_unfolding_cheap_proj` all
+canonicalize their results before returning. This ensures downstream code (especially def_eq)
+can rely on pointer equality for already-reduced expressions, reducing canonicalize calls from
+11M to much fewer (most comparisons are pointer-equal after whnf canonicalization).
+
+`shift_eq_aux` handles Shift on the b-side when `amount > delta` by reversing the
 comparison: `shift(a, delta) == shift(inner_b, amount)` iff `shift(inner_b, amount - delta) == a`.
+Still used for cross-depth shift-invariant cache lookups (delta > 0).
 
 Used in: `def_eq_quick_check`, all cache collision guards (eq_cache, failure_cache,
 defeq_open_lookup), whnf/whnf_no_unfolding cache hits, infer cache hits,
@@ -159,9 +167,10 @@ Result is a boolean (no delta to apply). On init: ~39K shift-invariant hits out 
 
 | Benchmark | nanoda (locally nameless) | lean-slop-kernel |
 |-----------|--------------------------|------------------|
-| Init (54k decls, 310MB) | 21s | ~27s |
+| Init (54k decls, 310MB) | 24s | 35s (1.5x) |
 | app-lam N=4000 | 8.3s | 10ms (830x faster) |
-| Mathlib (630k decls, 4.9GB) | works (<9GB) | in progress (past 120k crash, running) |
+| Mathlib (630k decls, 4.9GB) | ~16min (est.) | ~65min (est. ~4x) |
+| sheafedSpaceMap_comp (worst case) | ~2s | 12s (6x) |
 
 Profile (init, pre-deletion baseline, 375B instructions): `force_shift_aux` was the
 dominant cost — shift cache had ~40% hit rate (8M hits, 12M misses). Now deleted;
@@ -169,12 +178,13 @@ all shifting uses `push_shift` (one-level push) or `mk_shift` (O(1) wrapper).
 
 ## TODO
 
-- **mk_shift_cutoff optimizations** (implemented, verify on larger workloads):
-  - Short-circuit: if cutoff > fvar_ub, expression has no free vars above cutoff → no-op
-  - Cutoff normalization: if fvar_lb >= cutoff, normalize cutoff to 0 for more collapsing
+- **Performance**: ~4x slower than original on mathlib. Main overhead from canonicalize
+  (resolving Shift wrappers). Investigate reducing Shift wrapper creation or faster
+  canonicalization. Consider: eagerly canonicalize cache keys at store time to reduce
+  canonicalize calls on lookup.
 
-- **Fix mathlib OOM**: instrument memory per-declaration, find what's blowing up;
-  consider periodic cache eviction or more compact expression representation
+- **Remove dead code**: `sem_eq` (now unused, replaced by `canon_eq`), thread_local
+  profiling counters, `struct_hash`/`fvar_list_of` (unused)
 
 - **Remove dead locally-nameless code** (Local variant, FVarId, abstr, etc.)
 
