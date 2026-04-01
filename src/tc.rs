@@ -703,7 +703,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                 self.ctx.trace.infer_cache_hash_hit += 1;
                 // A Check entry can serve both flags; an InferOnly entry can only serve InferOnly.
                 if checked || !is_check {
-                    if stored_depth == depth && self.ctx.canon_eq(stored_input, e) {
+                    if stored_depth == depth && self.ctx.sem_eq(stored_input, e) {
                         self.ctx.trace.infer_cache_hits += 1;
                         return stored_result;
                     }
@@ -881,26 +881,9 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             // assert that the type annotation of the let value is appropriate.
             self.assert_def_eq(val_ty, binder_type);
         }
-        // Use let-in-context for deep let chains to avoid O(N²) cascading
-        // substitution. For shallow chains, eager substitution is more
-        // efficient because it avoids Shift wrapper proliferation.
-        let mut let_depth = 0u32;
-        {
-            let mut b = body;
-            while let Let { body: inner, .. } = self.ctx.read_expr(b) {
-                let_depth += 1;
-                b = inner;
-            }
-        }
-        if let_depth >= 50 {
-            self.push_local_let(binder_type, val);
-            let result = self.infer(body, flag);
-            self.pop_local();
-            self.ctx.inst_beta(result, &[val])
-        } else {
-            let body = self.ctx.inst_beta(body, &[val]);
-            self.infer(body, flag)
-        }
+        // Eager: substitute first, then infer.
+        let subst_body = self.ctx.inst_beta(body, &[val]);
+        self.infer(subst_body, flag)
     }
     
     // Not well tested, used for introspection/debugging.
@@ -944,7 +927,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                 let structure = self.strong_reduce(structure, reduce_types, reduce_proofs);
                 let x = self.ctx.mk_proj(ty_name, idx, structure);
                 let y = self.whnf(x);
-                if !self.ctx.canon_eq(y, x) {
+                if !self.ctx.sem_eq(y, x) {
                     self.strong_reduce(y, reduce_types, reduce_proofs)
                 } else {
                     x
@@ -961,7 +944,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         self.ctx.trace.whnf_calls += 1;
         self.ctx.check_heartbeat();
         let r = stacker::maybe_grow(64 * 1024, 2 * 1024 * 1024, || self.whnf_inner(e));
-        self.ctx.resolve_shifts_for_whnf(r)
+        r
     }
 
     fn whnf_inner(&mut self, e: ExprPtr<'t>) -> ExprPtr<'t> {
@@ -1014,7 +997,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                     self.ctx.trace.whnf_cache_hits += 1;
                     return stored_result;
                 }
-                if self.ctx.canon_eq(stored_input, e) {
+                if self.ctx.sem_eq(stored_input, e) {
                     self.ctx.trace.whnf_cache_hits += 1;
                     return stored_result;
                 }
@@ -1038,6 +1021,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             } else if let Some(next_term) = self.unfold_def(whnfd) {
                 cursor = next_term;
             } else {
+                let whnfd = self.ctx.resolve_shifts(whnfd);
                 // Only store if no entry exists or if this bvar_ub is smaller (better for future shift hits)
                 if let Some(bucket) = self.tc_cache.whnf_cache.get_mut(whnf_bucket_idx) {
                     if bucket.get(&canon).map_or(true, |&(_, _, stored_bvar_ub)| e_bvar_ub < stored_bvar_ub) {
@@ -1051,12 +1035,12 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
 
     fn whnf_no_unfolding_cheap_proj(&mut self, e: ExprPtr<'t>) -> ExprPtr<'t> {
         let r = self.whnf_no_unfolding_aux(e, true);
-        self.ctx.resolve_shifts_for_whnf(r)
+        self.ctx.resolve_shifts(r)
     }
 
     pub fn whnf_no_unfolding(&mut self, e: ExprPtr<'t>) -> ExprPtr<'t> {
         let r = self.whnf_no_unfolding_aux(e, false);
-        self.ctx.resolve_shifts_for_whnf(r)
+        self.ctx.resolve_shifts(r)
     }
 
     fn whnf_no_unfolding_aux(&mut self, e: ExprPtr<'t>, cheap_proj: bool) -> ExprPtr<'t> {
@@ -1105,7 +1089,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             let wnu_bucket_idx = if cur_bvar_ub == 0 { 0 } else { self.local_ctx.len() };
             if let Some(bucket) = self.tc_cache.whnf_no_unfolding_cache.get(wnu_bucket_idx) {
                 if let Some(&(stored_input, stored_result, _stored_bvar_ub)) = bucket.get(&cur_canon) {
-                    if stored_input == cur || self.ctx.canon_eq(stored_input, cur) {
+                    if stored_input == cur || self.ctx.sem_eq(stored_input, cur) {
                         break stored_result;
                     }
                 }
@@ -1132,6 +1116,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                         n_args += 1;
                         e = body;
                     }
+                    self.ctx.trace.whnf_beta_reductions += 1;
                     e = self.ctx.inst_beta(e, &args[..n_args]);
                     let next = self.ctx.foldl_apps(e, args.into_iter().skip(n_args));
                     if !cheap_proj { cache_entries.push(cur); }
@@ -1142,11 +1127,18 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                     debug_assert!(args.is_empty());
                     break self.ctx.foldl_apps(e_fun, args.into_iter());
                 }
-                Let { val, body, .. } => {
-                    let e = self.ctx.inst_beta(body, &[val]);
-                    let next = self.ctx.foldl_apps(e, args.into_iter());
+                Let { binder_type, val, body, .. } => {
+                    self.ctx.trace.whnf_let_reductions += 1;
+                    // Lazy zeta: push let-binding, reduce body in extended context,
+                    // then pop and inst_beta on the (much smaller) whnf result.
+                    // This avoids unbounded inst_beta growth on nested lets.
+                    self.push_local_let(binder_type, val);
+                    let inner = self.ctx.foldl_apps(body, args.into_iter());
+                    let reduced = self.whnf_no_unfolding_aux(inner, cheap_proj);
+                    self.pop_local();
+                    let result = self.ctx.inst_beta(reduced, &[val]);
                     if !cheap_proj { cache_entries.push(cur); }
-                    cur = next;
+                    cur = result;
                     continue;
                 }
                 Const { name, levels, .. } =>
@@ -1162,9 +1154,8 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                         break self.ctx.foldl_apps(e_fun, args.into_iter());
                     },
                 Var { dbj_idx, .. } => {
-                    // Zeta reduction: if this var refers to a let-binding in context,
-                    // unfold it and continue reducing.
                     if let Some(val) = self.lookup_var_value(dbj_idx) {
+                        self.ctx.trace.zeta_reductions += 1;
                         let next = self.ctx.foldl_apps(val, args.into_iter());
                         if !cheap_proj { cache_entries.push(cur); }
                         cur = next;
@@ -1209,7 +1200,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         }
         if let (NatLit { .. }, NatLit { .. }) = (self.ctx.read_expr(x), self.ctx.read_expr(y)) {
             assert!(self.ctx.export_file.config.nat_extension);
-            return Some(self.ctx.canon_eq(x, y))
+            return Some(self.ctx.sem_eq(x, y))
         }
         if let (Some(x_pred), Some(y_pred)) = (self.ctx.pred_of_nat_succ(x), self.ctx.pred_of_nat_succ(y)) {
             Some(self.def_eq(x_pred, y_pred))
@@ -1344,7 +1335,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                     } else {
                         let (xn0, yn0) = (x_n, y_n);
                         let (x_n, y_n) = (self.whnf_no_unfolding(xn0), self.whnf_no_unfolding(yn0));
-                        if !self.ctx.canon_eq(x_n, xn0) || !self.ctx.canon_eq(y_n, yn0) {
+                        if !self.ctx.sem_eq(x_n, xn0) || !self.ctx.sem_eq(y_n, yn0) {
                             self.def_eq(x_n, y_n)
                         } else {
                             self.def_eq_app(x_n, y_n)
@@ -1536,7 +1527,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
     fn def_eq_quick_check(&mut self, x: ExprPtr<'t>, y: ExprPtr<'t>) -> Option<bool> {
         // Semantic equality: handles internal Shift wrappers transparently.
         // Subsumes the old pointer equality, Shift-stripping, and shift_eq checks.
-        if self.ctx.canon_eq(x, y) {
+        if self.ctx.sem_eq(x, y) {
             return Some(true)
         }
         if self.eq_cache_contains(x, y) {
@@ -1559,7 +1550,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         let (key, swapped) = self.defeq_canon_key(x, y);
         if let Some(&(stored_a, stored_b)) = self.tc_cache.failure_cache.get(&key) {
             let (qx, qy) = if swapped { (y, x) } else { (x, y) };
-            if self.ctx.canon_eq(stored_a, qx) && self.ctx.canon_eq(stored_b, qy) {
+            if self.ctx.sem_eq(stored_a, qx) && self.ctx.sem_eq(stored_b, qy) {
                 return true;
             }
         }
@@ -1601,7 +1592,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         let (key, swapped) = self.defeq_canon_key(x, y);
         if let Some(&(stored_a, stored_b)) = self.tc_cache.eq_cache.get(&key) {
             let (qx, qy) = if swapped { (y, x) } else { (x, y) };
-            let hit = self.ctx.canon_eq(stored_a, qx) && self.ctx.canon_eq(stored_b, qy);
+            let hit = self.ctx.sem_eq(stored_a, qx) && self.ctx.sem_eq(stored_b, qy);
             if hit { self.ctx.trace.eq_cache_hits += 1; }
             hit
         } else {
@@ -1642,7 +1633,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         let depth = self.local_ctx.len() as u16;
         let (qx, qy) = if swapped { (y, x) } else { (x, y) };
         // Exact depth match with semantic equality
-        if stored_depth == depth && self.ctx.canon_eq(stored_a, qx) && self.ctx.canon_eq(stored_b, qy) {
+        if stored_depth == depth && self.ctx.sem_eq(stored_a, qx) && self.ctx.sem_eq(stored_b, qy) {
             return true;
         }
         // Shift-invariant match
@@ -1748,7 +1739,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         let f = self.ctx.unfold_apps_fun(e);
         if let Proj { .. } = self.ctx.read_expr(f) {
             let eprime = self.whnf_no_unfolding(e);
-            if !self.ctx.canon_eq(eprime, e) {
+            if !self.ctx.sem_eq(eprime, e) {
                 return Some(eprime)
             }
         }
