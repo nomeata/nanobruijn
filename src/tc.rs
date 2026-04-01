@@ -117,21 +117,46 @@ impl<'p> ExportFile<'p> {
         let total = self.declars.len();
         let start = std::time::Instant::now();
         let mut last_report = start;
+        let max_decl = self.config.max_declarations;
+        let skip_decl = self.config.skip_declarations;
+        let timeout_secs = self.config.declaration_timeout_secs;
+        let mut skipped_count = 0usize;
         for (i, declar) in self.declars.values().enumerate() {
+            if max_decl > 0 && i >= max_decl {
+                eprintln!("[stopping at {} declarations as configured]", max_decl);
+                break;
+            }
+            if i < skip_decl { continue; }
             let decl_start = std::time::Instant::now();
-            if i % 1000 == 0 {
+            if i % 1000 == 0 || (skip_decl > 0 && i == skip_decl) {
                 let elapsed = decl_start.duration_since(start).as_millis();
                 let delta = decl_start.duration_since(last_report).as_millis();
                 eprintln!("[{}/{} {}ms +{}ms]", i, total, elapsed, delta);
                 last_report = decl_start;
             }
-            self.check_declar(declar);
+            if timeout_secs > 0 {
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    self.check_declar(declar);
+                }));
+                if result.is_err() {
+                    self.with_ctx(|ctx| {
+                        eprintln!("  PANIC #{}: {:?} (skipping)", i, ctx.debug_print(declar.info().name));
+                    });
+                    skipped_count += 1;
+                    continue;
+                }
+            } else {
+                self.check_declar(declar);
+            }
             let decl_time = decl_start.elapsed().as_millis();
             if decl_time > 1000 {
                 self.with_ctx(|ctx| {
                     eprintln!("  SLOW #{}: {:?} took {}ms", i, ctx.debug_print(declar.info().name), decl_time);
                 });
             }
+        }
+        if skipped_count > 0 {
+            eprintln!("[WARNING: {} declarations panicked and were skipped]", skipped_count);
         }
     }
 
@@ -824,7 +849,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
 
     pub fn whnf(&mut self, e: ExprPtr<'t>) -> ExprPtr<'t> {
         let r = stacker::maybe_grow(64 * 1024, 2 * 1024 * 1024, || self.whnf_inner(e));
-        self.ctx.canonicalize(r)
+        self.ctx.resolve_shifts_for_whnf(r)
     }
 
     fn whnf_inner(&mut self, e: ExprPtr<'t>) -> ExprPtr<'t> {
@@ -900,12 +925,12 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
 
     fn whnf_no_unfolding_cheap_proj(&mut self, e: ExprPtr<'t>) -> ExprPtr<'t> {
         let r = self.whnf_no_unfolding_aux(e, true);
-        self.ctx.canonicalize(r)
+        self.ctx.resolve_shifts_for_whnf(r)
     }
 
     pub fn whnf_no_unfolding(&mut self, e: ExprPtr<'t>) -> ExprPtr<'t> {
         let r = self.whnf_no_unfolding_aux(e, false);
-        self.ctx.canonicalize(r)
+        self.ctx.resolve_shifts_for_whnf(r)
     }
 
     fn whnf_no_unfolding_aux(&mut self, e: ExprPtr<'t>, cheap_proj: bool) -> ExprPtr<'t> {

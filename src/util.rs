@@ -268,7 +268,12 @@ pub struct TcCtx<'t, 'p> {
     pub(crate) unique_counter: u32,
     /// A cache for instantiation, free variable abstraction, and level substitution
     pub(crate) expr_cache: ExprCache<'t>,
-    pub(crate) eager_mode: bool
+    pub(crate) eager_mode: bool,
+    /// When true, canonicalize detected DAG explosion and switched to
+    /// peel_shifts + cached_sem_eq mode for the rest of this declaration.
+    pub(crate) canon_degraded: bool,
+    /// Positive sem_eq cache: pairs (a,b) known semantically equal (degraded mode).
+    pub(crate) sem_eq_cache: FxHashSet<(ExprPtr<'t>, ExprPtr<'t>)>,
 }
 
 impl<'t, 'p: 't> TcCtx<'t, 'p> {
@@ -278,7 +283,9 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
             dag: tdag,
             unique_counter: 0u32,
             expr_cache: ExprCache::new(),
-            eager_mode: false
+            eager_mode: false,
+            canon_degraded: false,
+            sem_eq_cache: new_fx_hash_set(),
         }
     }
 
@@ -866,6 +873,20 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         if amount == 0 {
             return e;
         }
+        // In degraded mode, memoize push_shift to avoid redundant App spine traversals
+        if self.canon_degraded {
+            let expr = self.read_expr(e);
+            if expr.num_loose_bvars() <= cutoff {
+                return e;
+            }
+            let cache_key = (e, amount, cutoff);
+            if let Some(&result) = self.expr_cache.shift_cache.get(&cache_key) {
+                return result;
+            }
+            let result = stacker::maybe_grow(64 * 1024, 2 * 1024 * 1024, || self.push_shift_inner(e, amount, cutoff));
+            self.expr_cache.shift_cache.insert(cache_key, result);
+            return result;
+        }
         stacker::maybe_grow(64 * 1024, 2 * 1024 * 1024, || self.push_shift_inner(e, amount, cutoff))
     }
 
@@ -943,22 +964,62 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         }
     }
 
-    /// Semantic equality via canonicalization: checks pointer equality first,
-    /// then canonicalizes both sides and compares pointers.
-    /// More efficient than calling `canonicalize` twice when pointer equality succeeds.
-    #[inline]
-    pub fn canon_eq(&mut self, a: ExprPtr<'t>, b: ExprPtr<'t>) -> bool {
-        a == b || self.canonicalize(a) == self.canonicalize(b)
+    /// Peel off top-level Shift wrappers only (non-recursive).
+    /// Ensures pattern matching on the expression head works.
+    pub fn peel_shifts(&mut self, e: ExprPtr<'t>) -> ExprPtr<'t> {
+        let mut cur = e;
+        loop {
+            match self.read_expr(cur) {
+                Expr::Shift { inner, amount, cutoff, .. } => {
+                    cur = self.push_shift(inner, amount, cutoff);
+                }
+                _ => return cur,
+            }
+        }
     }
 
-    /// Fully resolve all Shift wrappers in an expression tree, returning
-    /// an expression with no Shift nodes. Due to arena hash-consing,
-    /// `canonicalize(a) == canonicalize(b)` iff `sem_eq(a, b)`.
-    /// Memoized in `expr_cache.canon_cache` so each unique ExprPtr is
-    /// processed at most once.
+    /// Resolve Shift wrappers on whnf results. Uses canonicalize normally,
+    /// peel_shifts in degraded mode (avoids expression explosion).
+    pub fn resolve_shifts_for_whnf(&mut self, e: ExprPtr<'t>) -> ExprPtr<'t> {
+        if self.canon_degraded {
+            self.peel_shifts(e)
+        } else {
+            self.canonicalize(e)
+        }
+    }
+
+    /// Semantic equality: pointer equality first, then canonicalize (normal)
+    /// or cached sem_eq (degraded).
+    #[inline]
+    pub fn canon_eq(&mut self, a: ExprPtr<'t>, b: ExprPtr<'t>) -> bool {
+        if a == b { return true; }
+        if self.canon_degraded {
+            let key = if a.get_hash() <= b.get_hash() { (a, b) } else { (b, a) };
+            if self.sem_eq_cache.contains(&key) { return true; }
+            let result = TcCtx::sem_eq(self, a, b);
+            if result {
+                self.sem_eq_cache.insert(key);
+            }
+            result
+        } else {
+            self.canonicalize(a) == self.canonicalize(b)
+        }
+    }
+
+    /// Fully resolve all Shift wrappers in an expression tree. Memoized.
+    /// Switches to degraded mode if DAG explosion is detected.
     pub fn canonicalize(&mut self, e: ExprPtr<'t>) -> ExprPtr<'t> {
         if let Some(&result) = self.expr_cache.canon_cache.get(&e) {
             return result;
+        }
+        // Detect DAG explosion: switch to degraded mode if too many new nodes
+        if !self.canon_degraded && self.dag.exprs.len() > 500_000 {
+            eprintln!("  [canon_degraded] DAG explosion: {} new exprs", self.dag.exprs.len());
+            self.canon_degraded = true;
+            return self.peel_shifts(e);
+        }
+        if self.canon_degraded {
+            return self.peel_shifts(e);
         }
         let result = stacker::maybe_grow(64 * 1024, 2 * 1024 * 1024, || match self.read_expr(e) {
             Expr::Shift { inner, amount, cutoff, .. } => {
@@ -1271,10 +1332,22 @@ pub struct Config {
     #[serde(default = "default_true")]
     pub print_axioms: bool,
 
-    /// If set to `true`, will allow all axioms to be admitted to the environment. 
-    /// This is checked so as to be mutually exclusive with any of the axiom allow list/whitelist features.
+    /// If set to `true`, will allow all axioms to be admitted to the environment.
     #[serde(default)]
     pub unsafe_permit_all_axioms: bool,
+
+    /// Maximum number of declarations to check (0 = unlimited). For debugging.
+    #[serde(default)]
+    pub max_declarations: usize,
+
+    /// Number of declarations to skip at the start. For debugging.
+    #[serde(default)]
+    pub skip_declarations: usize,
+
+    /// Per-declaration timeout in seconds (0 = unlimited). Declarations exceeding
+    /// this timeout are skipped with a warning.
+    #[serde(default)]
+    pub declaration_timeout_secs: u64,
 }
 
 impl TryFrom<&Path> for Config {
