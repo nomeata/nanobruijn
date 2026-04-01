@@ -1021,7 +1021,6 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             } else if let Some(next_term) = self.unfold_def(whnfd) {
                 cursor = next_term;
             } else {
-                let whnfd = self.ctx.resolve_shifts(whnfd);
                 // Only store if no entry exists or if this bvar_ub is smaller (better for future shift hits)
                 if let Some(bucket) = self.tc_cache.whnf_cache.get_mut(whnf_bucket_idx) {
                     if bucket.get(&canon).map_or(true, |&(_, _, stored_bvar_ub)| e_bvar_ub < stored_bvar_ub) {
@@ -1034,16 +1033,15 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
     }
 
     fn whnf_no_unfolding_cheap_proj(&mut self, e: ExprPtr<'t>) -> ExprPtr<'t> {
-        let r = self.whnf_no_unfolding_aux(e, true);
-        self.ctx.resolve_shifts(r)
+        self.whnf_no_unfolding_aux(e, true)
     }
 
     pub fn whnf_no_unfolding(&mut self, e: ExprPtr<'t>) -> ExprPtr<'t> {
-        let r = self.whnf_no_unfolding_aux(e, false);
-        self.ctx.resolve_shifts(r)
+        self.whnf_no_unfolding_aux(e, false)
     }
 
     fn whnf_no_unfolding_aux(&mut self, e: ExprPtr<'t>, cheap_proj: bool) -> ExprPtr<'t> {
+        self.ctx.trace.wnu_calls += 1;
         // whnf_no_unfolding is shift-equivariant: peel top-level Shifts.
         // Must also shrink local_ctx because reduce_rec → to_ctor_when_k → infer
         // depends on local_ctx.
@@ -1058,6 +1056,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             }
         }
         if total_shift > 0 {
+            self.ctx.trace.wnu_shift_peel += 1;
             if self.local_ctx.is_empty() {
                 let r = self.whnf_no_unfolding_aux(e, cheap_proj);
                 return self.ctx.push_shift(r, total_shift, 0);
@@ -1090,6 +1089,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             if let Some(bucket) = self.tc_cache.whnf_no_unfolding_cache.get(wnu_bucket_idx) {
                 if let Some(&(stored_input, stored_result, _stored_bvar_ub)) = bucket.get(&cur_canon) {
                     if stored_input == cur || self.ctx.sem_eq(stored_input, cur) {
+                        self.ctx.trace.wnu_cache_hits += 1;
                         break stored_result;
                     }
                 }
