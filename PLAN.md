@@ -167,7 +167,7 @@ Result is a boolean (no delta to apply). On init: ~39K shift-invariant hits out 
 
 | Benchmark | nanoda (locally nameless) | lean-slop-kernel |
 |-----------|--------------------------|------------------|
-| Init (54k decls, 310MB) | 26s | 33s (1.27x) |
+| Init (54k decls, 310MB) | 26s | 31s (1.19x) |
 | app-lam N=4000 | 8.3s | 10ms (830x faster) |
 | Mathlib (630k decls, 4.9GB) | ~16min (est.) | ~65min (est. ~4x) |
 | sheafedSpaceMap_comp (worst case) | ~2s | 12s (6x) |
@@ -233,9 +233,9 @@ each operation.
 intermediate Shift wrapper expressions when distributing shifts to children. When encountering
 `Shift { inner, amount, cutoff }`, it recurses on `inner` directly with the shift params.
 
-| Metric (init 54k decls) | Before | After |
-|--------------------------|--------|-------|
-| Wall time | 54s (2.1x nanoda) | 33s (1.27x nanoda) |
+| Metric (init 54k decls) | Before | After | + nlbv canon skip |
+|--------------------------|--------|-------|-------------------|
+| Wall time | 54s (2.1x nanoda) | 33s (1.27x) | 31s (1.19x) |
 
 | Metric (#122833, 10s timeout) | Before | After |
 |-------------------------------|--------|-------|
@@ -248,16 +248,30 @@ doesn't reduce inst_aux traversal count — the shift TC still traverses ~4.8x m
 nodes than nanoda (938K vs 196K). This is fundamental: Shift wrappers in the expression tree
 add layers that inst_aux must traverse through, even with the combined approach.
 
-**Canonicalize-on-inst-result experiment**: Adding `canonicalize(result)` after inst_beta
-made things much worse (376K canon calls, only 37% progress at timeout). The cost of deep
-canonicalization on every inst_beta result far exceeds the benefit of preventing cascading.
+**Experiments that didn't help**:
+- `canonicalize(result)` after inst_beta: 376K canon calls, only 37% progress at timeout.
+  Deep canonicalization on every inst_beta result far exceeds the benefit of preventing cascading.
+- `canonicalize(body)` before inst_beta: 444K canon calls, less progress per heartbeat.
+  Even targeted pre-canonicalization adds too much push_shift overhead.
+- Eager `shift_expr_aux(val, offset, 0)` instead of `mk_shift(val, offset)` in inst_aux Var case:
+  Much worse (1.23M heartbeats at timeout vs 1.9M). Full traversal of substitution values is
+  more expensive than the cascading lazy Shift wrappers.
+- Unchanged-children check in inst_aux (avoid alloc when children unchanged): slightly slower
+  due to comparison overhead outweighing the rare alloc savings.
+- Skip export DAG lookup for Shift exprs in alloc_expr: slightly slower from matches! overhead.
+
+**Root cause of 4.8x inst_aux gap**: Each inst_beta creates `mk_shift(val, offset)` wrappers
+for substitution values under binders. These Shift wrappers cascade — subsequent inst_beta
+calls must traverse through them, creating more wrappers. This is the fundamental cost of
+deferred shifts. Nanoda's locally-nameless approach substitutes fvars that don't need shifting.
 
 ## TODO
 
-- **Reduce inst_aux traversal count**: The 4.8x gap is the main blocker. Ideas:
-  - Avoid creating Shift wrappers in the first place (eagerly resolve at creation time for small exprs?)
-  - Shallow canonicalize at inst_beta callsites that produce whnf-consumed results
-  - Fuse shift resolution into whnf rather than doing separate canonicalize passes
+- **Reduce inst_aux traversal count**: The 4.8x gap (938K vs 196K) is the main pathological-
+  case blocker, but general performance is now 1.19x. Ideas:
+  - Persistent inst_cache across inst_beta calls (include subst in key)
+  - Size-bounded eager shift (resolve small vals, defer large ones)
+  - Avoid creating Shift wrappers for subst vals that will be immediately consumed by whnf
 
 - **Reduce canonicalize calls**: canon_eq is called ~9K times for cache verification.
   Consider cheaper verification (e.g., pointer equality after whnf, or hash-only comparison).
