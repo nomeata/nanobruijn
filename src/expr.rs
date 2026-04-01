@@ -264,6 +264,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
     /// Vars beyond the substitution range are left unchanged (no shifting).
     /// Used for local-to-local replacement (e.g. replace_params, inductive.rs).
     pub fn inst(&mut self, e: ExprPtr<'t>, substs: &[ExprPtr<'t>]) -> ExprPtr<'t> {
+        self.trace.inst_calls += 1;
         if substs.is_empty() {
             return e
         }
@@ -274,6 +275,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
     /// Like `inst`, but also shifts down Var indices beyond the substitution range.
     /// Used for beta reduction and let-substitution where binders are being removed.
     pub fn inst_beta(&mut self, e: ExprPtr<'t>, substs: &[ExprPtr<'t>]) -> ExprPtr<'t> {
+        self.trace.inst_calls += 1;
         if substs.is_empty() {
             return e
         }
@@ -282,9 +284,13 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
     }
 
     fn inst_aux(&mut self, e: ExprPtr<'t>, substs: &[ExprPtr<'t>], offset: u16, shift_down: bool) -> ExprPtr<'t> {
+        self.trace.inst_aux_calls += 1;
+        self.check_heartbeat();
         if self.num_loose_bvars(e) <= offset {
+            self.trace.inst_aux_elided += 1;
             e
         } else if let Some(cached) = self.expr_cache.inst_cache.get(&(e, offset)) {
+            self.trace.inst_aux_cache_hits += 1;
             *cached
         } else {
             let n_substs = substs.len() as u16;

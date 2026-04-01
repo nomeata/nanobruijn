@@ -87,7 +87,7 @@ pub struct TypeChecker<'x, 't, 'p> {
 
 impl<'p> ExportFile<'p> {
     /// The entry point for checking a declaration `d`.
-    pub fn check_declar(&self, d: &Declar<'p>) {
+    pub fn check_declar(&self, d: &Declar<'p>) -> crate::util::TcTrace {
         if self.config.use_nanoda_tc {
             self.check_declar_nanoda(d)
         } else {
@@ -96,53 +96,57 @@ impl<'p> ExportFile<'p> {
     }
 
     /// Check using our shift-based TC.
-    fn check_declar_shift(&self, d: &Declar<'p>) {
+    fn check_declar_shift(&self, d: &Declar<'p>) -> crate::util::TcTrace {
         use Declar::*;
         match d {
-            Axiom { .. } => self.with_tc_and_declar(*d.info(), |tc| tc.check_declar_info(d).unwrap()),
-            Inductive(..) => self.check_inductive_declar(d),
-            Quot { .. } => self.with_ctx(|ctx| crate::quot::check_quot(ctx, d)),
+            Axiom { .. } => self.with_tc_and_declar(*d.info(), |tc| tc.check_declar_info(d).unwrap()).1,
+            Inductive(..) => { self.check_inductive_declar(d); crate::util::TcTrace::default() },
+            Quot { .. } => { self.with_ctx(|ctx| crate::quot::check_quot(ctx, d)); crate::util::TcTrace::default() },
             Definition { val, .. } | Theorem { val, .. } | Opaque { val, .. } =>
                 self.with_tc_and_declar(*d.info(), |tc| {
                     tc.check_declar_info(d).unwrap();
                     let inferred_type = tc.infer(*val, crate::tc::InferFlag::Check);
                     tc.assert_def_eq(inferred_type, d.info().ty);
-                }),
+                }).1,
             Constructor(ctor_data) => {
-                self.with_tc_and_declar(*d.info(), |tc| tc.check_declar_info(d).unwrap());
+                let trace = self.with_tc_and_declar(*d.info(), |tc| tc.check_declar_info(d).unwrap()).1;
                 assert!(self.declars.get(&ctor_data.inductive_name).is_some());
+                trace
             }
             Recursor(recursor_data) => {
-                self.with_tc_and_declar(*d.info(), |tc| tc.check_declar_info(d).unwrap());
+                let trace = self.with_tc_and_declar(*d.info(), |tc| tc.check_declar_info(d).unwrap()).1;
                 for ind_name in recursor_data.all_inductives.iter() {
                     assert!(self.declars.get(ind_name).is_some())
                 }
+                trace
             }
         }
     }
 
     /// Check using nanoda's original locally-nameless TC.
-    fn check_declar_nanoda(&self, d: &Declar<'p>) {
+    fn check_declar_nanoda(&self, d: &Declar<'p>) -> crate::util::TcTrace {
         use Declar::*;
         match d {
-            Axiom { .. } => self.with_nanoda_tc_and_declar(*d.info(), |tc| tc.check_declar_info(d).unwrap()),
-            Inductive(..) => self.check_inductive_declar(d),
-            Quot { .. } => self.with_ctx(|ctx| crate::quot::check_quot(ctx, d)),
+            Axiom { .. } => self.with_nanoda_tc_and_declar(*d.info(), |tc| tc.check_declar_info(d).unwrap()).1,
+            Inductive(..) => { self.check_inductive_declar(d); crate::util::TcTrace::default() },
+            Quot { .. } => { self.with_ctx(|ctx| crate::quot::check_quot(ctx, d)); crate::util::TcTrace::default() },
             Definition { val, .. } | Theorem { val, .. } | Opaque { val, .. } =>
                 self.with_nanoda_tc_and_declar(*d.info(), |tc| {
                     tc.check_declar_info(d).unwrap();
                     let inferred_type = tc.infer(*val, crate::nanoda_tc::InferFlag::Check);
                     tc.assert_def_eq(inferred_type, d.info().ty);
-                }),
+                }).1,
             Constructor(ctor_data) => {
-                self.with_nanoda_tc_and_declar(*d.info(), |tc| tc.check_declar_info(d).unwrap());
+                let trace = self.with_nanoda_tc_and_declar(*d.info(), |tc| tc.check_declar_info(d).unwrap()).1;
                 assert!(self.declars.get(&ctor_data.inductive_name).is_some());
+                trace
             }
             Recursor(recursor_data) => {
-                self.with_nanoda_tc_and_declar(*d.info(), |tc| tc.check_declar_info(d).unwrap());
+                let trace = self.with_nanoda_tc_and_declar(*d.info(), |tc| tc.check_declar_info(d).unwrap()).1;
                 for ind_name in recursor_data.all_inductives.iter() {
                     assert!(self.declars.get(ind_name).is_some())
                 }
+                trace
             }
         }
     }
@@ -169,24 +173,28 @@ impl<'p> ExportFile<'p> {
                 eprintln!("[{}/{} {}ms +{}ms]", i, total, elapsed, delta);
                 last_report = decl_start;
             }
+            let trace;
             if timeout_secs > 0 {
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    self.check_declar(declar);
+                    self.check_declar(declar)
                 }));
-                if result.is_err() {
-                    self.with_ctx(|ctx| {
-                        eprintln!("  PANIC #{}: {:?} (skipping)", i, ctx.debug_print(declar.info().name));
-                    });
-                    skipped_count += 1;
-                    continue;
+                match result {
+                    Err(_) => {
+                        self.with_ctx(|ctx| {
+                            eprintln!("  PANIC #{}: {:?} (skipping)", i, ctx.debug_print(declar.info().name));
+                        });
+                        skipped_count += 1;
+                        continue;
+                    }
+                    Ok(t) => trace = t,
                 }
             } else {
-                self.check_declar(declar);
+                trace = self.check_declar(declar);
             }
             let decl_time = decl_start.elapsed().as_millis();
-            if decl_time > 1000 {
+            if decl_time > 0 {
                 self.with_ctx(|ctx| {
-                    eprintln!("  SLOW #{}: {:?} took {}ms", i, ctx.debug_print(declar.info().name), decl_time);
+                    eprintln!("  SLOW #{}: {:?} took {}ms | {}", i, ctx.debug_print(declar.info().name), decl_time, trace);
                 });
             }
         }
@@ -211,7 +219,7 @@ impl<'p> ExportFile<'p> {
                         .spawn_scoped(sco, || loop {
                             let idx = task_num.fetch_add(1, Relaxed);
                             if let Some((_, declar)) = self.declars.get_index(idx) {
-                                self.check_declar(declar);
+                                let _ = self.check_declar(declar);
                             } else {
                                 break
                             }
@@ -609,6 +617,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
     }
 
     pub(crate) fn infer(&mut self, e: ExprPtr<'t>, flag: InferFlag) -> ExprPtr<'t> {
+        self.ctx.trace.infer_calls += 1;
         stacker::maybe_grow(64 * 1024, 2 * 1024 * 1024, || self.infer_inner(e, flag))
     }
 
@@ -650,6 +659,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                 // A Check entry can serve both flags; an InferOnly entry can only serve InferOnly.
                 if checked || !is_check {
                     if stored_depth == depth && self.ctx.canon_eq(stored_input, e) {
+                        self.ctx.trace.infer_cache_hits += 1;
                         return stored_result;
                     }
                     if depth > stored_depth {
@@ -883,6 +893,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
     }
 
     pub fn whnf(&mut self, e: ExprPtr<'t>) -> ExprPtr<'t> {
+        self.ctx.trace.whnf_calls += 1;
         self.ctx.check_heartbeat();
         let r = stacker::maybe_grow(64 * 1024, 2 * 1024 * 1024, || self.whnf_inner(e));
         self.ctx.resolve_shifts_for_whnf(r)
@@ -930,14 +941,17 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         let e_bvar_ub = self.ctx.num_loose_bvars(e);
         if let Some(&(stored_input, stored_result, stored_bvar_ub)) = self.tc_cache.whnf_cache.get(&canon) {
             if stored_input == e {
+                self.ctx.trace.whnf_cache_hits += 1;
                 return stored_result;
             }
             if self.ctx.canon_eq(stored_input, e) {
+                self.ctx.trace.whnf_cache_hits += 1;
                 return stored_result;
             }
             if e_bvar_ub >= stored_bvar_ub {
                 let delta = e_bvar_ub - stored_bvar_ub;
                 if delta > 0 && self.ctx.shift_eq(stored_input, e, delta) {
+                    self.ctx.trace.whnf_cache_hits += 1;
                     return self.ctx.mk_shift(stored_result, delta);
                 }
             }
@@ -1198,6 +1212,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
     pub fn assert_def_eq(&mut self, u: ExprPtr<'t>, v: ExprPtr<'t>) { assert!(self.def_eq(u, v)) }
 
     pub fn def_eq(&mut self, x: ExprPtr<'t>, y: ExprPtr<'t>) -> bool {
+        self.ctx.trace.def_eq_calls += 1;
         self.ctx.check_heartbeat();
         stacker::maybe_grow(64 * 1024, 2 * 1024 * 1024, || self.def_eq_inner(x, y))
     }
@@ -1489,7 +1504,9 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         let (key, swapped) = self.defeq_canon_key(x, y);
         if let Some(&(stored_a, stored_b)) = self.tc_cache.eq_cache.get(&key) {
             let (qx, qy) = if swapped { (y, x) } else { (x, y) };
-            self.ctx.canon_eq(stored_a, qx) && self.ctx.canon_eq(stored_b, qy)
+            let hit = self.ctx.canon_eq(stored_a, qx) && self.ctx.canon_eq(stored_b, qy);
+            if hit { self.ctx.trace.eq_cache_hits += 1; }
+            hit
         } else {
             false
         }

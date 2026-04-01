@@ -455,11 +455,14 @@ impl<'x, 't: 'x, 'p: 't> NanodaTypeChecker<'x, 't, 'p> {
     }
 
     pub(crate) fn infer(&mut self, e: ExprPtr<'t>, flag: InferFlag) -> ExprPtr<'t> {
+        self.ctx.trace.infer_calls += 1;
         if let Some(cached) = self.tc_cache.infer_cache_check.get(&e).copied() {
+            self.ctx.trace.infer_cache_hits += 1;
             return cached
         }
         if flag == InferFlag::InferOnly {
             if let Some(cached) = self.tc_cache.infer_cache_no_check.get(&e).copied() {
+                self.ctx.trace.infer_cache_hits += 1;
                 return cached
             }
         }
@@ -707,10 +710,12 @@ impl<'x, 't: 'x, 'p: 't> NanodaTypeChecker<'x, 't, 'p> {
     }
 
     pub fn whnf(&mut self, e: ExprPtr<'t>) -> ExprPtr<'t> {
+        self.ctx.trace.whnf_calls += 1;
         if matches!(self.ctx.read_expr(e), NatLit { .. } | StringLit { .. }) {
             return e
         }
         if let Some(cached) = self.tc_cache.whnf_cache.get(&e).copied() {
+            self.ctx.trace.whnf_cache_hits += 1;
             return cached
         }
         let mut cursor = e;
@@ -899,6 +904,7 @@ impl<'x, 't: 'x, 'p: 't> NanodaTypeChecker<'x, 't, 'p> {
     pub fn assert_def_eq(&mut self, u: ExprPtr<'t>, v: ExprPtr<'t>) { assert!(self.def_eq(u, v)) }
 
     pub fn def_eq(&mut self, x: ExprPtr<'t>, y: ExprPtr<'t>) -> bool {
+        self.ctx.trace.def_eq_calls += 1;
         if let Some(easy) = self.def_eq_quick_check(x, y) {
             return easy
         }
@@ -1121,6 +1127,7 @@ impl<'x, 't: 'x, 'p: 't> NanodaTypeChecker<'x, 't, 'p> {
             return Some(true)
         }
         if self.tc_cache.eq_cache.check_uf_eq(x, y) {
+            self.ctx.trace.eq_cache_hits += 1;
             return Some(true)
         }
         if let Some(r) = self.def_eq_sort(x, y) {

@@ -187,6 +187,13 @@ We should **not** be slower due to missed cache hits. If we are, we need to find
 the cache miss, not paper over it with heuristics (DAG size thresholds, degraded mode,
 timeouts, etc.).
 
+**No forced canonicalization**: The whole point of Shift nodes is to avoid traversals.
+We must never canonicalize (force all Shifts deep) on the critical path (e.g., before
+cache lookups). The `struct_hash` is already shift-invariant by design (Shift nodes
+inherit their inner expression's struct_hash), so canonical hashes match for shifted
+and unshifted versions. Cache lookups should work without forcing. If they don't, the
+bug is in the cache verification logic (canon_eq/shift_eq), not a reason to force.
+
 **Approach**: Add tracing/instrumentation to both nanoda and our checker to compare cache
 hit rates side-by-side. nanoda's TC code is included in this project (module `nanoda_tc`)
 with a runtime flag to switch between checkers, making A/B comparison easy.

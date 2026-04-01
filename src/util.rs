@@ -239,24 +239,28 @@ impl<'p> ExportFile<'p> {
         f(&mut tc)
     }
 
-    pub fn with_tc_and_declar<F, A>(&self, d: crate::env::DeclarInfo<'p>, f: F) -> A
+    pub fn with_tc_and_declar<F, A>(&self, d: crate::env::DeclarInfo<'p>, f: F) -> (A, TcTrace)
     where
         F: FnOnce(&mut TypeChecker<'_, '_, 'p>) -> A, {
         let mut dag = LeanDag::new(&self.config);
         let mut ctx = TcCtx::new(self, &mut dag);
         let env = self.new_env(EnvLimit::ByName(d.name));
         let mut tc = TypeChecker::new(&mut ctx, &env, Some(d));
-        f(&mut tc)
+        let result = f(&mut tc);
+        let trace = tc.ctx.trace;
+        (result, trace)
     }
 
-    pub fn with_nanoda_tc_and_declar<F, A>(&self, d: crate::env::DeclarInfo<'p>, f: F) -> A
+    pub fn with_nanoda_tc_and_declar<F, A>(&self, d: crate::env::DeclarInfo<'p>, f: F) -> (A, TcTrace)
     where
         F: FnOnce(&mut crate::nanoda_tc::NanodaTypeChecker<'_, '_, 'p>) -> A, {
         let mut dag = LeanDag::new(&self.config);
         let mut ctx = TcCtx::new(self, &mut dag);
         let env = self.new_env(EnvLimit::ByName(d.name));
         let mut tc = crate::nanoda_tc::NanodaTypeChecker::new(&mut ctx, &env, Some(d));
-        f(&mut tc)
+        let result = f(&mut tc);
+        let trace = tc.ctx.trace;
+        (result, trace)
     }
 
     pub fn with_pp<F, A>(&self, f: F) -> A
@@ -295,6 +299,42 @@ pub struct TcCtx<'t, 'p> {
     pub(crate) heartbeat: u64,
     /// Deadline for the current declaration (None = no timeout).
     pub(crate) deadline: Option<std::time::Instant>,
+    /// Tracing counters for A/B comparison.
+    pub(crate) trace: TcTrace,
+}
+
+/// Counters for tracing TC operations (A/B comparison between shift and nanoda TCs).
+#[derive(Default, Clone, Copy)]
+pub struct TcTrace {
+    pub def_eq_calls: u64,
+    pub whnf_calls: u64,
+    pub infer_calls: u64,
+    pub inst_calls: u64,
+    pub alloc_expr_calls: u64,
+    pub whnf_cache_hits: u64,
+    pub eq_cache_hits: u64,
+    pub infer_cache_hits: u64,
+    pub canon_calls: u64,
+    pub canon_cache_hits: u64,
+    pub push_shift_calls: u64,
+    pub canon_eq_calls: u64,
+    pub inst_aux_calls: u64,
+    pub inst_aux_cache_hits: u64,
+    pub inst_aux_elided: u64,
+    pub push_shift_cache_hits: u64,
+}
+
+impl std::fmt::Display for TcTrace {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "def_eq={} whnf={} infer={} inst={} | hits: whnf={} eq={} infer={} | canon={}/{} ps={}/{} ceq={} | inst_aux={}/{}/{}",
+            self.def_eq_calls, self.whnf_calls, self.infer_calls,
+            self.inst_calls,
+            self.whnf_cache_hits, self.eq_cache_hits, self.infer_cache_hits,
+            self.canon_calls, self.canon_cache_hits,
+            self.push_shift_calls, self.push_shift_cache_hits,
+            self.canon_eq_calls,
+            self.inst_aux_calls, self.inst_aux_cache_hits, self.inst_aux_elided)
+    }
 }
 
 impl<'t, 'p: 't> TcCtx<'t, 'p> {
@@ -314,6 +354,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
             } else {
                 None
             },
+            trace: TcTrace::default(),
         }
     }
 
@@ -947,24 +988,22 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
     /// O(1) per binder node vs O(n) for full traversal. For App, recurses into both fun
     /// and arg to keep the App spine shift-free. Returns e unchanged if no shift needed.
     pub fn push_shift(&mut self, e: ExprPtr<'t>, amount: u16, cutoff: u16) -> ExprPtr<'t> {
+        self.trace.push_shift_calls += 1;
         if amount == 0 {
             return e;
         }
-        // In degraded mode, memoize push_shift to avoid redundant App spine traversals
-        if self.canon_degraded {
-            let expr = self.read_expr(e);
-            if expr.num_loose_bvars() <= cutoff {
-                return e;
-            }
-            let cache_key = (e, amount, cutoff);
-            if let Some(&result) = self.expr_cache.shift_cache.get(&cache_key) {
-                return result;
-            }
-            let result = stacker::maybe_grow(64 * 1024, 2 * 1024 * 1024, || self.push_shift_inner(e, amount, cutoff));
-            self.expr_cache.shift_cache.insert(cache_key, result);
+        let expr = self.read_expr(e);
+        if expr.num_loose_bvars() <= cutoff {
+            return e;
+        }
+        let cache_key = (e, amount, cutoff);
+        if let Some(&result) = self.expr_cache.shift_cache.get(&cache_key) {
+            self.trace.push_shift_cache_hits += 1;
             return result;
         }
-        stacker::maybe_grow(64 * 1024, 2 * 1024 * 1024, || self.push_shift_inner(e, amount, cutoff))
+        let result = stacker::maybe_grow(64 * 1024, 2 * 1024 * 1024, || self.push_shift_inner(e, amount, cutoff));
+        self.expr_cache.shift_cache.insert(cache_key, result);
+        result
     }
 
     fn push_shift_inner(&mut self, e: ExprPtr<'t>, amount: u16, cutoff: u16) -> ExprPtr<'t> {
@@ -1060,11 +1099,15 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
     #[inline]
     pub fn check_heartbeat(&mut self) {
         self.heartbeat += 1;
-        if self.heartbeat % 50_000 == 0 {
+        if self.heartbeat % 10_000 == 0 {
             if let Some(deadline) = self.deadline {
                 if std::time::Instant::now() > deadline {
+                    eprintln!("  [timeout] heartbeat={} | {}", self.heartbeat, self.trace);
                     panic!("declaration timeout exceeded");
                 }
+            }
+            if self.heartbeat % 1_000_000 == 0 {
+                eprintln!("  [heartbeat] {} | {}", self.heartbeat, self.trace);
             }
         }
     }
@@ -1084,6 +1127,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
     #[inline]
     pub fn canon_eq(&mut self, a: ExprPtr<'t>, b: ExprPtr<'t>) -> bool {
         if a == b { return true; }
+        self.trace.canon_eq_calls += 1;
         if self.canon_degraded {
             let key = if a.get_hash() <= b.get_hash() { (a, b) } else { (b, a) };
             if self.sem_eq_cache.contains(&key) { return true; }
@@ -1100,7 +1144,10 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
     /// Fully resolve all Shift wrappers in an expression tree. Memoized.
     /// Switches to degraded mode if DAG explosion is detected.
     pub fn canonicalize(&mut self, e: ExprPtr<'t>) -> ExprPtr<'t> {
+        self.trace.canon_calls += 1;
+        self.check_heartbeat();
         if let Some(&result) = self.expr_cache.canon_cache.get(&e) {
+            self.trace.canon_cache_hits += 1;
             return result;
         }
         // Detect DAG explosion: switch to degraded mode if too many new nodes
