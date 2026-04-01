@@ -292,11 +292,6 @@ pub struct TcCtx<'t, 'p> {
     /// A cache for instantiation, free variable abstraction, and level substitution
     pub(crate) expr_cache: ExprCache<'t>,
     pub(crate) eager_mode: bool,
-    /// When true, canonicalize detected DAG explosion and switched to
-    /// peel_shifts + cached_sem_eq mode for the rest of this declaration.
-    pub(crate) canon_degraded: bool,
-    /// Positive sem_eq cache: pairs (a,b) known semantically equal (degraded mode).
-    pub(crate) sem_eq_cache: FxHashSet<(ExprPtr<'t>, ExprPtr<'t>)>,
     /// Heartbeat counter: incremented in hot paths. When a deadline is set,
     /// checked periodically to enforce per-declaration timeouts.
     pub(crate) heartbeat: u64,
@@ -317,10 +312,7 @@ pub struct TcTrace {
     pub whnf_cache_hits: u64,
     pub eq_cache_hits: u64,
     pub infer_cache_hits: u64,
-    pub canon_calls: u64,
-    pub canon_cache_hits: u64,
     pub push_shift_calls: u64,
-    pub canon_eq_calls: u64,
     pub inst_aux_calls: u64,
     pub inst_aux_cache_hits: u64,
     pub inst_aux_elided: u64,
@@ -335,14 +327,12 @@ pub struct TcTrace {
 
 impl std::fmt::Display for TcTrace {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "def_eq={} whnf={} infer={} inst={} alloc={} | hits: whnf={} eq={} infer={} infer_hash={} infer_vfail={} | canon={}/{} ps={}/{} ceq={} | inst_aux={}/{}/{}",
+        write!(f, "def_eq={} whnf={} infer={} inst={} alloc={} | hits: whnf={} eq={} infer={} infer_hash={} infer_vfail={} | ps={}/{} | inst_aux={}/{}/{}",
             self.def_eq_calls, self.whnf_calls, self.infer_calls,
             self.inst_calls, self.alloc_expr_calls,
             self.whnf_cache_hits, self.eq_cache_hits, self.infer_cache_hits,
             self.infer_cache_hash_hit, self.infer_cache_verify_fail,
-            self.canon_calls, self.canon_cache_hits,
             self.push_shift_calls, self.push_shift_cache_hits,
-            self.canon_eq_calls,
             self.inst_aux_calls, self.inst_aux_cache_hits, self.inst_aux_elided)?;
         if self.zeta_reductions > 0 || self.whnf_let_reductions > 0 {
             write!(f, " | zeta={} wlet={} wbeta={} dag={}", self.zeta_reductions, self.whnf_let_reductions, self.whnf_beta_reductions, self.dag_size)?;
@@ -360,8 +350,6 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
             unique_counter: 0u32,
             expr_cache: ExprCache::new(),
             eager_mode: false,
-            canon_degraded: false,
-            sem_eq_cache: new_fx_hash_set(),
             heartbeat: 0,
             deadline: if export_file.config.declaration_timeout_secs > 0 {
                 Some(std::time::Instant::now() + std::time::Duration::from_secs(export_file.config.declaration_timeout_secs))
@@ -1183,18 +1171,6 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
 
     /// Peel off top-level Shift wrappers only (non-recursive).
     /// Ensures pattern matching on the expression head works.
-    pub fn peel_shifts(&mut self, e: ExprPtr<'t>) -> ExprPtr<'t> {
-        let mut cur = e;
-        loop {
-            match self.read_expr(cur) {
-                Expr::Shift { inner, amount, cutoff, .. } => {
-                    cur = self.push_shift(inner, amount, cutoff);
-                }
-                _ => return cur,
-            }
-        }
-    }
-
     /// Check the heartbeat counter and panic if the deadline has passed.
     /// Called from hot paths (whnf, def_eq).
     #[inline]
@@ -1214,98 +1190,6 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
                 }
             }
         }
-    }
-
-    /// Resolve Shift wrappers on whnf results. Uses canonicalize normally,
-    /// peel_shifts in degraded mode (avoids expression explosion).
-    pub fn resolve_shifts_for_whnf(&mut self, e: ExprPtr<'t>) -> ExprPtr<'t> {
-        if self.canon_degraded {
-            self.peel_shifts(e)
-        } else {
-            self.canonicalize(e)
-        }
-    }
-
-    /// Semantic equality: pointer equality first, then canonicalize (normal)
-    /// or cached sem_eq (degraded).
-    #[inline]
-    pub fn canon_eq(&mut self, a: ExprPtr<'t>, b: ExprPtr<'t>) -> bool {
-        if a == b { return true; }
-        self.trace.canon_eq_calls += 1;
-        if self.canon_degraded {
-            let key = if a.get_hash() <= b.get_hash() { (a, b) } else { (b, a) };
-            if self.sem_eq_cache.contains(&key) { return true; }
-            let result = TcCtx::sem_eq(self, a, b);
-            if result {
-                self.sem_eq_cache.insert(key);
-            }
-            result
-        } else {
-            self.canonicalize(a) == self.canonicalize(b)
-        }
-    }
-
-    /// Fully resolve all Shift wrappers in an expression tree. Memoized.
-    /// Switches to degraded mode if DAG explosion is detected.
-    pub fn canonicalize(&mut self, e: ExprPtr<'t>) -> ExprPtr<'t> {
-        self.trace.canon_calls += 1;
-        self.check_heartbeat();
-        // Closed expressions (nlbv=0) can't contain Shift nodes (Shift requires nlbv > 0),
-        // so they're already canonical. Skip cache lookup.
-        if self.num_loose_bvars(e) == 0 {
-            self.trace.canon_cache_hits += 1;
-            return e;
-        }
-        if let Some(&result) = self.expr_cache.canon_cache.get(&e) {
-            self.trace.canon_cache_hits += 1;
-            return result;
-        }
-        // Detect DAG explosion: switch to degraded mode if too many new nodes
-        if !self.canon_degraded && self.dag.exprs.len() > 500_000 {
-            eprintln!("  [canon_degraded] DAG explosion: {} new exprs", self.dag.exprs.len());
-            self.canon_degraded = true;
-            return self.peel_shifts(e);
-        }
-        if self.canon_degraded {
-            return self.peel_shifts(e);
-        }
-        let result = stacker::maybe_grow(64 * 1024, 2 * 1024 * 1024, || match self.read_expr(e) {
-            Expr::Shift { inner, amount, cutoff, .. } => {
-                // Push shift one level, then canonicalize the result
-                let pushed = self.push_shift(inner, amount, cutoff);
-                self.canonicalize(pushed)
-            }
-            Expr::App { fun, arg, .. } => {
-                let cf = self.canonicalize(fun);
-                let ca = self.canonicalize(arg);
-                if cf == fun && ca == arg { e } else { self.mk_app(cf, ca) }
-            }
-            Expr::Pi { binder_name, binder_style, binder_type, body, .. } => {
-                let ct = self.canonicalize(binder_type);
-                let cb = self.canonicalize(body);
-                if ct == binder_type && cb == body { e } else { self.mk_pi(binder_name, binder_style, ct, cb) }
-            }
-            Expr::Lambda { binder_name, binder_style, binder_type, body, .. } => {
-                let ct = self.canonicalize(binder_type);
-                let cb = self.canonicalize(body);
-                if ct == binder_type && cb == body { e } else { self.mk_lambda(binder_name, binder_style, ct, cb) }
-            }
-            Expr::Let { binder_name, binder_type, val, body, nondep, .. } => {
-                let ct = self.canonicalize(binder_type);
-                let cv = self.canonicalize(val);
-                let cb = self.canonicalize(body);
-                if ct == binder_type && cv == val && cb == body { e } else { self.mk_let(binder_name, ct, cv, cb, nondep) }
-            }
-            Expr::Proj { ty_name, idx, structure, .. } => {
-                let cs = self.canonicalize(structure);
-                if cs == structure { e } else { self.mk_proj(ty_name, idx, cs) }
-            }
-            // Leaf nodes: no Shift wrappers possible
-            Expr::Var { .. } | Expr::Sort { .. } | Expr::Const { .. } |
-            Expr::Local { .. } | Expr::NatLit { .. } | Expr::StringLit { .. } => e,
-        });
-        self.expr_cache.canon_cache.insert(e, result);
-        result
     }
 
 }
