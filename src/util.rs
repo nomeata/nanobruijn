@@ -173,7 +173,9 @@ pub struct ExprCache<'t> {
     /// Caches (e, offset) |-> output for instantiation. This cache is reset
     /// before every new call to `inst`, so there's no need to cache the sequence
     /// of substitutions.
-    pub(crate) inst_cache: FxHashMap<(ExprPtr<'t>, u16, u16, u16), ExprPtr<'t>>,
+    /// inst_cache key: (expr, offset | sh_amt << 16 | sh_cut << 32) -> result.
+    /// Packs offset/sh_amt/sh_cut into a single u64 for faster hashing.
+    pub(crate) inst_cache: FxHashMap<(ExprPtr<'t>, u64), ExprPtr<'t>>,
     /// Caches (e, ks, vs) |-> output for level substitution.
     pub(crate) subst_cache: FxHashMap<(ExprPtr<'t>, LevelsPtr<'t>, LevelsPtr<'t>), ExprPtr<'t>>,
     pub(crate) dsubst_cache: FxHashMap<(ExprPtr<'t>, LevelsPtr<'t>, LevelsPtr<'t>), ExprPtr<'t>>,
@@ -1153,6 +1155,12 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
     pub fn canonicalize(&mut self, e: ExprPtr<'t>) -> ExprPtr<'t> {
         self.trace.canon_calls += 1;
         self.check_heartbeat();
+        // Closed expressions (nlbv=0) can't contain Shift nodes (Shift requires nlbv > 0),
+        // so they're already canonical. Skip cache lookup.
+        if self.num_loose_bvars(e) == 0 {
+            self.trace.canon_cache_hits += 1;
+            return e;
+        }
         if let Some(&result) = self.expr_cache.canon_cache.get(&e) {
             self.trace.canon_cache_hits += 1;
             return result;

@@ -313,7 +313,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
             }
         }
 
-        let cache_key = (e, offset, sh_amt, sh_cut);
+        let cache_key = (e, (offset as u64) | ((sh_amt as u64) << 16) | ((sh_cut as u64) << 32));
         if let Some(cached) = self.expr_cache.inst_cache.get(&cache_key) {
             self.trace.inst_aux_cache_hits += 1;
             return *cached;
