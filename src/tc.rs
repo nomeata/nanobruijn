@@ -8,6 +8,7 @@ use crate::util::{
     LevelsPtr, NamePtr, TcCache, TcCtx, StringPtr
 };
 use std::error::Error;
+
 use num_traits::pow::Pow;
 
 
@@ -588,7 +589,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             if let Some(&(stored_input, stored_result, stored_depth, checked)) = bucket.get(&canon) {
                 // A Check entry can serve both flags; an InferOnly entry can only serve InferOnly.
                 if checked || !is_check {
-                    if stored_depth == depth && self.ctx.sem_eq(stored_input, e) {
+                    if stored_depth == depth && self.ctx.canonicalize(stored_input) == self.ctx.canonicalize(e) {
                         return stored_result;
                     }
                     if depth > stored_depth {
@@ -808,7 +809,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                 let structure = self.strong_reduce(structure, reduce_types, reduce_proofs);
                 let x = self.ctx.mk_proj(ty_name, idx, structure);
                 let y = self.whnf(x);
-                if !self.ctx.sem_eq(y, x) {
+                if self.ctx.canonicalize(y) != self.ctx.canonicalize(x) {
                     self.strong_reduce(y, reduce_types, reduce_proofs)
                 } else {
                     x
@@ -826,7 +827,6 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
     }
 
     fn whnf_inner(&mut self, e: ExprPtr<'t>) -> ExprPtr<'t> {
-
         if matches!(self.ctx.read_expr(e), NatLit { .. } | StringLit { .. }) {
             return e
         }
@@ -870,8 +870,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             if stored_input == e {
                 return stored_result;
             }
-            // Semantic equality: handles internal Shift wrappers at delta=0
-            if self.ctx.sem_eq(stored_input, e) {
+            if self.ctx.canonicalize(stored_input) == self.ctx.canonicalize(e) {
                 return stored_result;
             }
             if e_bvar_ub >= stored_bvar_ub {
@@ -942,7 +941,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             let cur_canon = self.ctx.canonical_hash(cur);
             let cur_bvar_ub = self.ctx.num_loose_bvars(cur);
             if let Some(&(stored_input, stored_result, _stored_bvar_ub)) = self.tc_cache.whnf_no_unfolding_cache.get(&cur_canon) {
-                if stored_input == cur || self.ctx.sem_eq(stored_input, cur) {
+                if stored_input == cur || self.ctx.canonicalize(stored_input) == self.ctx.canonicalize(cur) {
                     break stored_result;
                 }
             }
@@ -1032,7 +1031,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         }
         if let (NatLit { .. }, NatLit { .. }) = (self.ctx.read_expr(x), self.ctx.read_expr(y)) {
             assert!(self.ctx.export_file.config.nat_extension);
-            return Some(self.ctx.sem_eq(x, y))
+            return Some(self.ctx.canonicalize(x) == self.ctx.canonicalize(y))
         }
         if let (Some(x_pred), Some(y_pred)) = (self.ctx.pred_of_nat_succ(x), self.ctx.pred_of_nat_succ(y)) {
             Some(self.def_eq(x_pred, y_pred))
@@ -1135,7 +1134,6 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
     }
 
     fn def_eq_inner(&mut self, x: ExprPtr<'t>, y: ExprPtr<'t>) -> bool {
-
         if let Some(easy) = self.def_eq_quick_check(x, y) {
             return easy
         }
@@ -1165,7 +1163,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                     } else {
                         let (xn0, yn0) = (x_n, y_n);
                         let (x_n, y_n) = (self.whnf_no_unfolding(xn0), self.whnf_no_unfolding(yn0));
-                        if !self.ctx.sem_eq(x_n, xn0) || !self.ctx.sem_eq(y_n, yn0) {
+                        if self.ctx.canonicalize(x_n) != self.ctx.canonicalize(xn0) || self.ctx.canonicalize(y_n) != self.ctx.canonicalize(yn0) {
                             self.def_eq(x_n, y_n)
                         } else {
                             self.def_eq_app(x_n, y_n)
@@ -1357,14 +1355,14 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
     fn def_eq_quick_check(&mut self, x: ExprPtr<'t>, y: ExprPtr<'t>) -> Option<bool> {
         // Semantic equality: handles internal Shift wrappers transparently.
         // Subsumes the old pointer equality, Shift-stripping, and shift_eq checks.
-        if self.ctx.sem_eq(x, y) {
+        if self.ctx.canonicalize(x) == self.ctx.canonicalize(y) {
             return Some(true)
         }
         if self.eq_cache_contains(x, y) {
             return Some(true)
         }
         // Shift-invariant positive def_eq cache for open expressions
-        if self.defeq_open_lookup(&self.tc_cache.defeq_pos_open, x, y) {
+        if self.defeq_open_lookup(true, x, y) {
             return Some(true)
         }
         if let Some(r) = self.def_eq_sort(x, y) {
@@ -1380,11 +1378,11 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         let (key, swapped) = self.defeq_canon_key(x, y);
         if let Some(&(stored_a, stored_b)) = self.tc_cache.failure_cache.get(&key) {
             let (qx, qy) = if swapped { (y, x) } else { (x, y) };
-            if self.ctx.sem_eq(stored_a, qx) && self.ctx.sem_eq(stored_b, qy) {
+            if self.ctx.canonicalize(stored_a) == self.ctx.canonicalize(qx) && self.ctx.canonicalize(stored_b) == self.ctx.canonicalize(qy) {
                 return true;
             }
         }
-        if self.defeq_open_lookup(&self.tc_cache.defeq_neg_open, x, y) {
+        if self.defeq_open_lookup(false, x, y) {
             return true;
         }
         false
@@ -1418,11 +1416,11 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
 
     /// Canonical-hash-keyed eq_cache lookup for closed expressions.
     /// Uses sem_eq to verify (handles internal Shift wrappers).
-    fn eq_cache_contains(&self, x: ExprPtr<'t>, y: ExprPtr<'t>) -> bool {
+    fn eq_cache_contains(&mut self, x: ExprPtr<'t>, y: ExprPtr<'t>) -> bool {
         let (key, swapped) = self.defeq_canon_key(x, y);
         if let Some(&(stored_a, stored_b)) = self.tc_cache.eq_cache.get(&key) {
             let (qx, qy) = if swapped { (y, x) } else { (x, y) };
-            self.ctx.sem_eq(stored_a, qx) && self.ctx.sem_eq(stored_b, qy)
+            self.ctx.canonicalize(stored_a) == self.ctx.canonicalize(qx) && self.ctx.canonicalize(stored_b) == self.ctx.canonicalize(qy)
         } else {
             false
         }
@@ -1448,19 +1446,20 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
 
     /// Look up in a shift-invariant def_eq cache (positive or negative).
     fn defeq_open_lookup(
-        &self,
-        cache: &[FxHashMap<((u64, u64), (u64, u64)), (ExprPtr<'t>, ExprPtr<'t>, u16)>],
+        &mut self,
+        is_pos: bool,
         x: ExprPtr<'t>,
         y: ExprPtr<'t>,
     ) -> bool {
         let Some(bucket_idx) = self.defeq_bucket_idx(x, y) else { return false };
+        let cache = if is_pos { &self.tc_cache.defeq_pos_open } else { &self.tc_cache.defeq_neg_open };
         let Some(bucket) = cache.get(bucket_idx) else { return false };
         let (key, swapped) = self.defeq_canon_key(x, y);
         let Some(&(stored_a, stored_b, stored_depth)) = bucket.get(&key) else { return false };
         let depth = self.local_ctx.len() as u16;
         let (qx, qy) = if swapped { (y, x) } else { (x, y) };
         // Exact depth match with semantic equality
-        if stored_depth == depth && self.ctx.sem_eq(stored_a, qx) && self.ctx.sem_eq(stored_b, qy) {
+        if stored_depth == depth && self.ctx.canonicalize(stored_a) == self.ctx.canonicalize(qx) && self.ctx.canonicalize(stored_b) == self.ctx.canonicalize(qy) {
             return true;
         }
         // Shift-invariant match
@@ -1566,7 +1565,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         let f = self.ctx.unfold_apps_fun(e);
         if let Proj { .. } = self.ctx.read_expr(f) {
             let eprime = self.whnf_no_unfolding(e);
-            if !self.ctx.sem_eq(eprime, e) {
+            if self.ctx.canonicalize(eprime) != self.ctx.canonicalize(e) {
                 return Some(eprime)
             }
         }

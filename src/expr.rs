@@ -943,6 +943,10 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
     /// expressions built by `push_shift` or `mk_shift` that are semantically
     /// identical but have different ExprPtrs.
     pub(crate) fn sem_eq(&self, a: ExprPtr<'t>, b: ExprPtr<'t>) -> bool {
+        // Fast path: pointer equality (most common case)
+        if a == b { return true; }
+        // Fast rejection: if canonical hashes differ, expressions can't be sem_eq
+        if self.canonical_hash(a) != self.canonical_hash(b) { return false; }
         self.shift_eq_aux(a, b, 0, 0)
     }
 

@@ -183,6 +183,9 @@ pub struct ExprCache<'t> {
     pub(crate) abstr_cache: FxHashMap<(ExprPtr<'t>, u16), ExprPtr<'t>>,
     /// Caches (e, amount, cutoff) |-> output for shifting.
     pub(crate) shift_cache: FxHashMap<(ExprPtr<'t>, u16, u16), ExprPtr<'t>>,
+    /// Caches canonicalize: ExprPtr -> ExprPtr (fully Shift-resolved).
+    /// Due to arena hash-consing, canonicalize(a) == canonicalize(b) iff sem_eq(a, b).
+    pub(crate) canon_cache: FxHashMap<ExprPtr<'t>, ExprPtr<'t>>,
 }
 
 impl<'t> ExprCache<'t> {
@@ -193,6 +196,7 @@ impl<'t> ExprCache<'t> {
             subst_cache: new_fx_hash_map(),
             dsubst_cache: new_fx_hash_map(),
             shift_cache: new_fx_hash_map(),
+            canon_cache: new_fx_hash_map(),
         }
     }
 }
@@ -934,6 +938,54 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
             }
             other => other
         }
+    }
+
+    /// Fully resolve all Shift wrappers in an expression tree, returning
+    /// an expression with no Shift nodes. Due to arena hash-consing,
+    /// `canonicalize(a) == canonicalize(b)` iff `sem_eq(a, b)`.
+    /// Memoized in `expr_cache.canon_cache` so each unique ExprPtr is
+    /// processed at most once.
+    pub fn canonicalize(&mut self, e: ExprPtr<'t>) -> ExprPtr<'t> {
+        if let Some(&result) = self.expr_cache.canon_cache.get(&e) {
+            return result;
+        }
+        let result = match self.read_expr(e) {
+            Expr::Shift { inner, amount, cutoff, .. } => {
+                // Push shift one level, then canonicalize the result
+                let pushed = self.push_shift(inner, amount, cutoff);
+                self.canonicalize(pushed)
+            }
+            Expr::App { fun, arg, .. } => {
+                let cf = self.canonicalize(fun);
+                let ca = self.canonicalize(arg);
+                if cf == fun && ca == arg { e } else { self.mk_app(cf, ca) }
+            }
+            Expr::Pi { binder_name, binder_style, binder_type, body, .. } => {
+                let ct = self.canonicalize(binder_type);
+                let cb = self.canonicalize(body);
+                if ct == binder_type && cb == body { e } else { self.mk_pi(binder_name, binder_style, ct, cb) }
+            }
+            Expr::Lambda { binder_name, binder_style, binder_type, body, .. } => {
+                let ct = self.canonicalize(binder_type);
+                let cb = self.canonicalize(body);
+                if ct == binder_type && cb == body { e } else { self.mk_lambda(binder_name, binder_style, ct, cb) }
+            }
+            Expr::Let { binder_name, binder_type, val, body, nondep, .. } => {
+                let ct = self.canonicalize(binder_type);
+                let cv = self.canonicalize(val);
+                let cb = self.canonicalize(body);
+                if ct == binder_type && cv == val && cb == body { e } else { self.mk_let(binder_name, ct, cv, cb, nondep) }
+            }
+            Expr::Proj { ty_name, idx, structure, .. } => {
+                let cs = self.canonicalize(structure);
+                if cs == structure { e } else { self.mk_proj(ty_name, idx, cs) }
+            }
+            // Leaf nodes: no Shift wrappers possible
+            Expr::Var { .. } | Expr::Sort { .. } | Expr::Const { .. } |
+            Expr::Local { .. } | Expr::NatLit { .. } | Expr::StringLit { .. } => e,
+        };
+        self.expr_cache.canon_cache.insert(e, result);
+        result
     }
 
 }
