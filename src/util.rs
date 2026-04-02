@@ -347,6 +347,8 @@ pub struct TcTrace {
     pub wnu_cache_no_bucket: u64,
     pub wnu_cache_no_entry: u64,
     pub wnu_cache_verify_fail: u64,
+    pub wnu_cache_overflow_stores: u64,
+    pub wnu_cache_overflow_hits: u64,
 }
 
 impl std::fmt::Display for TcTrace {
@@ -359,7 +361,7 @@ impl std::fmt::Display for TcTrace {
             self.push_shift_calls, self.push_shift_cache_hits,
             self.inst_aux_calls, self.inst_aux_cache_hits, self.inst_aux_elided)?;
         if self.zeta_reductions > 0 || self.whnf_let_reductions > 0 || self.wnu_calls > 0 {
-            write!(f, " | zeta={} wlet={} wbeta={} dag={} wnu={}/{}/{} wnu_miss={}/{}/{}", self.zeta_reductions, self.whnf_let_reductions, self.whnf_beta_reductions, self.dag_size, self.wnu_calls, self.wnu_cache_hits, self.wnu_shift_peel, self.wnu_cache_no_bucket, self.wnu_cache_no_entry, self.wnu_cache_verify_fail)?;
+            write!(f, " | zeta={} wlet={} wbeta={} dag={} wnu={}/{}/{} wnu_miss={}/{}/{} wnuov={}/{}", self.zeta_reductions, self.whnf_let_reductions, self.whnf_beta_reductions, self.dag_size, self.wnu_calls, self.wnu_cache_hits, self.wnu_shift_peel, self.wnu_cache_no_bucket, self.wnu_cache_no_entry, self.wnu_cache_verify_fail, self.wnu_cache_overflow_stores, self.wnu_cache_overflow_hits)?;
         }
         if self.whnf_cache_verify_fail > 0 {
             write!(f, " | wmiss={}/{}/{} vf={}/{}/{} sign_fix={} evict={} ov_store={} ov_hit={}", self.whnf_cache_no_bucket, self.whnf_cache_no_entry, self.whnf_cache_verify_fail, self.whnf_cache_vf_same, self.whnf_cache_vf_above, self.whnf_cache_vf_below, self.whnf_cache_vf_sign_would_fix, self.whnf_cache_vf_evictions, self.whnf_cache_overflow_stores, self.whnf_cache_overflow_hits)?;
@@ -1400,6 +1402,10 @@ pub struct NameCache<'p> {
 /// A single whnf cache slot: (input, result, depth).
 pub(crate) type WhnfSlot<'t> = (ExprPtr<'t>, ExprPtr<'t>, u16);
 
+/// Inline 2-slot cache entry for wnu cache: primary slot + optional overflow.
+/// The overflow avoids a separate HashMap while handling shift-family collisions.
+pub(crate) type Wnu2Slot<'t> = (WhnfSlot<'t>, Option<WhnfSlot<'t>>);
+
 pub(crate) struct TcCache<'t> {
     /// Shift-invariant WHNF cache, organized as a stack of maps (like infer_cache).
     /// Bucket 0: closed expressions (context-independent, never evicted by push/pop).
@@ -1412,7 +1418,8 @@ pub(crate) struct TcCache<'t> {
     /// shift-families collide. Separate map to preserve primary cache's memory layout.
     pub(crate) whnf_cache_overflow: Vec<FxHashMap<(u64, u64), WhnfSlot<'t>>>,
     /// Shift-invariant whnf_no_unfolding cache: same stacked design as whnf_cache.
-    pub(crate) whnf_no_unfolding_cache: Vec<FxHashMap<(u64, u64), (ExprPtr<'t>, ExprPtr<'t>, u16)>>,
+    /// Uses inline 2-slot entries to handle shift-family collisions without a separate overflow HashMap.
+    pub(crate) whnf_no_unfolding_cache: Vec<FxHashMap<(u64, u64), Wnu2Slot<'t>>>,
     /// Shift-invariant positive def_eq cache for closed expressions.
     /// Keyed by ordered pair of canonical hashes. Value: (stored_x, stored_y).
     /// On hit, verify stored pointers match query pointers exactly (collision guard).

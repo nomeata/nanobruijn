@@ -1241,18 +1241,34 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                 (cur_depth - cur_lb) as usize
             };
             if let Some(bucket) = self.tc_cache.whnf_no_unfolding_cache.get(wnu_bucket_idx) {
-                if let Some(&(stored_input, stored_result, stored_depth)) = bucket.get(&cur_canon) {
+                if let Some(&(primary, overflow)) = bucket.get(&cur_canon) {
+                    // Try primary slot
+                    let (stored_input, stored_result, stored_depth) = primary;
                     if stored_depth == cur_depth && (stored_input == cur || self.ctx.sem_eq(stored_input, cur)) {
                         self.ctx.trace.wnu_cache_hits += 1;
                         break stored_result;
                     }
-                    // Cross-depth shift_eq: sound because Shift peeling shrinks
-                    // context to stored_depth, making let-bindings above irrelevant.
                     if cur_depth > stored_depth {
                         let delta = cur_depth - stored_depth;
                         if self.ctx.shift_eq(stored_input, cur, delta) {
                             self.ctx.trace.wnu_cache_hits += 1;
                             break self.ctx.push_shift(stored_result, delta, 0);
+                        }
+                    }
+                    // Try overflow slot
+                    if let Some((stored_input, stored_result, stored_depth)) = overflow {
+                        if stored_depth == cur_depth && (stored_input == cur || self.ctx.sem_eq(stored_input, cur)) {
+                            self.ctx.trace.wnu_cache_hits += 1;
+                            self.ctx.trace.wnu_cache_overflow_hits += 1;
+                            break stored_result;
+                        }
+                        if cur_depth > stored_depth {
+                            let delta = cur_depth - stored_depth;
+                            if self.ctx.shift_eq(stored_input, cur, delta) {
+                                self.ctx.trace.wnu_cache_hits += 1;
+                                self.ctx.trace.wnu_cache_overflow_hits += 1;
+                                break self.ctx.push_shift(stored_result, delta, 0);
+                            }
                         }
                     }
                     self.ctx.trace.wnu_cache_verify_fail += 1;
@@ -1359,8 +1375,34 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                     (store_depth - entry_lb) as usize
                 };
                 if let Some(bucket) = self.tc_cache.whnf_no_unfolding_cache.get_mut(entry_bucket_idx) {
-                    if bucket.get(&entry_canon).map_or(true, |&(_, _, sd)| store_depth < sd) {
-                        bucket.insert(entry_canon, (entry, result, store_depth));
+                    let new_slot: WhnfSlot<'t> = (entry, result, store_depth);
+                    match bucket.get_mut(&entry_canon) {
+                        Some((ref mut primary, ref mut overflow)) => {
+                            // Same pointer — already stored in primary or overflow
+                            if primary.0 == entry { continue; }
+                            if let Some(ov) = overflow {
+                                if ov.0 == entry { continue; }
+                            }
+                            // No shift_eq family check — use depth-based replacement
+                            // to avoid overhead in the hot store path.
+                            if store_depth <= primary.2 {
+                                // Lower depth: replace primary, demote old to overflow
+                                if overflow.is_none() {
+                                    self.ctx.trace.wnu_cache_overflow_stores += 1;
+                                }
+                                *overflow = Some(*primary);
+                                *primary = new_slot;
+                            } else if overflow.map_or(true, |ov| store_depth < ov.2) {
+                                // Higher depth than primary but lower than overflow
+                                if overflow.is_none() {
+                                    self.ctx.trace.wnu_cache_overflow_stores += 1;
+                                }
+                                *overflow = Some(new_slot);
+                            }
+                        }
+                        None => {
+                            bucket.insert(entry_canon, (new_slot, None));
+                        }
                     }
                 }
             }
