@@ -336,6 +336,13 @@ pub struct TcTrace {
     pub whnf_cache_vf_evictions: u64,     // times a collision caused eviction of a different expression
     pub whnf_cache_overflow_stores: u64,
     pub whnf_cache_overflow_hits: u64,
+    // infer cache verify-fail breakdown
+    pub infer_cache_vf_check_flag: u64,   // entry was InferOnly but query is Check
+    pub infer_cache_vf_same: u64,         // same depth, sem_eq fail
+    pub infer_cache_vf_above: u64,        // depth > stored, shift_eq fail
+    pub infer_cache_vf_below: u64,        // depth < stored, not attempted
+    pub infer_cache_overflow_stores: u64,
+    pub infer_cache_overflow_hits: u64,
     // wnu cache miss breakdown
     pub wnu_cache_no_bucket: u64,
     pub wnu_cache_no_entry: u64,
@@ -356,6 +363,9 @@ impl std::fmt::Display for TcTrace {
         }
         if self.whnf_cache_verify_fail > 0 {
             write!(f, " | wmiss={}/{}/{} vf={}/{}/{} sign_fix={} evict={} ov_store={} ov_hit={}", self.whnf_cache_no_bucket, self.whnf_cache_no_entry, self.whnf_cache_verify_fail, self.whnf_cache_vf_same, self.whnf_cache_vf_above, self.whnf_cache_vf_below, self.whnf_cache_vf_sign_would_fix, self.whnf_cache_vf_evictions, self.whnf_cache_overflow_stores, self.whnf_cache_overflow_hits)?;
+        }
+        if self.infer_cache_verify_fail > 0 {
+            write!(f, " | ivf={}/{}/{}/{} iov_store={} iov_hit={}", self.infer_cache_vf_check_flag, self.infer_cache_vf_same, self.infer_cache_vf_above, self.infer_cache_vf_below, self.infer_cache_overflow_stores, self.infer_cache_overflow_hits)?;
         }
         Ok(())
     }

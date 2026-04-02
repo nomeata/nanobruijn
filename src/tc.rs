@@ -707,18 +707,38 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             .and_then(|b| b.get(&canon)).copied();
         if let Some((stored_input, stored_result, stored_depth, checked)) = primary_infer {
             self.ctx.trace.infer_cache_hash_hit += 1;
-            if let Some(r) = self.try_infer_cache_hit(e, stored_input, stored_result, stored_depth, depth, checked, is_check) {
+            if !checked && is_check {
+                // Check flag mismatch — try overflow before giving up
+                if let Some((si2, sr2, sd2, ch2)) = overflow_infer {
+                    if let Some(r) = self.try_infer_cache_hit(e, si2, sr2, sd2, depth, ch2, is_check) {
+                        self.ctx.trace.infer_cache_hits += 1;
+                        self.ctx.trace.infer_cache_overflow_hits += 1;
+                        return r;
+                    }
+                }
+                self.ctx.trace.infer_cache_verify_fail += 1;
+                self.ctx.trace.infer_cache_vf_check_flag += 1;
+            } else if let Some(r) = self.try_infer_cache_hit(e, stored_input, stored_result, stored_depth, depth, checked, is_check) {
                 self.ctx.trace.infer_cache_hits += 1;
                 return r;
-            }
-            // Primary miss — try overflow
-            if let Some((stored_input, stored_result, stored_depth, checked)) = overflow_infer {
-                if let Some(r) = self.try_infer_cache_hit(e, stored_input, stored_result, stored_depth, depth, checked, is_check) {
-                    self.ctx.trace.infer_cache_hits += 1;
-                    return r;
+            } else {
+                // Primary verify failed — categorize and try overflow
+                if stored_depth == depth {
+                    self.ctx.trace.infer_cache_vf_same += 1;
+                } else if depth > stored_depth {
+                    self.ctx.trace.infer_cache_vf_above += 1;
+                } else {
+                    self.ctx.trace.infer_cache_vf_below += 1;
                 }
+                if let Some((si2, sr2, sd2, ch2)) = overflow_infer {
+                    if let Some(r) = self.try_infer_cache_hit(e, si2, sr2, sd2, depth, ch2, is_check) {
+                        self.ctx.trace.infer_cache_hits += 1;
+                        self.ctx.trace.infer_cache_overflow_hits += 1;
+                        return r;
+                    }
+                }
+                self.ctx.trace.infer_cache_verify_fail += 1;
             }
-            self.ctx.trace.infer_cache_verify_fail += 1;
         }
         let r = match self.ctx.read_expr(e) {
             Local { binder_type, .. } => binder_type,
@@ -748,13 +768,25 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
     fn try_infer_cache_hit(&mut self, e: ExprPtr<'t>, stored_input: ExprPtr<'t>, stored_result: ExprPtr<'t>, stored_depth: u16, depth: u16, checked: bool, is_check: bool) -> Option<ExprPtr<'t>> {
         // A Check entry can serve both flags; an InferOnly entry can only serve InferOnly.
         if !checked && is_check { return None; }
-        if stored_depth == depth && (stored_input == e || self.ctx.sem_eq(stored_input, e)) {
-            return Some(stored_result);
+        if stored_depth == depth {
+            if stored_input == e || self.ctx.sem_eq(stored_input, e) {
+                return Some(stored_result);
+            }
+            return None; // caller counts vf_same
         }
         if depth > stored_depth {
             let delta = depth - stored_depth;
             if self.ctx.shift_eq(stored_input, e, delta) {
                 return Some(self.ctx.mk_shift(stored_result, delta));
+            }
+            return None; // caller counts vf_above
+        }
+        // depth < stored_depth: reverse shift_eq + push_shift_down
+        let delta = stored_depth - depth;
+        if self.ctx.shift_eq(e, stored_input, delta) {
+            let result_fvar_lb = self.ctx.fvar_lb(self.ctx.read_expr(stored_result).get_fvar_list());
+            if self.ctx.num_loose_bvars(stored_result) == 0 || result_fvar_lb >= delta {
+                return Some(self.ctx.push_shift_down(stored_result, delta));
             }
         }
         None
@@ -784,6 +816,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                 return;
             }
             // Different family — store in overflow
+            self.ctx.trace.infer_cache_overflow_stores += 1;
             let overflow = match self.tc_cache.infer_cache_overflow.get_mut(bucket_idx) {
                 Some(b) => b,
                 None => return,
@@ -1332,7 +1365,6 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                     (store_depth - entry_lb) as usize
                 };
                 if let Some(bucket) = self.tc_cache.whnf_no_unfolding_cache.get_mut(entry_bucket_idx) {
-                    // Prefer lower depth (more reusable for cross-depth shift_eq).
                     if bucket.get(&entry_canon).map_or(true, |&(_, _, sd)| store_depth < sd) {
                         bucket.insert(entry_canon, (entry, result, store_depth));
                     }
