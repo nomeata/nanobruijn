@@ -87,17 +87,10 @@ defeq_open_lookup), whnf/whnf_no_unfolding cache hits, infer cache hits,
 comparison: `shift(a, delta) == shift(inner_b, amount)` iff `shift(inner_b, amount - delta) == a`.
 Still used for cross-depth shift-invariant cache lookups (delta > 0).
 
-**Dead code pending removal**: `canonicalize`, `canon_eq`, `resolve_shifts_for_whnf`.
-These are superseded by `sem_eq` and the lighter-weight `resolve_shifts`.
-
-### resolve_shifts (selective shift resolution)
-
-`resolve_shifts(e)` / `resolve_shifts_aux(e, sh_amt, sh_cut)` pushes all Shift wrappers
-down to leaves (Var nodes), creating new shift-free expression nodes. Memoized via
-`canon_cache`. Unlike `canonicalize`, this is only applied selectively:
-- `whnf_no_unfolding` and `whnf_no_unfolding_cheap_proj` resolve shifts on results
-- `whnf` (with unfolding) resolves shifts on final results before caching
-- NOT applied on every expression comparison (that's `sem_eq`'s job)
+All deep shift resolution code has been removed: `canonicalize`, `canon_eq`,
+`resolve_shifts`, `resolve_shifts_aux`, `peel_shifts`, `canon_cache`, `canon_degraded`,
+`sem_eq_cache`. The system uses only `sem_eq` (non-allocating structural walk) for
+equality and `shift_eq` for cross-depth cache reuse.
 
 ### Lazy zeta in whnf Let case
 
@@ -109,8 +102,12 @@ When whnf encounters `Var(k)` pointing to a let-binding (`lookup_var_value`), it
 zeta reduction: unfolds to the shifted let value and continues reducing.
 
 **Cache soundness**: With zeta reduction, `whnf(Shift(e, k)) ≠ Shift(whnf(e), k)` when
-shifted vars point to different let-bindings. The whnf cache `shift_eq` optimization is
-guarded by `context_range_is_let_free(e_bvar_ub)`.
+shifted vars point to different let-bindings. The whnf and wnu caches use fvar_lb-based
+bucketing (like the infer cache): `bucket_idx = depth - fvar_lb`. Expressions at different
+depths land in the same bucket only if they reference the same context range. Cross-depth
+hits use `shift_eq(stored, query, depth_delta)` and return `push_shift(result, delta, 0)`.
+This is sound because Shift peeling shrinks context to the stored depth, making let-bindings
+above that depth irrelevant. The `context_range_is_let_free` guard has been removed.
 
 `whnf_no_unfolding_aux` uses `view_expr` for the Lambda body-collection loop (handles
 Shift-wrapped bodies from `push_shift` results) and `push_shift` in the
@@ -136,11 +133,13 @@ delta-encoded linked list: `{0, 3, 7}` → `[0, 2, 3]` (head = lb, subsequent = 
 
 Canonical hash = `(struct_hash, normalized FVarList hash)`.
 
-**WHNF cache**: keyed by canonical hash; on hit, verify with `sem_eq` (same-depth) or
-`shift_eq` + `push_shift` (cross-depth). Both paths now enabled.
+**WHNF cache**: fvar_lb-based bucketing (`bucket_idx = depth - fvar_lb`). Keyed by
+canonical hash; on hit, verify with `sem_eq` (same-depth) or `shift_eq` + `push_shift`
+(cross-depth, delta = `depth - stored_depth`). Cache entries store `(input, result, stored_depth)`.
+Prefers lower stored_depth (more reusable across depths).
 
-**whnf_no_unfolding cache**: keyed by canonical hash; `sem_eq` for same-depth hits.
-`whnf_no_unfolding` also peels top-level Shifts (shift-equivariance) before cache lookup.
+**whnf_no_unfolding cache**: same fvar_lb-based bucketing and cross-depth shift_eq pattern
+as the whnf cache. Also peels top-level Shifts (shift-equivariance) before cache lookup.
 
 **Infer cache**: unified stack of maps. Bucket 0 holds closed expressions (never evicted).
 Buckets 1..depth hold open expressions, indexed by `bucket_idx = depth - fvar_lb`.
@@ -186,8 +185,13 @@ Result is a boolean (no delta to apply). On init: ~39K shift-invariant hits out 
 |-----------|--------------------------|------------------|
 | Init (54k decls, 310MB) | 26s | 33s (1.27x) |
 | app-lam N=4000 | 8.3s | 10ms (830x faster) |
-| Mathlib (630k decls, 4.9GB) | ~16min (est.) | ~65min (est. ~4x) |
+| Mathlib (630k decls, 4.9GB) | ~16min (est.) | 153min (0 timeouts, ~9.5x) |
 | sheafedSpaceMap_comp (worst case) | ~2s | 12s (6x) |
+
+Note: Init was 29s before fvar_lb-based bucketing (depth-only bucketing, no cross-depth
+shift_eq). The 4s regression comes from fvar_lb computation overhead on every cache access.
+Previous Mathlib run (with canonicalize, before fvar_lb bucketing) had 213 timeouts.
+Current code: 0 timeouts, 153min wall time (~9.5x nanoda).
 
 Profile (init, pre-deletion baseline, 375B instructions): `force_shift_aux` was the
 dominant cost — shift cache had ~40% hit rate (8M hits, 12M misses). Now deleted;
@@ -204,10 +208,10 @@ We should **not** be slower due to missed cache hits. If we are, we need to find
 the cache miss, not paper over it with heuristics (DAG size thresholds, degraded mode,
 timeouts, etc.).
 
-**Minimal shift resolution**: The whole point of Shift nodes is to avoid traversals.
-We use `sem_eq` (non-allocating structural walk) for all equality comparisons, avoiding
-deep canonicalization. `resolve_shifts` is applied only to whnf results (needed for cache
-convergence with lazy zeta Let reduction), not on every comparison. The `struct_hash` is
+**No shift resolution**: The whole point of Shift nodes is to avoid traversals.
+We use `sem_eq` (non-allocating structural walk) for all equality comparisons — no deep
+canonicalization or shift resolution anywhere. All deep shift resolution code has been
+removed (`canonicalize`, `resolve_shifts`, `canon_cache`, etc.). The `struct_hash` is
 shift-invariant by design (Shift nodes inherit their inner's struct_hash), so canonical
 hashes match for shifted and unshifted versions.
 
@@ -282,7 +286,7 @@ for substitution values under binders. These Shift wrappers cascade — subseque
 calls must traverse through them, creating more wrappers. This is the fundamental cost of
 deferred shifts. Nanoda's locally-nameless approach substitutes fvars that don't need shifting.
 
-### Let-in-context (partial: threshold-gated)
+### Let-in-context (partial: lazy whnf Let only)
 
 The kernel processes `let x := val in body` by substituting val for Var(0) in body
 via `inst_beta`. For nested let chains, this creates O(N²) cascading substitution work
@@ -293,33 +297,20 @@ because each substitution must traverse Shift wrappers from previous substitutio
 let-binding, it performs "zeta reduction": unfolds to the shifted let value. After inference,
 `inst_beta(result, [val])` brings the result type back to the caller's depth.
 
-Infrastructure added:
+Infrastructure:
 - `local_ctx` changed from `Vec<ExprPtr>` to `Vec<(ExprPtr, Option<ExprPtr>)>` (type + optional value)
 - `lookup_var_value(k)`: returns shifted let-value if context position is a let-binding
 - `push_local_let(ty, val)` / updated `pop_local()`: manage let entries in context
-- `context_range_is_let_free(bvar_ub)`: guards whnf cache shift_eq (see below)
 - Zeta reduction in whnf_no_unfolding_aux `Var` case: unfolds let-bound vars
-- Stacked whnf caches: `Vec<FxHashMap>` per depth (like infer/defeq caches), invalidated on pop
+- Stacked whnf/wnu caches: `Vec<FxHashMap>` with fvar_lb-based bucketing, invalidated on pop
 
-**Cache soundness**: With zeta reduction, `whnf(Shift(e, k)) ≠ Shift(whnf(e), k)` when
-the shifted vars point to different let-bindings. The whnf cache `shift_eq` optimization
-is guarded by `context_range_is_let_free(e_bvar_ub)` — only fires when no let-bindings
-exist in the referenced bvar range. Pointer-equal and `canon_eq` lookups remain sound
-at the same depth. The infer cache `shift_eq` is unconditionally safe (types don't depend
-on zeta reduction — `infer(Shift(e, delta))` = `Shift(infer(e), delta)` always holds).
-
-**Fundamental blocker with Shift wrappers**: Always-let-in-context in `infer_let` causes
-whnf non-convergence on certain declarations (e.g., #19275, #19313). The Shift-wrapper
-representation creates fundamentally different reduction paths compared to explicit
-substitution:
-1. Each whnf iteration creates new expressions via beta reduction
-2. These get Shift wrappers from context operations
-3. resolve_shifts creates canonical forms
-4. But unfold_def produces different terms because the reduced forms differ
-5. Cycle continues indefinitely — whnf_beta_reductions grow linearly without converging
-
-The official Lean kernel avoids this because locally-nameless fvars don't need shifting
-for let-value lookups — reduction paths are identical regardless of let-in-context.
+**Fundamental blocker for infer_let**: Always-let-in-context in `infer_let` causes
+8/54086 Init declarations to diverge (timeout at 30s). Root cause: `inst_beta(result, [val])`
+after pop creates expressions that are genuinely structurally different from what eager
+inference produces — NOT shift-variants. The wnu cache correctly identifies no shift
+relationship (only 42 hits out of 44K calls with let-in-context infer_let). The official
+Lean kernel avoids this because fvar-based zeta reduction returns the original `val`
+pointer (no shifting), so reduction paths converge to the same DAG nodes.
 
 **Current state**: `infer_let` uses eager `inst_beta(body, [val])`. The lazy zeta approach
 in whnf Let case (push/pop/inst_beta on reduced result) works correctly and avoids
@@ -332,16 +323,18 @@ nested-let cascade. Together these handle all Init declarations.
 
 ## TODO
 
-- **Remove dead code**: `canonicalize`, `canon_eq`, `resolve_shifts_for_whnf`,
-  `canon_degraded`, `sem_eq_cache` — all superseded by `sem_eq` + `resolve_shifts`.
-  Also: thread_local profiling counters, dead locally-nameless code (Local variant,
-  FVarId, abstr, etc.)
+- **Remove remaining dead code**: thread_local profiling counters, dead locally-nameless
+  code (Local variant, FVarId, abstr, etc.)
 
 - **Reduce inst_aux traversal count**: The 4.8x gap (938K vs 196K) is the main pathological-
   case blocker, but general performance is now ~1.27x. Ideas:
   - Persistent inst_cache across inst_beta calls (include subst in key)
   - Size-bounded eager shift (resolve small vals, defer large ones)
   - Avoid creating Shift wrappers for subst vals that will be immediately consumed by whnf
+
+- **Investigate fvar_lb computation overhead**: fvar_lb-based bucketing regressed Init
+  from 29s to 33s. The fvar_lb computation on every cache access may outweigh the
+  cross-depth hit benefit for Init. Profile and consider caching fvar_lb.
 
 - **Investigate always-let-in-context alternatives**: Current eager infer_let works but
   doesn't avoid O(N²) cascade for deep lets in infer. Options:
