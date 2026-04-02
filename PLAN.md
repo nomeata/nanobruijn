@@ -208,6 +208,29 @@ We should **not** be slower due to missed cache hits. If we are, we need to find
 the cache miss, not paper over it with heuristics (DAG size thresholds, degraded mode,
 timeouts, etc.).
 
+### WHNF cache collision problem (main Mathlib bottleneck)
+
+On pathological Mathlib declarations (e.g. #334175 `toPartialMap._proof_6`), the whnf cache
+has massive hash collisions: 2.9M verify_fails with only 9K no_entry misses. The root cause:
+
+- `canonical_hash = (struct_hash, fvar_normalize_hash)` is deliberately shift-invariant
+- This means many different expressions map to the same hash key
+- The HashMap stores ONE entry per key — last writer wins
+- When different (non-shift-variant) expressions share a canonical hash, they evict useful entries
+
+The dominant collision pattern is **stored_depth > query_depth**: an entry stored at depth D
+cannot serve a query at depth D' < D (we only support upward cross-depth shift_eq, not
+downward). The "prefer lower depth" store policy eventually fixes this, but every depth
+transition wastes a recomputation.
+
+Impact: nanoda gets near-100% whnf cache hit rate (5.99M/5.99M), we get 69% (9.4M/13.6M).
+The 4.2M extra whnf reductions cascade into 2x more infer/inst calls and 35x more inst_aux
+nodes (542M vs 15M).
+
+Confirmed fix: multi-entry cache (Vec per slot, cap=4) drops verify_fails from 2.9M to 92,
+cuts inst_aux from 542M to 135M, halves the pathological case time. But regresses Init
+slightly due to Vec allocation overhead. Needs a low-overhead multi-entry approach.
+
 **No shift resolution**: The whole point of Shift nodes is to avoid traversals.
 We use `sem_eq` (non-allocating structural walk) for all equality comparisons — no deep
 canonicalization or shift resolution anywhere. All deep shift resolution code has been
