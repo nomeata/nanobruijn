@@ -326,6 +326,9 @@ pub struct TcTrace {
     pub whnf_cache_no_bucket: u64,
     pub whnf_cache_no_entry: u64,
     pub whnf_cache_verify_fail: u64,
+    pub whnf_cache_depth_miss: u64, // depth < stored_depth
+    pub whnf_cache_same_depth_miss: u64, // depth == stored_depth, sem_eq fails
+    pub whnf_cache_cross_depth_miss: u64, // depth > stored_depth, shift_eq fails
 }
 
 impl std::fmt::Display for TcTrace {
@@ -341,7 +344,7 @@ impl std::fmt::Display for TcTrace {
             write!(f, " | zeta={} wlet={} wbeta={} dag={} wnu={}/{}/{}", self.zeta_reductions, self.whnf_let_reductions, self.whnf_beta_reductions, self.dag_size, self.wnu_calls, self.wnu_cache_hits, self.wnu_shift_peel)?;
         }
         if self.whnf_cache_verify_fail > 0 {
-            write!(f, " | wmiss={}/{}/{}", self.whnf_cache_no_bucket, self.whnf_cache_no_entry, self.whnf_cache_verify_fail)?;
+            write!(f, " | wmiss={}/{}/{} wvf={}/{}/{}", self.whnf_cache_no_bucket, self.whnf_cache_no_entry, self.whnf_cache_verify_fail, self.whnf_cache_same_depth_miss, self.whnf_cache_cross_depth_miss, self.whnf_cache_depth_miss)?;
         }
         Ok(())
     }

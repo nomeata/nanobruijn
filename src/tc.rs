@@ -1003,6 +1003,13 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                     }
                 }
                 self.ctx.trace.whnf_cache_verify_fail += 1;
+                if depth == stored_depth {
+                    self.ctx.trace.whnf_cache_same_depth_miss += 1;
+                } else if depth > stored_depth {
+                    self.ctx.trace.whnf_cache_cross_depth_miss += 1;
+                } else {
+                    self.ctx.trace.whnf_cache_depth_miss += 1;
+                }
             } else {
                 self.ctx.trace.whnf_cache_no_entry += 1;
             }
