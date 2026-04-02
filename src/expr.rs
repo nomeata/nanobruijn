@@ -416,19 +416,19 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
                     }
                 }
                 App { fun, arg, .. } => {
-                    let fun = self.inst_aux(fun, substs, offset, shift_down, 0, 0);
-                    let arg = self.inst_aux(arg, substs, offset, shift_down, 0, 0);
-                    self.mk_app(fun, arg)
+                    let new_fun = self.inst_aux(fun, substs, offset, shift_down, 0, 0);
+                    let new_arg = self.inst_aux(arg, substs, offset, shift_down, 0, 0);
+                    if new_fun == fun && new_arg == arg { e } else { self.mk_app(new_fun, new_arg) }
                 }
                 Pi { binder_name, binder_style, binder_type, body, .. } => {
-                    let binder_type = self.inst_aux(binder_type, substs, offset, shift_down, 0, 0);
-                    let body = self.inst_aux(body, substs, offset + 1, shift_down, 0, 0);
-                    self.mk_pi(binder_name, binder_style, binder_type, body)
+                    let new_type = self.inst_aux(binder_type, substs, offset, shift_down, 0, 0);
+                    let new_body = self.inst_aux(body, substs, offset + 1, shift_down, 0, 0);
+                    if new_type == binder_type && new_body == body { e } else { self.mk_pi(binder_name, binder_style, new_type, new_body) }
                 }
                 Lambda { binder_name, binder_style, binder_type, body, .. } => {
-                    let binder_type = self.inst_aux(binder_type, substs, offset, shift_down, 0, 0);
-                    let body = self.inst_aux(body, substs, offset + 1, shift_down, 0, 0);
-                    self.mk_lambda(binder_name, binder_style, binder_type, body)
+                    let new_type = self.inst_aux(binder_type, substs, offset, shift_down, 0, 0);
+                    let new_body = self.inst_aux(body, substs, offset + 1, shift_down, 0, 0);
+                    if new_type == binder_type && new_body == body { e } else { self.mk_lambda(binder_name, binder_style, new_type, new_body) }
                 }
                 Let { binder_name, binder_type, val, body, nondep, .. } => {
                     let binder_type = self.inst_aux(binder_type, substs, offset, shift_down, 0, 0);
