@@ -336,6 +336,10 @@ pub struct TcTrace {
     pub whnf_cache_vf_evictions: u64,     // times a collision caused eviction of a different expression
     pub whnf_cache_overflow_stores: u64,
     pub whnf_cache_overflow_hits: u64,
+    // wnu cache miss breakdown
+    pub wnu_cache_no_bucket: u64,
+    pub wnu_cache_no_entry: u64,
+    pub wnu_cache_verify_fail: u64,
 }
 
 impl std::fmt::Display for TcTrace {
@@ -348,7 +352,7 @@ impl std::fmt::Display for TcTrace {
             self.push_shift_calls, self.push_shift_cache_hits,
             self.inst_aux_calls, self.inst_aux_cache_hits, self.inst_aux_elided)?;
         if self.zeta_reductions > 0 || self.whnf_let_reductions > 0 || self.wnu_calls > 0 {
-            write!(f, " | zeta={} wlet={} wbeta={} dag={} wnu={}/{}/{}", self.zeta_reductions, self.whnf_let_reductions, self.whnf_beta_reductions, self.dag_size, self.wnu_calls, self.wnu_cache_hits, self.wnu_shift_peel)?;
+            write!(f, " | zeta={} wlet={} wbeta={} dag={} wnu={}/{}/{} wnu_miss={}/{}/{}", self.zeta_reductions, self.whnf_let_reductions, self.whnf_beta_reductions, self.dag_size, self.wnu_calls, self.wnu_cache_hits, self.wnu_shift_peel, self.wnu_cache_no_bucket, self.wnu_cache_no_entry, self.wnu_cache_verify_fail)?;
         }
         if self.whnf_cache_verify_fail > 0 {
             write!(f, " | wmiss={}/{}/{} vf={}/{}/{} sign_fix={} evict={} ov_store={} ov_hit={}", self.whnf_cache_no_bucket, self.whnf_cache_no_entry, self.whnf_cache_verify_fail, self.whnf_cache_vf_same, self.whnf_cache_vf_above, self.whnf_cache_vf_below, self.whnf_cache_vf_sign_would_fix, self.whnf_cache_vf_evictions, self.whnf_cache_overflow_stores, self.whnf_cache_overflow_hits)?;

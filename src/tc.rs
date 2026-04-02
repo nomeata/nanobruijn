@@ -1172,7 +1172,12 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                             break self.ctx.push_shift(stored_result, delta, 0);
                         }
                     }
+                    self.ctx.trace.wnu_cache_verify_fail += 1;
+                } else {
+                    self.ctx.trace.wnu_cache_no_entry += 1;
                 }
+            } else {
+                self.ctx.trace.wnu_cache_no_bucket += 1;
             }
             let (e_fun, args) = self.ctx.unfold_apps(cur);
             match self.ctx.read_expr(e_fun) {
