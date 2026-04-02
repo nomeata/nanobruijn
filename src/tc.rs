@@ -278,6 +278,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
     fn push_local(&mut self, ty: ExprPtr<'t>) {
         self.local_ctx.push((ty, None));
         self.tc_cache.infer_cache.push(new_fx_hash_map());
+        self.tc_cache.infer_cache_overflow.push(new_fx_hash_map());
         self.tc_cache.whnf_cache.push(new_fx_hash_map());
         self.tc_cache.whnf_cache_overflow.push(new_fx_hash_map());
         self.tc_cache.whnf_no_unfolding_cache.push(new_fx_hash_map());
@@ -289,6 +290,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
     fn push_local_let(&mut self, ty: ExprPtr<'t>, val: ExprPtr<'t>) {
         self.local_ctx.push((ty, Some(val)));
         self.tc_cache.infer_cache.push(new_fx_hash_map());
+        self.tc_cache.infer_cache_overflow.push(new_fx_hash_map());
         self.tc_cache.whnf_cache.push(new_fx_hash_map());
         self.tc_cache.whnf_cache_overflow.push(new_fx_hash_map());
         self.tc_cache.whnf_no_unfolding_cache.push(new_fx_hash_map());
@@ -300,6 +302,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
     fn pop_local(&mut self) {
         self.local_ctx.pop().expect("pop_local: empty context");
         self.tc_cache.infer_cache.pop();
+        self.tc_cache.infer_cache_overflow.pop();
         self.tc_cache.whnf_cache.pop();
         self.tc_cache.whnf_cache_overflow.pop();
         self.tc_cache.whnf_no_unfolding_cache.pop();
@@ -312,6 +315,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         if self.local_ctx.len() > depth {
             self.local_ctx.truncate(depth);
             self.tc_cache.infer_cache.truncate(depth + 1); // +1 for base bucket
+            self.tc_cache.infer_cache_overflow.truncate(depth + 1);
             self.tc_cache.whnf_cache.truncate(depth + 1);
             self.tc_cache.whnf_cache_overflow.truncate(depth + 1);
             self.tc_cache.whnf_no_unfolding_cache.truncate(depth + 1);
@@ -664,6 +668,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                 let new_depth = self.local_ctx.len() - amount as usize;
                 let saved_locals = self.local_ctx.split_off(new_depth);
                 let saved_cache = self.tc_cache.infer_cache.split_off(new_depth + 1); // +1 for base bucket
+                let saved_cache_ov = self.tc_cache.infer_cache_overflow.split_off(new_depth + 1);
                 let saved_whnf = self.tc_cache.whnf_cache.split_off(new_depth + 1);
                 let saved_whnf_ov = self.tc_cache.whnf_cache_overflow.split_off(new_depth + 1);
                 let saved_whnf_nu = self.tc_cache.whnf_no_unfolding_cache.split_off(new_depth + 1);
@@ -672,6 +677,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                 let inner_type = self.infer(inner, flag);
                 self.local_ctx.extend(saved_locals);
                 self.tc_cache.infer_cache.extend(saved_cache);
+                self.tc_cache.infer_cache_overflow.extend(saved_cache_ov);
                 self.tc_cache.whnf_cache.extend(saved_whnf);
                 self.tc_cache.whnf_cache_overflow.extend(saved_whnf_ov);
                 self.tc_cache.whnf_no_unfolding_cache.extend(saved_whnf_nu);
@@ -694,25 +700,25 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         };
         let canon = self.ctx.canonical_hash(e);
         let is_check = flag == InferFlag::Check;
-        if let Some(bucket) = self.tc_cache.infer_cache.get(bucket_idx) {
-            if let Some(&(stored_input, stored_result, stored_depth, checked)) = bucket.get(&canon) {
-                self.ctx.trace.infer_cache_hash_hit += 1;
-                // A Check entry can serve both flags; an InferOnly entry can only serve InferOnly.
-                if checked || !is_check {
-                    if stored_depth == depth && self.ctx.sem_eq(stored_input, e) {
-                        self.ctx.trace.infer_cache_hits += 1;
-                        return stored_result;
-                    }
-                    if depth > stored_depth {
-                        let delta = depth - stored_depth;
-                        if self.ctx.shift_eq(stored_input, e, delta) {
-                            self.ctx.trace.infer_cache_hits += 1;
-                            return self.ctx.mk_shift(stored_result, delta);
-                        }
-                    }
-                }
-                self.ctx.trace.infer_cache_verify_fail += 1;
+        // Infer cache lookup: primary + overflow, same pattern as whnf cache.
+        let primary_infer = self.tc_cache.infer_cache.get(bucket_idx)
+            .and_then(|b| b.get(&canon)).copied();
+        let overflow_infer = self.tc_cache.infer_cache_overflow.get(bucket_idx)
+            .and_then(|b| b.get(&canon)).copied();
+        if let Some((stored_input, stored_result, stored_depth, checked)) = primary_infer {
+            self.ctx.trace.infer_cache_hash_hit += 1;
+            if let Some(r) = self.try_infer_cache_hit(e, stored_input, stored_result, stored_depth, depth, checked, is_check) {
+                self.ctx.trace.infer_cache_hits += 1;
+                return r;
             }
+            // Primary miss — try overflow
+            if let Some((stored_input, stored_result, stored_depth, checked)) = overflow_infer {
+                if let Some(r) = self.try_infer_cache_hit(e, stored_input, stored_result, stored_depth, depth, checked, is_check) {
+                    self.ctx.trace.infer_cache_hits += 1;
+                    return r;
+                }
+            }
+            self.ctx.trace.infer_cache_verify_fail += 1;
         }
         let r = match self.ctx.read_expr(e) {
             Local { binder_type, .. } => binder_type,
@@ -734,16 +740,58 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             }
             Shift { .. } => unreachable!("Shift handled before cache lookup")
         };
-        if let Some(bucket) = self.tc_cache.infer_cache.get_mut(bucket_idx) {
-            // Prefer: (1) checked over unchecked, (2) lower depth (better for shift hits)
-            let dominated = bucket.get(&canon).map_or(true, |&(_, _, sd, sc)| {
-                (is_check && !sc) || (is_check == sc && depth < sd)
-            });
-            if dominated {
-                bucket.insert(canon, (e, r, depth, is_check));
+        self.infer_cache_store(bucket_idx, canon, e, r, depth, is_check);
+        r
+    }
+
+    /// Try to match a query against a stored infer cache entry.
+    fn try_infer_cache_hit(&mut self, e: ExprPtr<'t>, stored_input: ExprPtr<'t>, stored_result: ExprPtr<'t>, stored_depth: u16, depth: u16, checked: bool, is_check: bool) -> Option<ExprPtr<'t>> {
+        // A Check entry can serve both flags; an InferOnly entry can only serve InferOnly.
+        if !checked && is_check { return None; }
+        if stored_depth == depth && (stored_input == e || self.ctx.sem_eq(stored_input, e)) {
+            return Some(stored_result);
+        }
+        if depth > stored_depth {
+            let delta = depth - stored_depth;
+            if self.ctx.shift_eq(stored_input, e, delta) {
+                return Some(self.ctx.mk_shift(stored_result, delta));
             }
         }
-        r
+        None
+    }
+
+    /// Store an infer result in the primary + overflow cache.
+    fn infer_cache_store(&mut self, bucket_idx: usize, canon: (u64, u64), e: ExprPtr<'t>, r: ExprPtr<'t>, depth: u16, is_check: bool) {
+        let primary = match self.tc_cache.infer_cache.get_mut(bucket_idx) {
+            Some(b) => b,
+            None => return,
+        };
+        if let Some(slot) = primary.get_mut(&canon) {
+            if slot.0 == e { return; }
+            // Check if same shift-family
+            let sd = slot.2;
+            let is_family = if depth == sd {
+                self.ctx.sem_eq(slot.0, e)
+            } else if depth > sd {
+                self.ctx.shift_eq(slot.0, e, depth - sd)
+            } else {
+                self.ctx.shift_eq(e, slot.0, sd - depth)
+            };
+            if is_family {
+                // Same family — prefer checked, then lower depth
+                let dominated = (is_check && !slot.3) || (is_check == slot.3 && depth < sd);
+                if dominated { *slot = (e, r, depth, is_check); }
+                return;
+            }
+            // Different family — store in overflow
+            let overflow = match self.tc_cache.infer_cache_overflow.get_mut(bucket_idx) {
+                Some(b) => b,
+                None => return,
+            };
+            overflow.insert(canon, (e, r, depth, is_check));
+        } else {
+            primary.insert(canon, (e, r, depth, is_check));
+        }
     }
 
     fn infer_sort(&mut self, l: LevelPtr<'t>, flag: InferFlag) -> ExprPtr<'t> {
@@ -970,14 +1018,18 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             let new_depth = self.local_ctx.len() - total_shift as usize;
             let saved_locals = self.local_ctx.split_off(new_depth);
             let saved_infer = self.tc_cache.infer_cache.split_off(new_depth + 1);
+            let saved_infer_ov = self.tc_cache.infer_cache_overflow.split_off(new_depth + 1);
             let saved_whnf = self.tc_cache.whnf_cache.split_off(new_depth + 1);
+            let saved_whnf_ov = self.tc_cache.whnf_cache_overflow.split_off(new_depth + 1);
             let saved_whnf_nu = self.tc_cache.whnf_no_unfolding_cache.split_off(new_depth + 1);
             let saved_pos = self.tc_cache.defeq_pos_open.split_off(new_depth);
             let saved_neg = self.tc_cache.defeq_neg_open.split_off(new_depth);
             let r = self.whnf(e);
             self.local_ctx.extend(saved_locals);
             self.tc_cache.infer_cache.extend(saved_infer);
+            self.tc_cache.infer_cache_overflow.extend(saved_infer_ov);
             self.tc_cache.whnf_cache.extend(saved_whnf);
+            self.tc_cache.whnf_cache_overflow.extend(saved_whnf_ov);
             self.tc_cache.whnf_no_unfolding_cache.extend(saved_whnf_nu);
             self.tc_cache.defeq_pos_open.extend(saved_pos);
             self.tc_cache.defeq_neg_open.extend(saved_neg);
@@ -1129,14 +1181,18 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             let new_depth = self.local_ctx.len() - total_shift as usize;
             let saved_locals = self.local_ctx.split_off(new_depth);
             let saved_infer = self.tc_cache.infer_cache.split_off(new_depth + 1);
+            let saved_infer_ov = self.tc_cache.infer_cache_overflow.split_off(new_depth + 1);
             let saved_whnf = self.tc_cache.whnf_cache.split_off(new_depth + 1);
+            let saved_whnf_ov = self.tc_cache.whnf_cache_overflow.split_off(new_depth + 1);
             let saved_whnf_nu = self.tc_cache.whnf_no_unfolding_cache.split_off(new_depth + 1);
             let saved_pos = self.tc_cache.defeq_pos_open.split_off(new_depth);
             let saved_neg = self.tc_cache.defeq_neg_open.split_off(new_depth);
             let r = self.whnf_no_unfolding_aux(e, cheap_proj);
             self.local_ctx.extend(saved_locals);
             self.tc_cache.infer_cache.extend(saved_infer);
+            self.tc_cache.infer_cache_overflow.extend(saved_infer_ov);
             self.tc_cache.whnf_cache.extend(saved_whnf);
+            self.tc_cache.whnf_cache_overflow.extend(saved_whnf_ov);
             self.tc_cache.whnf_no_unfolding_cache.extend(saved_whnf_nu);
             self.tc_cache.defeq_pos_open.extend(saved_pos);
             self.tc_cache.defeq_neg_open.extend(saved_neg);

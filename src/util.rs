@@ -1430,6 +1430,8 @@ pub(crate) struct TcCache<'t> {
     /// On hit, verify with shift_eq and apply delta via mk_shift.
     /// Push/pop follows local_ctx for O(1) eviction.
     pub(crate) infer_cache: Vec<FxHashMap<(u64, u64), (ExprPtr<'t>, ExprPtr<'t>, u16, bool)>>,
+    /// Overflow for infer_cache: second entry per canonical hash when families collide.
+    pub(crate) infer_cache_overflow: Vec<FxHashMap<(u64, u64), (ExprPtr<'t>, ExprPtr<'t>, u16, bool)>>,
 }
 
 impl<'t> TcCache<'t> {
@@ -1444,6 +1446,7 @@ impl<'t> TcCache<'t> {
             defeq_neg_open: Vec::new(),
             strong_cache: new_unique_hash_map(),
             infer_cache: vec![new_fx_hash_map()], // bucket 0 = closed expressions
+            infer_cache_overflow: vec![new_fx_hash_map()],
         }
     }
 
@@ -1460,6 +1463,8 @@ impl<'t> TcCache<'t> {
         // Keep bucket 0 (closed), clear it, drop open buckets
         self.infer_cache.truncate(1);
         self.infer_cache[0].clear();
+        self.infer_cache_overflow.truncate(1);
+        self.infer_cache_overflow[0].clear();
     }
 }
 
