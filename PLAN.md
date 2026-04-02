@@ -202,6 +202,16 @@ Results with shift-aware UF (cumulative with plain UF):
 - Init: 33.0s (neutral or slight improvement from baseline 34.0s)
 - #63709: neutral (shift patterns don't match in this declaration)
 
+**Shift node dedup**: `mk_shift_cutoff(inner, amount, cutoff)` returns the same ExprPtr for
+repeated calls with the same arguments, via a `(ExprPtr, u16, u16) → ExprPtr` dedup table.
+This enables pointer equality to succeed more often in cache verification (sem_eq's `a == b`
+fast path), avoiding expensive O(tree_size) structural walks through shift_eq. Profile showed
+57% of CPU time in shift_eq for pathological declarations. With dedup, 124K Shift nodes are
+reused on #134719. Combined with a small sem_eq positive-result cache:
+- #134719: 74.6s (was 80.6s) = 7.4% improvement
+- #179806: 68.2s (was 72.9s) = 6.4% improvement
+- Init: 30-32s (neutral)
+
 **DefEq cache (open expressions)**: same stack-of-maps design as the infer cache.
 Keyed by ordered pair of canonical hashes `((u64,u64), (u64,u64))`.
 `bucket_idx = depth - min(fvar_lb(x), fvar_lb(y))` — uses the deeper (more recently
@@ -231,7 +241,9 @@ Result is a boolean (no delta to apply). On init: ~39K shift-invariant hits out 
 | Mathlib (630k decls, 4.9GB) | ~16min (est.) | full run in progress (see below) |
 | Mathlib 100k-110k segment | 14s | 34s (2.4x) |
 | Mathlib 300k-310k segment | 12s | 76s (6.3x) |
-| ModuleCat.monoidalCategory._proof_4 (#63709) | 503ms | 84s (167x, was 93s before UF) |
+| ofPointTensor_SpecTensorTo (#134719) | 214ms | 74.6s (349x, was 98s before UF+dedup) |
+| Ideal.comap_fiber... (#179806) | ~2s (est.) | 68.2s (was 78s before UF+dedup) |
+| ModuleCat.monoidalCategory._proof_4 (#63709) | 503ms | 79s (157x, was 93s before UF) |
 | toPartialMap._proof_6 (pathological) | ~2s | 17.5s (was 29.8s before 2-slot caches) |
 | nonempty_algHom (was pathological) | 67ms | 1.4s (was 22.7s before push_shift_down fix) |
 
