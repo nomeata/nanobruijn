@@ -1551,7 +1551,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                     } else {
                         let (xn0, yn0) = (x_n, y_n);
                         let (x_n, y_n) = (self.whnf_no_unfolding(xn0), self.whnf_no_unfolding(yn0));
-                        if !self.ctx.sem_eq(x_n, xn0) || !self.ctx.sem_eq(y_n, yn0) {
+                        if x_n != xn0 || y_n != yn0 {
                             self.def_eq(x_n, y_n)
                         } else {
                             self.def_eq_app(x_n, y_n)
