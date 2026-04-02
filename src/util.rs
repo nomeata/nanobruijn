@@ -322,6 +322,10 @@ pub struct TcTrace {
     pub wnu_calls: u64,
     pub wnu_cache_hits: u64,
     pub wnu_shift_peel: u64,
+    // whnf cache miss breakdown
+    pub whnf_cache_no_bucket: u64,
+    pub whnf_cache_no_entry: u64,
+    pub whnf_cache_verify_fail: u64,
 }
 
 impl std::fmt::Display for TcTrace {
@@ -335,6 +339,9 @@ impl std::fmt::Display for TcTrace {
             self.inst_aux_calls, self.inst_aux_cache_hits, self.inst_aux_elided)?;
         if self.zeta_reductions > 0 || self.whnf_let_reductions > 0 || self.wnu_calls > 0 {
             write!(f, " | zeta={} wlet={} wbeta={} dag={} wnu={}/{}/{}", self.zeta_reductions, self.whnf_let_reductions, self.whnf_beta_reductions, self.dag_size, self.wnu_calls, self.wnu_cache_hits, self.wnu_shift_peel)?;
+        }
+        if self.whnf_cache_verify_fail > 0 {
+            write!(f, " | wmiss={}/{}/{}", self.whnf_cache_no_bucket, self.whnf_cache_no_entry, self.whnf_cache_verify_fail)?;
         }
         Ok(())
     }

@@ -995,9 +995,6 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                     self.ctx.trace.whnf_cache_hits += 1;
                     return stored_result;
                 }
-                // Cross-depth shift_eq: reuse whnf(stored) at stored_depth for
-                // e at current depth. Sound because Shift peeling shrinks context
-                // to stored_depth, so let-bindings above stored_depth are irrelevant.
                 if depth > stored_depth {
                     let delta = depth - stored_depth;
                     if self.ctx.shift_eq(stored_input, e, delta) {
@@ -1005,7 +1002,12 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                         return self.ctx.push_shift(stored_result, delta, 0);
                     }
                 }
+                self.ctx.trace.whnf_cache_verify_fail += 1;
+            } else {
+                self.ctx.trace.whnf_cache_no_entry += 1;
             }
+        } else {
+            self.ctx.trace.whnf_cache_no_bucket += 1;
         }
         let mut cursor = e;
         loop {
