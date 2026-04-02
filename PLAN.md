@@ -189,9 +189,13 @@ then serves as the base for future shifted lookups.
 stored ExprPtrs verified via `sem_eq`. Additionally, a pointer-based `UnionFind<ExprPtr>`
 (`eq_cache_uf`) provides transitive equality: if A=B and B=C are proven, A=C resolves in
 O(α(n)) without a direct cache entry. Only works for exact pointer matches (not
-shift-equivalent expressions). On #63709: 34 UF hits, 8.5% wall time improvement
-(91.7s → 83.9s) from preventing expensive downstream def_eq→whnf→inst cascades.
-On 300k segment: 4.1% improvement (2:21 → 2:15). Init: neutral.
+shift-equivalent expressions). `check_uf_eq` is query-only (no insertion on lookup).
+Highly effective on pathological Mathlib declarations due to cascade prevention:
+- #63709: 34 UF hits → 8.5% wall time (91.7s → 83.9s)
+- #134719: 6.8K UF hits → 12% wall time (98s → 86s), def_eq calls 724K → 283K (2.6x reduction)
+- #179806: 59.7K UF hits → 24% wall time (103s → 78s), def_eq calls 1.57M → 553K (2.8x reduction)
+- #179800: 77.3K UF hits, def_eq calls reduced proportionally
+- Init: neutral (33.3s → 33.3s)
 
 **DefEq cache (open expressions)**: same stack-of-maps design as the infer cache.
 Keyed by ordered pair of canonical hashes `((u64,u64), (u64,u64))`.
@@ -222,7 +226,7 @@ Result is a boolean (no delta to apply). On init: ~39K shift-invariant hits out 
 | Mathlib (630k decls, 4.9GB) | ~16min (est.) | full run in progress (see below) |
 | Mathlib 100k-110k segment | 14s | 34s (2.4x) |
 | Mathlib 300k-310k segment | 12s | 76s (6.3x) |
-| ModuleCat.monoidalCategory._proof_4 (#63709) | 503ms | 84s (167x) |
+| ModuleCat.monoidalCategory._proof_4 (#63709) | 503ms | 84s (167x, was 93s before UF) |
 | toPartialMap._proof_6 (pathological) | ~2s | 17.5s (was 29.8s before 2-slot caches) |
 | nonempty_algHom (was pathological) | 67ms | 1.4s (was 22.7s before push_shift_down fix) |
 
