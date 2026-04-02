@@ -1134,15 +1134,9 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                 return Some(self.ctx.push_shift(stored_result, delta, 0));
             }
         }
-        if depth < stored_depth {
-            let delta = stored_depth - depth;
-            if self.ctx.shift_eq(e, stored_input, delta) {
-                let result_fvar_lb = self.ctx.fvar_lb(self.ctx.read_expr(stored_result).get_fvar_list());
-                if self.ctx.num_loose_bvars(stored_result) == 0 || result_fvar_lb >= delta {
-                    return Some(self.ctx.push_shift_down(stored_result, delta));
-                }
-            }
-        }
+        // Below-depth (depth < stored_depth) not attempted for whnf cache:
+        // push_shift_down does a full traversal of the result, which is catastrophically
+        // expensive for large expressions (700M+ alloc calls on Mathlib declarations).
         None
     }
 

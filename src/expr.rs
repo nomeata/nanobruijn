@@ -632,42 +632,53 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         if let Some(cached) = self.expr_cache.subst_cache.get(&(e, ks, vs)) {
             *cached
         } else {
-            let r = match self.view_expr(e) {
-                Var { .. } | NatLit { .. } | StringLit { .. } => e,
-                Sort { level, .. } => {
-                    let level = self.subst_level(level, ks, vs);
-                    self.mk_sort(level)
+            // Handle Shift directly: level substitution commutes with variable shifting
+            // because they operate on independent parts (levels vs. bvar indices).
+            // subst(Shift(e, k, c)) = Shift(subst(e), k, c)
+            // This avoids expanding Shift via view_expr which creates new pointers
+            // that miss the subst_cache, causing quadratic re-traversal.
+            let r = match self.read_expr(e) {
+                Shift { inner, amount, cutoff, .. } => {
+                    let inner_subst = self.subst_aux(inner, ks, vs);
+                    self.mk_shift_cutoff(inner_subst, amount, cutoff)
                 }
-                Const { name, levels, .. } => {
-                    let levels = self.subst_levels(levels, ks, vs);
-                    self.mk_const(name, levels)
-                }
-                App { fun, arg, .. } => {
-                    let fun = self.subst_aux(fun, ks, vs);
-                    let arg = self.subst_aux(arg, ks, vs);
-                    self.mk_app(fun, arg)
-                }
-                Pi { binder_name, binder_style, binder_type, body, .. } => {
-                    let binder_type = self.subst_aux(binder_type, ks, vs);
-                    let body = self.subst_aux(body, ks, vs);
-                    self.mk_pi(binder_name, binder_style, binder_type, body)
-                }
-                Lambda { binder_name, binder_style, binder_type, body, .. } => {
-                    let binder_type = self.subst_aux(binder_type, ks, vs);
-                    let body = self.subst_aux(body, ks, vs);
-                    self.mk_lambda(binder_name, binder_style, binder_type, body)
-                }
-                Let { binder_name, binder_type, val, body, nondep, .. } => {
-                    let binder_type = self.subst_aux(binder_type, ks, vs);
-                    let val = self.subst_aux(val, ks, vs);
-                    let body = self.subst_aux(body, ks, vs);
-                    self.mk_let(binder_name, binder_type, val, body, nondep)
-                }
-                Local { .. } => panic!("level substitution should not find locals"),
-                Shift { .. } => unreachable!("view_expr never returns Shift"),
-                Proj { ty_name, idx, structure, .. } => {
-                    let structure = self.subst_aux(structure, ks, vs);
-                    self.mk_proj(ty_name, idx, structure)
+                _ => match self.view_expr(e) {
+                    Var { .. } | NatLit { .. } | StringLit { .. } => e,
+                    Sort { level, .. } => {
+                        let level = self.subst_level(level, ks, vs);
+                        self.mk_sort(level)
+                    }
+                    Const { name, levels, .. } => {
+                        let levels = self.subst_levels(levels, ks, vs);
+                        self.mk_const(name, levels)
+                    }
+                    App { fun, arg, .. } => {
+                        let fun = self.subst_aux(fun, ks, vs);
+                        let arg = self.subst_aux(arg, ks, vs);
+                        self.mk_app(fun, arg)
+                    }
+                    Pi { binder_name, binder_style, binder_type, body, .. } => {
+                        let binder_type = self.subst_aux(binder_type, ks, vs);
+                        let body = self.subst_aux(body, ks, vs);
+                        self.mk_pi(binder_name, binder_style, binder_type, body)
+                    }
+                    Lambda { binder_name, binder_style, binder_type, body, .. } => {
+                        let binder_type = self.subst_aux(binder_type, ks, vs);
+                        let body = self.subst_aux(body, ks, vs);
+                        self.mk_lambda(binder_name, binder_style, binder_type, body)
+                    }
+                    Let { binder_name, binder_type, val, body, nondep, .. } => {
+                        let binder_type = self.subst_aux(binder_type, ks, vs);
+                        let val = self.subst_aux(val, ks, vs);
+                        let body = self.subst_aux(body, ks, vs);
+                        self.mk_let(binder_name, binder_type, val, body, nondep)
+                    }
+                    Local { .. } => panic!("level substitution should not find locals"),
+                    Shift { .. } => unreachable!("view_expr never returns Shift"),
+                    Proj { ty_name, idx, structure, .. } => {
+                        let structure = self.subst_aux(structure, ks, vs);
+                        self.mk_proj(ty_name, idx, structure)
+                    }
                 }
             };
             self.expr_cache.subst_cache.insert((e, ks, vs), r);
