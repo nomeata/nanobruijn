@@ -236,16 +236,16 @@ Result is a boolean (no delta to apply). On init: ~39K shift-invariant hits out 
 
 | Benchmark | nanoda (locally nameless) | lean-slop-kernel |
 |-----------|--------------------------|------------------|
-| Init (54k decls, 310MB) | 26s | 27s (1.04x) |
+| Init (54k decls, 310MB) | 26s | 32s (1.23x) |
 | app-lam N=4000 | 8.3s | 10ms (830x faster) |
-| Mathlib (630k decls, 4.9GB) | ~16min (est.) | full run in progress (see below) |
+| Mathlib (630k decls, 4.9GB) | ~16min (est.) | full run in progress |
 | Mathlib 100k-110k segment | 14s | 34s (2.4x) |
 | Mathlib 300k-310k segment | 12s | 76s (6.3x) |
-| ofPointTensor_SpecTensorTo (#134719) | 214ms | 74.6s (349x, was 98s before UF+dedup) |
-| Ideal.comap_fiber... (#179806) | ~2s (est.) | 68.2s (was 78s before UF+dedup) |
-| ModuleCat.monoidalCategory._proof_4 (#63709) | 503ms | 79s (157x, was 93s before UF) |
-| toPartialMap._proof_6 (pathological) | ~2s | 17.5s (was 29.8s before 2-slot caches) |
-| nonempty_algHom (was pathological) | 67ms | 1.4s (was 22.7s before push_shift_down fix) |
+| ofPointTensor_SpecTensorTo (#134719) | 214ms | 75s (350x) |
+| Ideal.comap_fiber... (#179806) | ~2s (est.) | 68.2s |
+| ModuleCat.monoidalCategory._proof_4 (#63709) | 503ms | 79s (157x) |
+| toPartialMap._proof_6 (pathological) | ~2s | 17.5s |
+| nonempty_algHom (was pathological) | 67ms | 1.4s |
 
 Note: Init was 29s before fvar_lb-based bucketing and infer below-depth hits.
 Previous Mathlib run (with canonicalize, before fvar_lb bucketing) had 213 timeouts.
@@ -254,6 +254,53 @@ Previous Mathlib run: 153min wall time (~9.5x nanoda), 0 timeouts.
 Profile (init, pre-deletion baseline, 375B instructions): `force_shift_aux` was the
 dominant cost — shift cache had ~40% hit rate (8M hits, 12M misses). Now deleted;
 all shifting uses `push_shift` (one-level push) or `mk_shift` (O(1) wrapper).
+
+### Current profile (#134719, 75s)
+
+After shift dedup + sem_eq cache, shift_eq is no longer a bottleneck (0.3% of CPU).
+The profile is now dominated by expression construction and traversal:
+
+| Function | CPU% | Note |
+|----------|------|------|
+| mk_lambda | 12.4% | hash + alloc_expr for every lambda construction |
+| check_declar (inlined) | 11.8% | inlined code attributed to dispatch function |
+| subst_aux | 6.2% | level substitution traversal |
+| DebugPrinter/parsing | ~14% | JSON parsing + heartbeat printing |
+| hashbrown rehash | 3.0% | IndexSet growth from 0 to 1.3M entries |
+| inst_aux | 3.0% | instantiation traversal |
+| whnf_no_unfolding_aux | 2.8% | whnf with projection reduction |
+| mk_let, mk_pi | ~4.3% | more expression construction |
+| push_shift | 1.8% | shift distribution into App spine |
+
+Operation count comparison (#134719):
+
+| Metric | Nanoda | Shift-based | Ratio |
+|--------|--------|-------------|-------|
+| def_eq | 84,582 | 292,406 | 3.46x |
+| whnf | 63,040 | 605,633 | 9.61x |
+| infer | 97,526 | 578,293 | 5.93x |
+| inst | 114,276 | 451,037 | 3.95x |
+| alloc_expr | 1,791,251 | 136,417,267 | **76x** |
+| inst_aux | 1,633,207 | 56,307,061 | **34.5x** |
+| eq cache hits | 20,099 | 10,374 | 0.52x |
+
+sem_eq breakdown (947K calls): ptr_eq 24.5%, hash_reject 64.7%, cache_hit 0.09%,
+walk_pos 0.11%, walk_neg 10.5%. 89.2% resolved in O(1).
+
+The 76x alloc_expr and 34.5x inst_aux gaps are the fundamental cost of de Bruijn + Shift
+vs locally-nameless. Each inst requires O(tree) traversal and reconstruction; nanoda
+needs only O(vars_to_substitute). The per-inst node count is 124 (us) vs 14.3 (nanoda)
+= 8.7x, from accumulated Shift wrappers inflating effective tree size.
+
+**Experiments that didn't help**:
+- Identity check in subst_aux/abstr_aux/push_shift (children unchanged → skip rebuild):
+  8% regression on Init due to branch overhead; children almost always change.
+- Negative sem_eq cache (cache failing structural walks): 61K hits on #134719 but
+  no measurable speedup; individual walks are too cheap.
+- Pre-sizing DAG IndexSet to 4096: 8% regression on Init due to wasted allocation for
+  small declarations.
+- struct_hash early rejection in shift_eq_aux: 13% regression; most shift_eq calls are
+  positive matches (expressions DO match), so the extra read_expr + hash is wasted.
 
 ## Design goal: match nanoda's cache behavior
 
