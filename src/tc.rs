@@ -1087,10 +1087,20 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             let cur_bvar_ub = self.ctx.num_loose_bvars(cur);
             let wnu_bucket_idx = if cur_bvar_ub == 0 { 0 } else { self.local_ctx.len() };
             if let Some(bucket) = self.tc_cache.whnf_no_unfolding_cache.get(wnu_bucket_idx) {
-                if let Some(&(stored_input, stored_result, _stored_bvar_ub)) = bucket.get(&cur_canon) {
+                if let Some(&(stored_input, stored_result, stored_bvar_ub)) = bucket.get(&cur_canon) {
                     if stored_input == cur || self.ctx.sem_eq(stored_input, cur) {
                         self.ctx.trace.wnu_cache_hits += 1;
                         break stored_result;
+                    }
+                    // shift_eq: reuse result for cur = Shift(stored, delta).
+                    // Only sound when no let-bindings exist in the referenced
+                    // bvar range, since zeta reduction breaks shift-equivariance.
+                    if self.context_range_is_let_free(cur_bvar_ub) && cur_bvar_ub >= stored_bvar_ub {
+                        let delta = cur_bvar_ub - stored_bvar_ub;
+                        if delta > 0 && self.ctx.shift_eq(stored_input, cur, delta) {
+                            self.ctx.trace.wnu_cache_hits += 1;
+                            break self.ctx.push_shift(stored_result, delta, 0);
+                        }
                     }
                 }
             }
