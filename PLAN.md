@@ -160,6 +160,13 @@ hits eliminate 95K-104K verify_fails per declaration (1.5s total improvement).
 
 **whnf_no_unfolding cache**: same fvar_lb-based bucketing and cross-depth shift_eq pattern
 as the whnf cache. Also peels top-level Shifts (shift-equivariance) before cache lookup.
+Uses inline 2-slot entries: each HashMap value stores `(primary, Option<overflow>)` to
+handle shift-family collisions without a separate overflow HashMap. On store, uses
+depth-based replacement without shift_eq family check (avoids overhead in the hot store
+path). A previous attempt with a separate overflow HashMap regressed Init by 7% due to
+per-store overhead; the inline approach has zero overhead when overflow is None.
+On #63709 (93s): 2524 overflow hits, 31% fewer verify_fails, 5.4% wall time improvement.
+On #179806 (103s): 83K overflow hits from 117K overflow stores.
 
 **Infer cache**: unified stack of maps. Bucket 0 holds closed expressions (never evicted).
 Buckets 1..depth hold open expressions, indexed by `bucket_idx = depth - fvar_lb`.
@@ -208,9 +215,10 @@ Result is a boolean (no delta to apply). On init: ~39K shift-invariant hits out 
 |-----------|--------------------------|------------------|
 | Init (54k decls, 310MB) | 26s | 27s (1.04x) |
 | app-lam N=4000 | 8.3s | 10ms (830x faster) |
-| Mathlib (630k decls, 4.9GB) | ~16min (est.) | TBD (full run in progress) |
+| Mathlib (630k decls, 4.9GB) | ~16min (est.) | full run in progress (see below) |
 | Mathlib 100k-110k segment | 14s | 34s (2.4x) |
 | Mathlib 300k-310k segment | 12s | 80s (6.7x) |
+| ModuleCat.monoidalCategory._proof_4 (#63709) | 503ms | 93s (185x) |
 | toPartialMap._proof_6 (pathological) | ~2s | 17.5s (was 29.8s before 2-slot caches) |
 | nonempty_algHom (was pathological) | 67ms | 1.4s (was 22.7s before push_shift_down fix) |
 
@@ -376,11 +384,27 @@ nested-let cascade. Together these handle all Init declarations.
 - **Remove remaining dead code**: thread_local profiling counters, dead locally-nameless
   code (Local variant, FVarId, abstr, etc.)
 
-- **Reduce inst_aux traversal count**: The 4.8x gap (938K vs 196K) is the main pathological-
-  case blocker, but general performance is now ~1.27x. Ideas:
-  - Persistent inst_cache across inst_beta calls (include subst in key)
+- **Reduce TC-level operation count**: On the worst Mathlib declarations, the shift checker
+  has 2.4x more def_eq calls, 4.7x more whnf calls, and 3.7x more inst calls than nanoda.
+  These cascade: more def_eq → more whnf → more inst_beta → more expressions → lower cache
+  hit rates → more def_eq. Breaking this cycle at any point helps.
+
+  **inst_aux analysis** (#63709, 221M calls vs nanoda 3.2M = 68x):
+  - Shift node traversals: 2.4M (1.1%) — NOT the bottleneck
+  - Cutoff mismatches: 2.0M (86% of Shift traversals)
+  - Cache hits: 79M (36%)
+  - Early exit (elided): 24M (11%)
+  - Real work nodes: 115M (52%) — expressions are genuinely larger
+  The 68x gap comes from: 3.7x more inst_beta calls × 18.7x more nodes per call.
+  The per-call overhead is from accumulated Shift wrappers inflating effective tree size.
+  Each mk_shift(val, offset) in the Var case wraps val, and subsequent inst_beta calls
+  must traverse through these wrappers.
+
+  Ideas (not yet implemented):
+  - Persistent inst_cache across inst_beta calls (include subst fingerprint in key)
   - Size-bounded eager shift (resolve small vals, defer large ones)
-  - Avoid creating Shift wrappers for subst vals that will be immediately consumed by whnf
+  - Avoid creating Shift wrappers for subst vals consumed by whnf
+  - Improve def_eq/infer cache hit rates to reduce operation count at the source
 
 - **Investigate fvar_lb computation overhead**: fvar_lb-based bucketing regressed Init
   from 29s to 33s. The fvar_lb computation on every cache access may outweigh the
