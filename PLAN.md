@@ -138,6 +138,19 @@ canonical hash; on hit, verify with `sem_eq` (same-depth) or `shift_eq` + `push_
 (cross-depth, delta = `depth - stored_depth`). Cache entries store `(input, result, stored_depth)`.
 Prefers lower stored_depth (more reusable across depths).
 
+**2-slot overflow cache**: When different shift-families collide on the same canonical hash,
+the primary HashMap stores one family and a separate overflow HashMap stores the second.
+On store, `shift_eq` determines whether a new entry belongs to the primary's family; if not,
+it goes to overflow. On lookup, primary is tried first, then overflow. This eliminates
+verify_fails on pathological cases without regressing Init (overflow map is rarely populated
+for non-pathological declarations).
+
+**Below-depth cache hits**: When `depth < stored_depth`, we use reverse `shift_eq(query,
+stored, delta)` to detect that the query is a shift-down of the stored entry. On hit,
+`push_shift_down(result, delta)` subtracts `delta` from free variable indices in the result.
+Precondition: `fvar_lb(result) >= delta` (always holds when the stored entry was computed
+at a deeper context). This eliminates below-depth verify_fails.
+
 **whnf_no_unfolding cache**: same fvar_lb-based bucketing and cross-depth shift_eq pattern
 as the whnf cache. Also peels top-level Shifts (shift-equivariance) before cache lookup.
 
@@ -183,10 +196,10 @@ Result is a boolean (no delta to apply). On init: ~39K shift-invariant hits out 
 
 | Benchmark | nanoda (locally nameless) | lean-slop-kernel |
 |-----------|--------------------------|------------------|
-| Init (54k decls, 310MB) | 26s | 33s (1.27x) |
+| Init (54k decls, 310MB) | 26s | 29s (1.12x) |
 | app-lam N=4000 | 8.3s | 10ms (830x faster) |
 | Mathlib (630k decls, 4.9GB) | ~16min (est.) | 153min (0 timeouts, ~9.5x) |
-| sheafedSpaceMap_comp (worst case) | ~2s | 12s (6x) |
+| toPartialMap._proof_6 (pathological) | ~2s | 19.6s (was 29.8s before 2-slot cache) |
 
 Note: Init was 29s before fvar_lb-based bucketing (depth-only bucketing, no cross-depth
 shift_eq). The 4s regression comes from fvar_lb computation overhead on every cache access.
@@ -208,28 +221,30 @@ We should **not** be slower due to missed cache hits. If we are, we need to find
 the cache miss, not paper over it with heuristics (DAG size thresholds, degraded mode,
 timeouts, etc.).
 
-### WHNF cache collision problem (main Mathlib bottleneck)
+### WHNF cache collision problem (solved)
 
 On pathological Mathlib declarations (e.g. #334175 `toPartialMap._proof_6`), the whnf cache
-has massive hash collisions: 2.9M verify_fails with only 9K no_entry misses. The root cause:
+had massive hash collisions: 2.9M verify_fails with only 9K no_entry misses. The root cause:
 
 - `canonical_hash = (struct_hash, fvar_normalize_hash)` is deliberately shift-invariant
 - This means many different expressions map to the same hash key
-- The HashMap stores ONE entry per key — last writer wins
-- When different (non-shift-variant) expressions share a canonical hash, they evict useful entries
+- A single HashMap entry per key loses useful entries when different families collide
 
-The dominant collision pattern is **stored_depth > query_depth**: an entry stored at depth D
-cannot serve a query at depth D' < D (we only support upward cross-depth shift_eq, not
-downward). The "prefer lower depth" store policy eventually fixes this, but every depth
-transition wastes a recomputation.
+**Fix**: 2-slot cache with separate overflow HashMap. Primary map stores one shift-family,
+overflow map stores a second colliding family. On store, `shift_eq` detects family membership
+(with fast-path pointer equality). On lookup, primary is tried first, then overflow.
 
-Impact: nanoda gets near-100% whnf cache hit rate (5.99M/5.99M), we get 69% (9.4M/13.6M).
-The 4.2M extra whnf reductions cascade into 2x more infer/inst calls and 35x more inst_aux
-nodes (542M vs 15M).
+Results on #334175 `toPartialMap._proof_6`:
+- verify_fails: 2.89M → 0
+- overflow entries stored: 77
+- overflow cache hits: 2.17M
+- wall time: 29.8s → 19.6s (-34%)
+- Init: no regression (29.3s)
 
-Confirmed fix: multi-entry cache (Vec per slot, cap=4) drops verify_fails from 2.9M to 92,
-cuts inst_aux from 542M to 135M, halves the pathological case time. But regresses Init
-slightly due to Vec allocation overhead. Needs a low-overhead multi-entry approach.
+The overflow HashMap is separate from the primary to preserve memory layout (cache locality)
+for the common single-family case. The nlbv_sign discriminator (sign of nlbv_f - nlbv_a for
+App nodes) was tested but doesn't help (sign_fix=0 on pathological case — collisions happen
+at deeper tree levels where the sign is the same).
 
 **No shift resolution**: The whole point of Shift nodes is to avoid traversals.
 We use `sem_eq` (non-allocating structural walk) for all equality comparisons — no deep
