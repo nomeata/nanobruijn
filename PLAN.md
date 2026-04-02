@@ -145,11 +145,18 @@ it goes to overflow. On lookup, primary is tried first, then overflow. This elim
 verify_fails on pathological cases without regressing Init (overflow map is rarely populated
 for non-pathological declarations).
 
-**Below-depth cache hits**: When `depth < stored_depth`, we use reverse `shift_eq(query,
-stored, delta)` to detect that the query is a shift-down of the stored entry. On hit,
-`push_shift_down(result, delta)` subtracts `delta` from free variable indices in the result.
-Precondition: `fvar_lb(result) >= delta` (always holds when the stored entry was computed
-at a deeper context). This eliminates below-depth verify_fails.
+**Below-depth cache hits (infer only)**: When `depth < stored_depth`, we use reverse
+`shift_eq(query, stored, delta)` to detect that the query is a shift-down of the stored
+entry. On hit, `push_shift_down(result, delta)` subtracts `delta` from free variable
+indices in the result. Precondition: `fvar_lb(result) >= delta` (always holds when the
+stored entry was computed at a deeper context).
+
+**Important**: below-depth hits are ONLY used for the infer cache, NOT for whnf/wnu caches.
+`push_shift_down` does a full O(result_size) traversal, creating new expressions at every
+level. For whnf results (which can be arbitrarily large), this is catastrophically expensive:
+700M+ alloc_expr calls on Mathlib declarations with complex types. Infer results (types)
+are typically small enough that push_shift_down is acceptable. On Init, below-depth infer
+hits eliminate 95K-104K verify_fails per declaration (1.5s total improvement).
 
 **whnf_no_unfolding cache**: same fvar_lb-based bucketing and cross-depth shift_eq pattern
 as the whnf cache. Also peels top-level Shifts (shift-equivariance) before cache lookup.
@@ -199,15 +206,17 @@ Result is a boolean (no delta to apply). On init: ~39K shift-invariant hits out 
 
 | Benchmark | nanoda (locally nameless) | lean-slop-kernel |
 |-----------|--------------------------|------------------|
-| Init (54k decls, 310MB) | 26s | 29s (1.12x) |
+| Init (54k decls, 310MB) | 26s | 27s (1.04x) |
 | app-lam N=4000 | 8.3s | 10ms (830x faster) |
-| Mathlib (630k decls, 4.9GB) | ~16min (est.) | 153min (0 timeouts, ~9.5x) |
-| toPartialMap._proof_6 (pathological) | ~2s | 17.1s (was 29.8s before 2-slot caches) |
+| Mathlib (630k decls, 4.9GB) | ~16min (est.) | TBD (full run in progress) |
+| Mathlib 100k-110k segment | 14s | 34s (2.4x) |
+| Mathlib 300k-310k segment | 12s | 80s (6.7x) |
+| toPartialMap._proof_6 (pathological) | ~2s | 17.5s (was 29.8s before 2-slot caches) |
+| nonempty_algHom (was pathological) | 67ms | 1.4s (was 22.7s before push_shift_down fix) |
 
-Note: Init was 29s before fvar_lb-based bucketing (depth-only bucketing, no cross-depth
-shift_eq). The 4s regression comes from fvar_lb computation overhead on every cache access.
+Note: Init was 29s before fvar_lb-based bucketing and infer below-depth hits.
 Previous Mathlib run (with canonicalize, before fvar_lb bucketing) had 213 timeouts.
-Current code: 0 timeouts, 153min wall time (~9.5x nanoda).
+Previous Mathlib run: 153min wall time (~9.5x nanoda), 0 timeouts.
 
 Profile (init, pre-deletion baseline, 375B instructions): `force_shift_aux` was the
 dominant cost — shift cache had ~40% hit rate (8M hits, 12M misses). Now deleted;
