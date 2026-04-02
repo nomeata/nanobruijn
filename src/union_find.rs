@@ -123,8 +123,11 @@ where
     }
 
     /// Check whether e1 and e2 are known to be equal.
+    /// Only returns true if both are already in the UF and share a root.
+    /// Does NOT insert new entries (avoids unnecessary UF growth).
     pub(crate) fn check_uf_eq(&mut self, e1: A, e2: A) -> bool {
-        let (e1, e2) = (self.get_or_push(e1), self.get_or_push(e2));
-        self.find_parent_idx(e1) == self.find_parent_idx(e2)
+        let Some(idx1) = self.node_map.get_index_of(&e1) else { return false };
+        let Some(idx2) = self.node_map.get_index_of(&e2) else { return false };
+        self.find_parent_idx(idx1) == self.find_parent_idx(idx2)
     }
 }
