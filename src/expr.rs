@@ -1117,12 +1117,21 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
     /// Unlike pointer equality (`a == b`), this traverses the structure to handle
     /// expressions built by `push_shift` or `mk_shift` that are semantically
     /// identical but have different ExprPtrs.
-    pub(crate) fn sem_eq(&self, a: ExprPtr<'t>, b: ExprPtr<'t>) -> bool {
+    pub(crate) fn sem_eq(&mut self, a: ExprPtr<'t>, b: ExprPtr<'t>) -> bool {
         // Fast path: pointer equality (most common case)
         if a == b { return true; }
         // Fast rejection: if canonical hashes differ, expressions can't be sem_eq
         if self.canonical_hash(a) != self.canonical_hash(b) { return false; }
-        self.shift_eq_aux(a, b, 0, 0)
+        // Cache lookup: ordered pair for symmetry (order by idx + dag_marker)
+        let a_key = (a.dag_marker as u64) << 32 | a.idx as u64;
+        let b_key = (b.dag_marker as u64) << 32 | b.idx as u64;
+        let key = if a_key <= b_key { (a, b) } else { (b, a) };
+        if self.expr_cache.sem_eq_cache.contains(&key) { self.trace.sem_eq_cache_hits += 1; return true; }
+        let result = self.shift_eq_aux(a, b, 0, 0);
+        if result {
+            self.expr_cache.sem_eq_cache.insert(key);
+        }
+        result
     }
 
     fn shift_eq_aux(&self, a: ExprPtr<'t>, b: ExprPtr<'t>, delta: u16, cutoff: u16) -> bool {

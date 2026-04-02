@@ -190,6 +190,13 @@ pub struct ExprCache<'t> {
     pub(crate) shift_down_cache: FxHashMap<(ExprPtr<'t>, u16), ExprPtr<'t>>,
     /// Cache for abstr_aux_levels (nanoda TC): (expr, start_pos, num_open_binders) -> expr
     pub(crate) abstr_cache_levels: FxHashMap<(ExprPtr<'t>, u16, u16), ExprPtr<'t>>,
+    /// Cache for sem_eq positive results: ordered (a, b) pairs known to be sem_eq.
+    /// Avoids repeated O(tree_size) structural walks through Shift wrappers.
+    pub(crate) sem_eq_cache: FxHashSet<(ExprPtr<'t>, ExprPtr<'t>)>,
+    /// Dedup table for Shift nodes: (inner, amount, cutoff) → ExprPtr.
+    /// Ensures mk_shift(a, k) always returns the same ExprPtr,
+    /// enabling O(1) pointer equality in cache verification instead of O(tree) shift_eq.
+    pub(crate) shift_dedup: FxHashMap<(ExprPtr<'t>, u16, u16), ExprPtr<'t>>,
 }
 
 impl<'t> ExprCache<'t> {
@@ -202,6 +209,8 @@ impl<'t> ExprCache<'t> {
             shift_cache: new_fx_hash_map(),
             shift_down_cache: new_fx_hash_map(),
             abstr_cache_levels: new_fx_hash_map(),
+            sem_eq_cache: new_fx_hash_set(),
+            shift_dedup: new_fx_hash_map(),
         }
     }
 }
@@ -347,6 +356,13 @@ pub struct TcTrace {
     pub infer_cache_vf_below: u64,        // depth < stored, not attempted
     pub infer_cache_overflow_stores: u64,
     pub infer_cache_overflow_hits: u64,
+    // open defeq cache
+    pub defeq_open_pos_hits: u64,
+    pub defeq_open_neg_hits: u64,
+    pub def_eq_inner_calls: u64,
+    pub def_eq_deep_calls: u64,  // survived both quick_checks, entering lazy_delta
+    pub sem_eq_cache_hits: u64,
+    pub shift_dedup_hits: u64,
     // wnu cache miss breakdown
     pub wnu_cache_no_bucket: u64,
     pub wnu_cache_no_entry: u64,
@@ -357,10 +373,13 @@ pub struct TcTrace {
 
 impl std::fmt::Display for TcTrace {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "def_eq={} whnf={} infer={} inst={} alloc={} | hits: whnf={} eq={} uf={} infer={} infer_hash={} infer_vfail={} | ps={}/{} | inst_aux={}/{}/{} sh={}/{}",
-            self.def_eq_calls, self.whnf_calls, self.infer_calls,
+        write!(f, "def_eq={} dei={}/{} whnf={} infer={} inst={} alloc={} | hits: whnf={} eq={} uf={} dop={}/{} seq={} sd={} infer={} infer_hash={} infer_vfail={} | ps={}/{} | inst_aux={}/{}/{} sh={}/{}",
+            self.def_eq_calls, self.def_eq_inner_calls, self.def_eq_deep_calls, self.whnf_calls, self.infer_calls,
             self.inst_calls, self.alloc_expr_calls,
-            self.whnf_cache_hits, self.eq_cache_hits, self.eq_cache_uf_hits, self.infer_cache_hits,
+            self.whnf_cache_hits, self.eq_cache_hits, self.eq_cache_uf_hits,
+            self.defeq_open_pos_hits, self.defeq_open_neg_hits,
+            self.sem_eq_cache_hits, self.shift_dedup_hits,
+            self.infer_cache_hits,
             self.infer_cache_hash_hit, self.infer_cache_verify_fail,
             self.push_shift_calls, self.push_shift_cache_hits,
             self.inst_aux_calls, self.inst_aux_cache_hits, self.inst_aux_elided,
@@ -1042,11 +1061,19 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
                 return self.mk_var(dbj_idx + amount);
             }
         }
+        // Dedup: return existing Shift node if we've created this exact (inner, amount, cutoff) before.
+        let dedup_key = (inner, amount, cutoff);
+        if let Some(&existing) = self.expr_cache.shift_dedup.get(&dedup_key) {
+            self.trace.shift_dedup_hits += 1;
+            return existing;
+        }
         let has_fvars = inner_expr.has_fvars();
         let hash = hash64!(crate::expr::SHIFT_HASH, inner, amount, cutoff);
         let struct_hash = inner_expr.get_struct_hash();
         let fvar_list = self.fvar_shift_cutoff(inner_fvl, amount, cutoff);
-        self.alloc_expr(Expr::Shift { hash, struct_hash, fvar_list, inner, amount, cutoff, num_loose_bvars: nlbv + amount, has_fvars })
+        let result = self.alloc_expr(Expr::Shift { hash, struct_hash, fvar_list, inner, amount, cutoff, num_loose_bvars: nlbv + amount, has_fvars });
+        self.expr_cache.shift_dedup.insert(dedup_key, result);
+        result
     }
 
     /// Shallow shift: peel one level of constructor, wrapping children in lazy Shift nodes.

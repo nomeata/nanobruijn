@@ -1525,6 +1525,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         if let Some(easy) = self.def_eq_quick_check(x, y) {
             return easy
         }
+        self.ctx.trace.def_eq_inner_calls += 1;
 
         let x_n = self.whnf_no_unfolding_cheap_proj(x);
         let y_n = self.whnf_no_unfolding_cheap_proj(y);
@@ -1539,6 +1540,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         if let Some(easy) = self.def_eq_quick_check(x_n, y_n) {
             return easy
         }
+        self.ctx.trace.def_eq_deep_calls += 1;
 
         let result = if self.proof_irrel_eq(x_n, y_n) {
             true
@@ -1889,6 +1891,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         let (qx, qy) = if swapped { (y, x) } else { (x, y) };
         // Exact depth match with semantic equality
         if stored_depth == depth && self.ctx.sem_eq(stored_a, qx) && self.ctx.sem_eq(stored_b, qy) {
+            if is_pos { self.ctx.trace.defeq_open_pos_hits += 1; } else { self.ctx.trace.defeq_open_neg_hits += 1; }
             return true;
         }
         // Shift-invariant match
@@ -1896,6 +1899,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             let delta = depth - stored_depth;
             if delta > 0 {
                 if self.ctx.shift_eq(stored_a, qx, delta) && self.ctx.shift_eq(stored_b, qy, delta) {
+                    if is_pos { self.ctx.trace.defeq_open_pos_hits += 1; } else { self.ctx.trace.defeq_open_neg_hits += 1; }
                     return true;
                 }
                 // Try swapped assignment if canonical hashes are equal
@@ -1903,6 +1907,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                     && self.ctx.shift_eq(stored_a, qy, delta)
                     && self.ctx.shift_eq(stored_b, qx, delta)
                 {
+                    if is_pos { self.ctx.trace.defeq_open_pos_hits += 1; } else { self.ctx.trace.defeq_open_neg_hits += 1; }
                     return true;
                 }
             }
