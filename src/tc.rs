@@ -1568,6 +1568,22 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             self.eq_cache_insert(x, y);
             self.defeq_open_store_pos(x, y);
             self.tc_cache.eq_cache_uf.union(x, y);
+            // Also union shift-stripped versions so UF works across shift levels.
+            // Sound because Shift(a,k,0) = Shift(b,k,0) iff a = b.
+            // Only attempt when at least one side is a Shift (avoid overhead on common case).
+            if matches!((self.ctx.read_expr(x), self.ctx.read_expr(y)), (Expr::Shift { .. }, Expr::Shift { .. })) {
+                let (mut xi, mut xa) = (x, 0u16);
+                while let Expr::Shift { inner, amount, cutoff: 0, .. } = self.ctx.read_expr(xi) {
+                    xa += amount; xi = inner;
+                }
+                let (mut yi, mut ya) = (y, 0u16);
+                while let Expr::Shift { inner, amount, cutoff: 0, .. } = self.ctx.read_expr(yi) {
+                    ya += amount; yi = inner;
+                }
+                if xa == ya && xa > 0 {
+                    self.tc_cache.eq_cache_uf.union(xi, yi);
+                }
+            }
         }
         result
     }
@@ -1759,6 +1775,22 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         // Shift-invariant positive def_eq cache for open expressions
         if self.defeq_open_lookup(true, x, y) {
             return Some(true)
+        }
+        // Shift-aware UF: strip matching Shift wrappers and check inner expressions.
+        // Checked after open cache (cheaper checks first). Only when at least one is Shift.
+        if matches!((self.ctx.read_expr(x), self.ctx.read_expr(y)), (Expr::Shift { .. }, Expr::Shift { .. })) {
+            let (mut xi, mut xa) = (x, 0u16);
+            while let Expr::Shift { inner, amount, cutoff: 0, .. } = self.ctx.read_expr(xi) {
+                xa += amount; xi = inner;
+            }
+            let (mut yi, mut ya) = (y, 0u16);
+            while let Expr::Shift { inner, amount, cutoff: 0, .. } = self.ctx.read_expr(yi) {
+                ya += amount; yi = inner;
+            }
+            if xa == ya && xa > 0 && self.tc_cache.eq_cache_uf.check_uf_eq(xi, yi) {
+                self.ctx.trace.eq_cache_uf_hits += 1;
+                return Some(true)
+            }
         }
         if let Some(r) = self.def_eq_sort(x, y) {
             return Some(r)

@@ -188,14 +188,19 @@ then serves as the base for future shifted lookups.
 `FxHashMap<((u64,u64),(u64,u64)), (ExprPtr, ExprPtr)>` — canonical hash pair as key,
 stored ExprPtrs verified via `sem_eq`. Additionally, a pointer-based `UnionFind<ExprPtr>`
 (`eq_cache_uf`) provides transitive equality: if A=B and B=C are proven, A=C resolves in
-O(α(n)) without a direct cache entry. Only works for exact pointer matches (not
-shift-equivalent expressions). `check_uf_eq` is query-only (no insertion on lookup).
-Highly effective on pathological Mathlib declarations due to cascade prevention:
-- #63709: 34 UF hits → 8.5% wall time (91.7s → 83.9s)
-- #134719: 6.8K UF hits → 12% wall time (98s → 86s), def_eq calls 724K → 283K (2.6x reduction)
-- #179806: 59.7K UF hits → 24% wall time (103s → 78s), def_eq calls 1.57M → 553K (2.8x reduction)
-- #179800: 77.3K UF hits, def_eq calls reduced proportionally
-- Init: neutral (33.3s → 33.3s)
+O(α(n)) without a direct cache entry. `check_uf_eq` is query-only (no insertion on lookup).
+
+**Shift-aware UF**: When proving def_eq(x, y) where both are Shift nodes with matching
+amounts (Shift(xi, k, 0) and Shift(yi, k, 0)), also union(xi, yi). On lookup, if both
+query expressions are Shift nodes with matching amounts, check UF on inner expressions.
+Sound because Shift(a,k,0) = Shift(b,k,0) iff a = b. Guard is `matches!((read(x), read(y)),
+(Shift, Shift))` — zero overhead for non-Shift pairs (Init), effective for shift-heavy
+pathological declarations. Checked after open cache (cheaper checks first).
+
+Results with shift-aware UF (cumulative with plain UF):
+- #134719: 6.9K UF hits → 80.6s (was 86s with plain UF, 98s without UF) = 7% further improvement
+- Init: 33.0s (neutral or slight improvement from baseline 34.0s)
+- #63709: neutral (shift patterns don't match in this declaration)
 
 **DefEq cache (open expressions)**: same stack-of-maps design as the infer cache.
 Keyed by ordered pair of canonical hashes `((u64,u64), (u64,u64))`.
