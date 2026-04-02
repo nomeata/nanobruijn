@@ -4,6 +4,7 @@ use crate::level::Level;
 use crate::name::Name;
 use crate::pretty_printer::{PpOptions, PrettyPrinter};
 use crate::tc::TypeChecker;
+use crate::union_find::UnionFind;
 use crate::unique_hasher::UniqueHasher;
 use indexmap::{IndexMap, IndexSet};
 use num_bigint::BigUint;
@@ -310,6 +311,7 @@ pub struct TcTrace {
     pub alloc_expr_calls: u64,
     pub whnf_cache_hits: u64,
     pub eq_cache_hits: u64,
+    pub eq_cache_uf_hits: u64,
     pub infer_cache_hits: u64,
     pub push_shift_calls: u64,
     pub inst_aux_calls: u64,
@@ -355,10 +357,10 @@ pub struct TcTrace {
 
 impl std::fmt::Display for TcTrace {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "def_eq={} whnf={} infer={} inst={} alloc={} | hits: whnf={} eq={} infer={} infer_hash={} infer_vfail={} | ps={}/{} | inst_aux={}/{}/{} sh={}/{}",
+        write!(f, "def_eq={} whnf={} infer={} inst={} alloc={} | hits: whnf={} eq={} uf={} infer={} infer_hash={} infer_vfail={} | ps={}/{} | inst_aux={}/{}/{} sh={}/{}",
             self.def_eq_calls, self.whnf_calls, self.infer_calls,
             self.inst_calls, self.alloc_expr_calls,
-            self.whnf_cache_hits, self.eq_cache_hits, self.infer_cache_hits,
+            self.whnf_cache_hits, self.eq_cache_hits, self.eq_cache_uf_hits, self.infer_cache_hits,
             self.infer_cache_hash_hit, self.infer_cache_verify_fail,
             self.push_shift_calls, self.push_shift_cache_hits,
             self.inst_aux_calls, self.inst_aux_cache_hits, self.inst_aux_elided,
@@ -1452,6 +1454,11 @@ pub(crate) struct TcCache<'t> {
     pub(crate) infer_cache: Vec<FxHashMap<(u64, u64), (ExprPtr<'t>, ExprPtr<'t>, u16, bool)>>,
     /// Overflow for infer_cache: second entry per canonical hash when families collide.
     pub(crate) infer_cache_overflow: Vec<FxHashMap<(u64, u64), (ExprPtr<'t>, ExprPtr<'t>, u16, bool)>>,
+    /// Pointer-based UnionFind for transitive def_eq caching.
+    /// Complements the canonical-hash eq_cache: if A=B and B=C were proven,
+    /// checking A=C is O(α(n)) via find_parent instead of requiring a direct cache entry.
+    /// Only works for exact pointer matches (not shift-equivalent expressions).
+    pub(crate) eq_cache_uf: UnionFind<ExprPtr<'t>>,
 }
 
 impl<'t> TcCache<'t> {
@@ -1467,6 +1474,7 @@ impl<'t> TcCache<'t> {
             strong_cache: new_unique_hash_map(),
             infer_cache: vec![new_fx_hash_map()], // bucket 0 = closed expressions
             infer_cache_overflow: vec![new_fx_hash_map()],
+            eq_cache_uf: UnionFind::new(),
         }
     }
 
@@ -1485,6 +1493,7 @@ impl<'t> TcCache<'t> {
         self.infer_cache[0].clear();
         self.infer_cache_overflow.truncate(1);
         self.infer_cache_overflow[0].clear();
+        self.eq_cache_uf.clear();
     }
 }
 

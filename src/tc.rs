@@ -1567,6 +1567,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         if result {
             self.eq_cache_insert(x, y);
             self.defeq_open_store_pos(x, y);
+            self.tc_cache.eq_cache_uf.union(x, y);
         }
         result
     }
@@ -1747,6 +1748,12 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             return Some(true)
         }
         if self.eq_cache_contains(x, y) {
+            return Some(true)
+        }
+        // Transitive pointer-based UnionFind: if A=B and B=C were proven,
+        // finds A=C in O(α(n)) without needing a direct cache entry.
+        if self.tc_cache.eq_cache_uf.check_uf_eq(x, y) {
+            self.ctx.trace.eq_cache_uf_hits += 1;
             return Some(true)
         }
         // Shift-invariant positive def_eq cache for open expressions
