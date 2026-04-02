@@ -282,7 +282,6 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         self.tc_cache.whnf_cache.push(new_fx_hash_map());
         self.tc_cache.whnf_cache_overflow.push(new_fx_hash_map());
         self.tc_cache.whnf_no_unfolding_cache.push(new_fx_hash_map());
-        self.tc_cache.wnu_cache_overflow.push(new_fx_hash_map());
         self.tc_cache.defeq_pos_open.push(new_fx_hash_map());
         self.tc_cache.defeq_neg_open.push(new_fx_hash_map());
     }
@@ -295,7 +294,6 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         self.tc_cache.whnf_cache.push(new_fx_hash_map());
         self.tc_cache.whnf_cache_overflow.push(new_fx_hash_map());
         self.tc_cache.whnf_no_unfolding_cache.push(new_fx_hash_map());
-        self.tc_cache.wnu_cache_overflow.push(new_fx_hash_map());
         self.tc_cache.defeq_pos_open.push(new_fx_hash_map());
         self.tc_cache.defeq_neg_open.push(new_fx_hash_map());
     }
@@ -308,7 +306,6 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         self.tc_cache.whnf_cache.pop();
         self.tc_cache.whnf_cache_overflow.pop();
         self.tc_cache.whnf_no_unfolding_cache.pop();
-        self.tc_cache.wnu_cache_overflow.pop();
         self.tc_cache.defeq_pos_open.pop();
         self.tc_cache.defeq_neg_open.pop();
     }
@@ -322,7 +319,6 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             self.tc_cache.whnf_cache.truncate(depth + 1);
             self.tc_cache.whnf_cache_overflow.truncate(depth + 1);
             self.tc_cache.whnf_no_unfolding_cache.truncate(depth + 1);
-            self.tc_cache.wnu_cache_overflow.truncate(depth + 1);
             self.tc_cache.defeq_pos_open.truncate(depth);
             self.tc_cache.defeq_neg_open.truncate(depth);
         }
@@ -676,7 +672,6 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                 let saved_whnf = self.tc_cache.whnf_cache.split_off(new_depth + 1);
                 let saved_whnf_ov = self.tc_cache.whnf_cache_overflow.split_off(new_depth + 1);
                 let saved_whnf_nu = self.tc_cache.whnf_no_unfolding_cache.split_off(new_depth + 1);
-                let saved_wnu_ov = self.tc_cache.wnu_cache_overflow.split_off(new_depth + 1);
                 let saved_pos = self.tc_cache.defeq_pos_open.split_off(new_depth);
                 let saved_neg = self.tc_cache.defeq_neg_open.split_off(new_depth);
                 let inner_type = self.infer(inner, flag);
@@ -686,7 +681,6 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                 self.tc_cache.whnf_cache.extend(saved_whnf);
                 self.tc_cache.whnf_cache_overflow.extend(saved_whnf_ov);
                 self.tc_cache.whnf_no_unfolding_cache.extend(saved_whnf_nu);
-                self.tc_cache.wnu_cache_overflow.extend(saved_wnu_ov);
                 self.tc_cache.defeq_pos_open.extend(saved_pos);
                 self.tc_cache.defeq_neg_open.extend(saved_neg);
                 return self.ctx.mk_shift(inner_type, amount);
@@ -1061,7 +1055,6 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             let saved_whnf = self.tc_cache.whnf_cache.split_off(new_depth + 1);
             let saved_whnf_ov = self.tc_cache.whnf_cache_overflow.split_off(new_depth + 1);
             let saved_whnf_nu = self.tc_cache.whnf_no_unfolding_cache.split_off(new_depth + 1);
-            let saved_wnu_ov = self.tc_cache.wnu_cache_overflow.split_off(new_depth + 1);
             let saved_pos = self.tc_cache.defeq_pos_open.split_off(new_depth);
             let saved_neg = self.tc_cache.defeq_neg_open.split_off(new_depth);
             let r = self.whnf(e);
@@ -1071,7 +1064,6 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             self.tc_cache.whnf_cache.extend(saved_whnf);
             self.tc_cache.whnf_cache_overflow.extend(saved_whnf_ov);
             self.tc_cache.whnf_no_unfolding_cache.extend(saved_whnf_nu);
-            self.tc_cache.wnu_cache_overflow.extend(saved_wnu_ov);
             self.tc_cache.defeq_pos_open.extend(saved_pos);
             self.tc_cache.defeq_neg_open.extend(saved_neg);
             return self.ctx.mk_shift(r, total_shift);
@@ -1184,35 +1176,6 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         }
     }
 
-    /// Store a wnu result in the primary + overflow cache.
-    /// Uses cheap pointer-equality for family detection (no shift_eq on store).
-    /// Overflow entries are verified on lookup via try_whnf_cache_hit, so this is safe.
-    fn wnu_cache_store(&mut self, bucket_idx: usize, canon: (u64, u64), e: ExprPtr<'t>, result: ExprPtr<'t>, depth: u16) {
-        let new_slot = (e, result, depth);
-        let primary = match self.tc_cache.whnf_no_unfolding_cache.get_mut(bucket_idx) {
-            Some(b) => b,
-            None => return,
-        };
-        if let Some(slot) = primary.get_mut(&canon) {
-            if slot.0 == e { return; }
-            // Collision — prefer lower depth in primary (more reusable).
-            if depth < slot.2 {
-                let evicted = std::mem::replace(slot, new_slot);
-                self.ctx.trace.wnu_cache_overflow_stores += 1;
-                if let Some(overflow) = self.tc_cache.wnu_cache_overflow.get_mut(bucket_idx) {
-                    overflow.insert(canon, evicted);
-                }
-            } else {
-                self.ctx.trace.wnu_cache_overflow_stores += 1;
-                if let Some(overflow) = self.tc_cache.wnu_cache_overflow.get_mut(bucket_idx) {
-                    overflow.insert(canon, new_slot);
-                }
-            }
-        } else {
-            primary.insert(canon, new_slot);
-        }
-    }
-
     fn whnf_no_unfolding_cheap_proj(&mut self, e: ExprPtr<'t>) -> ExprPtr<'t> {
         self.whnf_no_unfolding_aux(e, true)
     }
@@ -1249,7 +1212,6 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             let saved_whnf = self.tc_cache.whnf_cache.split_off(new_depth + 1);
             let saved_whnf_ov = self.tc_cache.whnf_cache_overflow.split_off(new_depth + 1);
             let saved_whnf_nu = self.tc_cache.whnf_no_unfolding_cache.split_off(new_depth + 1);
-            let saved_wnu_ov = self.tc_cache.wnu_cache_overflow.split_off(new_depth + 1);
             let saved_pos = self.tc_cache.defeq_pos_open.split_off(new_depth);
             let saved_neg = self.tc_cache.defeq_neg_open.split_off(new_depth);
             let r = self.whnf_no_unfolding_aux(e, cheap_proj);
@@ -1259,7 +1221,6 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             self.tc_cache.whnf_cache.extend(saved_whnf);
             self.tc_cache.whnf_cache_overflow.extend(saved_whnf_ov);
             self.tc_cache.whnf_no_unfolding_cache.extend(saved_whnf_nu);
-            self.tc_cache.wnu_cache_overflow.extend(saved_wnu_ov);
             self.tc_cache.defeq_pos_open.extend(saved_pos);
             self.tc_cache.defeq_neg_open.extend(saved_neg);
             return self.ctx.push_shift(r, total_shift, 0);
@@ -1279,29 +1240,25 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                 let cur_lb = self.ctx.fvar_lb(self.ctx.read_expr(cur).get_fvar_list());
                 (cur_depth - cur_lb) as usize
             };
-            // Look up in wnu cache (primary + overflow).
-            let wnu_primary: Option<(ExprPtr<'t>, ExprPtr<'t>, u16)> =
-                self.tc_cache.whnf_no_unfolding_cache.get(wnu_bucket_idx)
-                    .and_then(|b| b.get(&cur_canon)).copied();
-            let wnu_overflow: Option<(ExprPtr<'t>, ExprPtr<'t>, u16)> =
-                self.tc_cache.wnu_cache_overflow.get(wnu_bucket_idx)
-                    .and_then(|b| b.get(&cur_canon)).copied();
-            if let Some((stored_input, stored_result, stored_depth)) = wnu_primary {
-                if let Some(result) = self.try_whnf_cache_hit(cur, stored_input, stored_result, stored_depth, cur_depth) {
-                    self.ctx.trace.wnu_cache_hits += 1;
-                    break result;
-                }
-                // Primary miss — try overflow
-                if let Some((si2, sr2, sd2)) = wnu_overflow {
-                    if let Some(result) = self.try_whnf_cache_hit(cur, si2, sr2, sd2, cur_depth) {
+            if let Some(bucket) = self.tc_cache.whnf_no_unfolding_cache.get(wnu_bucket_idx) {
+                if let Some(&(stored_input, stored_result, stored_depth)) = bucket.get(&cur_canon) {
+                    if stored_depth == cur_depth && (stored_input == cur || self.ctx.sem_eq(stored_input, cur)) {
                         self.ctx.trace.wnu_cache_hits += 1;
-                        self.ctx.trace.wnu_cache_overflow_hits += 1;
-                        break result;
+                        break stored_result;
                     }
+                    // Cross-depth shift_eq: sound because Shift peeling shrinks
+                    // context to stored_depth, making let-bindings above irrelevant.
+                    if cur_depth > stored_depth {
+                        let delta = cur_depth - stored_depth;
+                        if self.ctx.shift_eq(stored_input, cur, delta) {
+                            self.ctx.trace.wnu_cache_hits += 1;
+                            break self.ctx.push_shift(stored_result, delta, 0);
+                        }
+                    }
+                    self.ctx.trace.wnu_cache_verify_fail += 1;
+                } else {
+                    self.ctx.trace.wnu_cache_no_entry += 1;
                 }
-                self.ctx.trace.wnu_cache_verify_fail += 1;
-            } else if self.tc_cache.whnf_no_unfolding_cache.get(wnu_bucket_idx).is_some() {
-                self.ctx.trace.wnu_cache_no_entry += 1;
             } else {
                 self.ctx.trace.wnu_cache_no_bucket += 1;
             }
@@ -1401,7 +1358,11 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                     let entry_lb = self.ctx.fvar_lb(self.ctx.read_expr(entry).get_fvar_list());
                     (store_depth - entry_lb) as usize
                 };
-                self.wnu_cache_store(entry_bucket_idx, entry_canon, entry, result, store_depth);
+                if let Some(bucket) = self.tc_cache.whnf_no_unfolding_cache.get_mut(entry_bucket_idx) {
+                    if bucket.get(&entry_canon).map_or(true, |&(_, _, sd)| store_depth < sd) {
+                        bucket.insert(entry_canon, (entry, result, store_depth));
+                    }
+                }
             }
         }
         result
