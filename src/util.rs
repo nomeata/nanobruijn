@@ -315,6 +315,8 @@ pub struct TcTrace {
     pub inst_aux_calls: u64,
     pub inst_aux_cache_hits: u64,
     pub inst_aux_elided: u64,
+    pub inst_aux_shift_nodes: u64,
+    pub inst_aux_shift_mismatch: u64,
     pub push_shift_cache_hits: u64,
     pub infer_cache_hash_hit: u64,
     pub infer_cache_verify_fail: u64,
@@ -353,13 +355,14 @@ pub struct TcTrace {
 
 impl std::fmt::Display for TcTrace {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "def_eq={} whnf={} infer={} inst={} alloc={} | hits: whnf={} eq={} infer={} infer_hash={} infer_vfail={} | ps={}/{} | inst_aux={}/{}/{}",
+        write!(f, "def_eq={} whnf={} infer={} inst={} alloc={} | hits: whnf={} eq={} infer={} infer_hash={} infer_vfail={} | ps={}/{} | inst_aux={}/{}/{} sh={}/{}",
             self.def_eq_calls, self.whnf_calls, self.infer_calls,
             self.inst_calls, self.alloc_expr_calls,
             self.whnf_cache_hits, self.eq_cache_hits, self.infer_cache_hits,
             self.infer_cache_hash_hit, self.infer_cache_verify_fail,
             self.push_shift_calls, self.push_shift_cache_hits,
-            self.inst_aux_calls, self.inst_aux_cache_hits, self.inst_aux_elided)?;
+            self.inst_aux_calls, self.inst_aux_cache_hits, self.inst_aux_elided,
+            self.inst_aux_shift_nodes, self.inst_aux_shift_mismatch)?;
         if self.zeta_reductions > 0 || self.whnf_let_reductions > 0 || self.wnu_calls > 0 {
             write!(f, " | zeta={} wlet={} wbeta={} dag={} wnu={}/{}/{} wnu_miss={}/{}/{} wnuov={}/{}", self.zeta_reductions, self.whnf_let_reductions, self.whnf_beta_reductions, self.dag_size, self.wnu_calls, self.wnu_cache_hits, self.wnu_shift_peel, self.wnu_cache_no_bucket, self.wnu_cache_no_entry, self.wnu_cache_verify_fail, self.wnu_cache_overflow_stores, self.wnu_cache_overflow_hits)?;
         }

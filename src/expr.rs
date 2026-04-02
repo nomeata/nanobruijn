@@ -329,6 +329,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
                     return e;
                 }
                 Shift { inner, amount, cutoff, .. } => {
+                    self.trace.inst_aux_shift_nodes += 1;
                     // Compose shifts when cutoffs match: Shift(inner, a2, c) with pending (a1, c) = (a1+a2, c)
                     if cutoff == sh_cut {
                         let r = self.inst_aux(inner, substs, offset, shift_down, sh_amt + amount, sh_cut);
@@ -336,6 +337,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
                         return r;
                     }
                     // Different cutoffs: push the inner shift, then apply outer shift
+                    self.trace.inst_aux_shift_mismatch += 1;
                     let forced = self.push_shift(inner, amount, cutoff);
                     let r = self.inst_aux(forced, substs, offset, shift_down, sh_amt, sh_cut);
                     self.expr_cache.inst_cache.insert(cache_key, r);
@@ -390,6 +392,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
             match self.read_expr(e) {
                 Sort { .. } | Const { .. } | Local { .. } | StringLit { .. } | NatLit { .. } => panic!(),
                 Shift { inner, amount, cutoff, .. } => {
+                    self.trace.inst_aux_shift_nodes += 1;
                     // Instead of creating Shift wrappers for children, carry the shift
                     // as parameters and recurse directly on inner's children.
                     let r = self.inst_aux(inner, substs, offset, shift_down, amount, cutoff);
