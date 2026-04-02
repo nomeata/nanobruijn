@@ -161,6 +161,9 @@ Each map keys by canonical hash → (stored_input, stored_result, stored_depth, 
 `checked=false` entries only serve InferOnly. On hit, verify with `shift_eq`, apply
 delta via `mk_shift`. Stack push/pop follows `push_local`/`pop_local` for O(1) eviction.
 Replaces the old three-cache design (infer_cache_check, infer_cache_no_check, infer_open_cache).
+Also has a 2-slot overflow HashMap (same pattern as whnf cache) for shift-family collisions.
+On #334175, this reduces infer verify_fails from 1.81M to 1,426, cascading into 23% fewer
+infer calls, 28% fewer whnf calls, and 21% fewer inst_aux traversals.
 Entries in shallow buckets survive push/pop of deeper context entries (correct, since
 they only depend on the unchanged shallow context). If an entry was stored at a deeper
 depth than the current query, we cannot reuse it (would need an "unshift"/shift-down
@@ -199,7 +202,7 @@ Result is a boolean (no delta to apply). On init: ~39K shift-invariant hits out 
 | Init (54k decls, 310MB) | 26s | 29s (1.12x) |
 | app-lam N=4000 | 8.3s | 10ms (830x faster) |
 | Mathlib (630k decls, 4.9GB) | ~16min (est.) | 153min (0 timeouts, ~9.5x) |
-| toPartialMap._proof_6 (pathological) | ~2s | 19.6s (was 29.8s before 2-slot cache) |
+| toPartialMap._proof_6 (pathological) | ~2s | 17.1s (was 29.8s before 2-slot caches) |
 
 Note: Init was 29s before fvar_lb-based bucketing (depth-only bucketing, no cross-depth
 shift_eq). The 4s regression comes from fvar_lb computation overhead on every cache access.
@@ -235,11 +238,11 @@ overflow map stores a second colliding family. On store, `shift_eq` detects fami
 (with fast-path pointer equality). On lookup, primary is tried first, then overflow.
 
 Results on #334175 `toPartialMap._proof_6`:
-- verify_fails: 2.89M → 0
-- overflow entries stored: 77
-- overflow cache hits: 2.17M
-- wall time: 29.8s → 19.6s (-34%)
-- Init: no regression (29.3s)
+- whnf verify_fails: 2.89M → 0 (overflow stores: 77, hits: 1.09M)
+- infer verify_fails: 1.81M → 1,426 (infer overflow also added)
+- wall time: 29.8s → 17.1s (-43%)
+- Init: no regression (29.0s)
+- Cascade: 23% fewer infer calls, 28% fewer whnf calls, 21% fewer inst_aux
 
 The overflow HashMap is separate from the primary to preserve memory layout (cache locality)
 for the common single-family case. The nlbv_sign discriminator (sign of nlbv_f - nlbv_a for
