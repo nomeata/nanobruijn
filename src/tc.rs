@@ -989,6 +989,8 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             let e_lb = self.ctx.fvar_lb(self.ctx.read_expr(e).get_fvar_list());
             (depth - e_lb) as usize
         };
+        // Look up in whnf cache. below_depth_hit is set when we match via reverse shift_eq.
+        let mut below_depth_hit: Option<ExprPtr<'t>> = None;
         if let Some(bucket) = self.tc_cache.whnf_cache.get(whnf_bucket_idx) {
             if let Some(&(stored_input, stored_result, stored_depth)) = bucket.get(&canon) {
                 if stored_depth == depth && (stored_input == e || self.ctx.sem_eq(stored_input, e)) {
@@ -1002,19 +1004,31 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                         return self.ctx.push_shift(stored_result, delta, 0);
                     }
                 }
-                self.ctx.trace.whnf_cache_verify_fail += 1;
-                if depth == stored_depth {
-                    self.ctx.trace.whnf_cache_same_depth_miss += 1;
-                } else if depth > stored_depth {
-                    self.ctx.trace.whnf_cache_cross_depth_miss += 1;
-                } else {
-                    self.ctx.trace.whnf_cache_depth_miss += 1;
+                if depth < stored_depth {
+                    let delta = stored_depth - depth;
+                    if self.ctx.shift_eq(e, stored_input, delta) {
+                        let result_fvar_lb = self.ctx.fvar_lb(self.ctx.read_expr(stored_result).get_fvar_list());
+                        if self.ctx.num_loose_bvars(stored_result) == 0 || result_fvar_lb >= delta {
+                            self.ctx.trace.whnf_cache_hits += 1;
+                            below_depth_hit = Some(self.ctx.push_shift_down(stored_result, delta));
+                        }
+                    }
+                }
+                if below_depth_hit.is_none() {
+                    self.ctx.trace.whnf_cache_verify_fail += 1;
                 }
             } else {
                 self.ctx.trace.whnf_cache_no_entry += 1;
             }
         } else {
             self.ctx.trace.whnf_cache_no_bucket += 1;
+        }
+        if let Some(shifted_result) = below_depth_hit {
+            // Update cache to prefer lower depth
+            if let Some(bucket) = self.tc_cache.whnf_cache.get_mut(whnf_bucket_idx) {
+                bucket.insert(canon, (e, shifted_result, depth));
+            }
+            return shifted_result;
         }
         let mut cursor = e;
         loop {

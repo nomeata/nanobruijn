@@ -185,6 +185,8 @@ pub struct ExprCache<'t> {
     pub(crate) abstr_cache: FxHashMap<(ExprPtr<'t>, u16), ExprPtr<'t>>,
     /// Caches (e, amount, cutoff) |-> output for shifting.
     pub(crate) shift_cache: FxHashMap<(ExprPtr<'t>, u16, u16), ExprPtr<'t>>,
+    /// Caches (e, amount) |-> output for downward shifting (amount subtracted from free vars).
+    pub(crate) shift_down_cache: FxHashMap<(ExprPtr<'t>, u16), ExprPtr<'t>>,
     /// Cache for abstr_aux_levels (nanoda TC): (expr, start_pos, num_open_binders) -> expr
     pub(crate) abstr_cache_levels: FxHashMap<(ExprPtr<'t>, u16, u16), ExprPtr<'t>>,
 }
@@ -197,6 +199,7 @@ impl<'t> ExprCache<'t> {
             subst_cache: new_fx_hash_map(),
             dsubst_cache: new_fx_hash_map(),
             shift_cache: new_fx_hash_map(),
+            shift_down_cache: new_fx_hash_map(),
             abstr_cache_levels: new_fx_hash_map(),
         }
     }
@@ -326,9 +329,6 @@ pub struct TcTrace {
     pub whnf_cache_no_bucket: u64,
     pub whnf_cache_no_entry: u64,
     pub whnf_cache_verify_fail: u64,
-    pub whnf_cache_depth_miss: u64, // depth < stored_depth
-    pub whnf_cache_same_depth_miss: u64, // depth == stored_depth, sem_eq fails
-    pub whnf_cache_cross_depth_miss: u64, // depth > stored_depth, shift_eq fails
 }
 
 impl std::fmt::Display for TcTrace {
@@ -344,7 +344,7 @@ impl std::fmt::Display for TcTrace {
             write!(f, " | zeta={} wlet={} wbeta={} dag={} wnu={}/{}/{}", self.zeta_reductions, self.whnf_let_reductions, self.whnf_beta_reductions, self.dag_size, self.wnu_calls, self.wnu_cache_hits, self.wnu_shift_peel)?;
         }
         if self.whnf_cache_verify_fail > 0 {
-            write!(f, " | wmiss={}/{}/{} wvf={}/{}/{}", self.whnf_cache_no_bucket, self.whnf_cache_no_entry, self.whnf_cache_verify_fail, self.whnf_cache_same_depth_miss, self.whnf_cache_cross_depth_miss, self.whnf_cache_depth_miss)?;
+            write!(f, " | wmiss={}/{}/{}", self.whnf_cache_no_bucket, self.whnf_cache_no_entry, self.whnf_cache_verify_fail)?;
         }
         Ok(())
     }
@@ -1073,6 +1073,89 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
             }
             Expr::Sort { .. } | Expr::Const { .. } | Expr::Local { .. } | Expr::StringLit { .. } | Expr::NatLit { .. } => {
                 panic!("push_shift on closed expression")
+            }
+        }
+    }
+
+    /// Shift DOWN: subtract `amount` from all free variable indices.
+    /// Precondition: fvar_lb(e) >= amount (no variable goes negative).
+    /// Only supports cutoff=0 — all free vars are shifted down.
+    pub fn push_shift_down(&mut self, e: ExprPtr<'t>, amount: u16) -> ExprPtr<'t> {
+        if amount == 0 {
+            return e;
+        }
+        let expr = self.read_expr(e);
+        if expr.num_loose_bvars() == 0 {
+            return e;
+        }
+        let cache_key = (e, amount);
+        if let Some(&result) = self.expr_cache.shift_down_cache.get(&cache_key) {
+            return result;
+        }
+        let result = stacker::maybe_grow(64 * 1024, 2 * 1024 * 1024, || self.push_shift_down_inner(e, amount, 0));
+        self.expr_cache.shift_down_cache.insert(cache_key, result);
+        result
+    }
+
+    fn push_shift_down_inner(&mut self, e: ExprPtr<'t>, amount: u16, cutoff: u16) -> ExprPtr<'t> {
+        let expr = self.read_expr(e);
+        if expr.num_loose_bvars() <= cutoff {
+            return e;
+        }
+        match expr {
+            Expr::Shift { inner, amount: prev, cutoff: prev_cutoff, .. } => {
+                if prev_cutoff == cutoff || (cutoff > 0 && self.fvar_lb(expr.get_fvar_list()) >= cutoff) {
+                    // The Shift adds prev to free vars. After shift_down by amount:
+                    // net effect = prev - amount (if prev >= amount), or need to recurse into inner.
+                    let effective_cutoff = if prev_cutoff == cutoff { cutoff } else { 0 };
+                    if prev >= amount {
+                        self.mk_shift_cutoff(inner, prev - amount, effective_cutoff)
+                    } else {
+                        // prev < amount: force the Shift, then shift down the remainder
+                        let forced = self.push_shift(inner, prev, prev_cutoff);
+                        self.push_shift_down_inner(forced, amount, cutoff)
+                    }
+                } else {
+                    // Different cutoffs — force inner, then shift down
+                    let forced = self.push_shift(inner, prev, prev_cutoff);
+                    self.push_shift_down_inner(forced, amount, cutoff)
+                }
+            }
+            Expr::Var { dbj_idx, .. } => {
+                if dbj_idx >= cutoff {
+                    debug_assert!(dbj_idx >= amount, "push_shift_down: Var({}) - {} would go negative", dbj_idx, amount);
+                    self.mk_var(dbj_idx - amount)
+                } else {
+                    e
+                }
+            }
+            Expr::App { fun, arg, .. } => {
+                let fun = self.push_shift_down_inner(fun, amount, cutoff);
+                let arg = self.push_shift_down_inner(arg, amount, cutoff);
+                self.mk_app(fun, arg)
+            }
+            Expr::Pi { binder_name, binder_style, binder_type, body, .. } => {
+                let binder_type = self.push_shift_down_inner(binder_type, amount, cutoff);
+                let body = self.push_shift_down_inner(body, amount, cutoff + 1);
+                self.mk_pi(binder_name, binder_style, binder_type, body)
+            }
+            Expr::Lambda { binder_name, binder_style, binder_type, body, .. } => {
+                let binder_type = self.push_shift_down_inner(binder_type, amount, cutoff);
+                let body = self.push_shift_down_inner(body, amount, cutoff + 1);
+                self.mk_lambda(binder_name, binder_style, binder_type, body)
+            }
+            Expr::Let { binder_name, binder_type, val, body, nondep, .. } => {
+                let binder_type = self.push_shift_down_inner(binder_type, amount, cutoff);
+                let val = self.push_shift_down_inner(val, amount, cutoff);
+                let body = self.push_shift_down_inner(body, amount, cutoff + 1);
+                self.mk_let(binder_name, binder_type, val, body, nondep)
+            }
+            Expr::Proj { ty_name, idx, structure, .. } => {
+                let structure = self.push_shift_down_inner(structure, amount, cutoff);
+                self.mk_proj(ty_name, idx, structure)
+            }
+            Expr::Sort { .. } | Expr::Const { .. } | Expr::Local { .. } | Expr::StringLit { .. } | Expr::NatLit { .. } => {
+                e // closed, no shift needed
             }
         }
     }
