@@ -274,16 +274,6 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
     /// Check whether context positions referencing bvars 0..bvar_ub-1 at current
     /// depth are all non-let. Used to guard shift_eq in whnf cache: if any position
     /// is a let-binding, zeta reduction makes whnf non-shift-equivariant.
-    fn context_range_is_let_free(&self, bvar_ub: u16) -> bool {
-        let depth = self.local_ctx.len();
-        for k in 0..bvar_ub as usize {
-            if depth > k && self.local_ctx[depth - 1 - k].1.is_some() {
-                return false;
-            }
-        }
-        true
-    }
-
     /// Push a lambda/pi binder onto the local context.
     fn push_local(&mut self, ty: ExprPtr<'t>) {
         self.local_ctx.push((ty, None));
@@ -987,28 +977,32 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             self.tc_cache.defeq_neg_open.extend(saved_neg);
             return self.ctx.mk_shift(r, total_shift);
         }
-        // Stacked whnf cache: bucket 0 for closed, bucket at depth for open.
+        // Stacked whnf cache: bucket 0 for closed, bucket (depth - fvar_lb) for open.
+        // Using fvar_lb-based bucketing ensures shift-related expressions at different
+        // depths land in the same bucket, enabling cross-depth shift_eq reuse.
         let canon = self.ctx.canonical_hash(e);
-        let e_bvar_ub = self.ctx.num_loose_bvars(e);
-        let whnf_bucket_idx = if e_bvar_ub == 0 { 0 } else { self.local_ctx.len() };
+        let depth = self.local_ctx.len() as u16;
+        let e_nlbv = self.ctx.num_loose_bvars(e);
+        let whnf_bucket_idx = if e_nlbv == 0 {
+            0
+        } else {
+            let e_lb = self.ctx.fvar_lb(self.ctx.read_expr(e).get_fvar_list());
+            (depth - e_lb) as usize
+        };
         if let Some(bucket) = self.tc_cache.whnf_cache.get(whnf_bucket_idx) {
-            if let Some(&(stored_input, stored_result, stored_bvar_ub)) = bucket.get(&canon) {
-                if stored_input == e {
+            if let Some(&(stored_input, stored_result, stored_depth)) = bucket.get(&canon) {
+                if stored_depth == depth && (stored_input == e || self.ctx.sem_eq(stored_input, e)) {
                     self.ctx.trace.whnf_cache_hits += 1;
                     return stored_result;
                 }
-                if self.ctx.sem_eq(stored_input, e) {
-                    self.ctx.trace.whnf_cache_hits += 1;
-                    return stored_result;
-                }
-                // shift_eq: reuse whnf(stored) for e = Shift(stored, delta).
-                // Only sound when no let-bindings exist in the referenced
-                // bvar range, since zeta reduction breaks shift-equivariance.
-                if self.context_range_is_let_free(e_bvar_ub) && e_bvar_ub >= stored_bvar_ub {
-                    let delta = e_bvar_ub - stored_bvar_ub;
-                    if delta > 0 && self.ctx.shift_eq(stored_input, e, delta) {
+                // Cross-depth shift_eq: reuse whnf(stored) at stored_depth for
+                // e at current depth. Sound because Shift peeling shrinks context
+                // to stored_depth, so let-bindings above stored_depth are irrelevant.
+                if depth > stored_depth {
+                    let delta = depth - stored_depth;
+                    if self.ctx.shift_eq(stored_input, e, delta) {
                         self.ctx.trace.whnf_cache_hits += 1;
-                        return self.ctx.mk_shift(stored_result, delta);
+                        return self.ctx.push_shift(stored_result, delta, 0);
                     }
                 }
             }
@@ -1021,10 +1015,10 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             } else if let Some(next_term) = self.unfold_def(whnfd) {
                 cursor = next_term;
             } else {
-                // Only store if no entry exists or if this bvar_ub is smaller (better for future shift hits)
+                // Store with depth for cross-depth reuse. Prefer lower depth (more reusable).
                 if let Some(bucket) = self.tc_cache.whnf_cache.get_mut(whnf_bucket_idx) {
-                    if bucket.get(&canon).map_or(true, |&(_, _, stored_bvar_ub)| e_bvar_ub < stored_bvar_ub) {
-                        bucket.insert(canon, (e, whnfd, e_bvar_ub));
+                    if bucket.get(&canon).map_or(true, |&(_, _, sd)| depth < sd) {
+                        bucket.insert(canon, (e, whnfd, depth));
                     }
                 }
                 return whnfd
@@ -1082,22 +1076,27 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         let mut cache_entries: Vec<ExprPtr<'t>> = Vec::new();
         let mut cur = e;
         let result = loop {
-            // Stacked whnf_no_unfolding cache lookup.
+            // Stacked whnf_no_unfolding cache: bucket 0 for closed, bucket (depth - fvar_lb) for open.
             let cur_canon = self.ctx.canonical_hash(cur);
-            let cur_bvar_ub = self.ctx.num_loose_bvars(cur);
-            let wnu_bucket_idx = if cur_bvar_ub == 0 { 0 } else { self.local_ctx.len() };
+            let cur_nlbv = self.ctx.num_loose_bvars(cur);
+            let cur_depth = self.local_ctx.len() as u16;
+            let wnu_bucket_idx = if cur_nlbv == 0 {
+                0
+            } else {
+                let cur_lb = self.ctx.fvar_lb(self.ctx.read_expr(cur).get_fvar_list());
+                (cur_depth - cur_lb) as usize
+            };
             if let Some(bucket) = self.tc_cache.whnf_no_unfolding_cache.get(wnu_bucket_idx) {
-                if let Some(&(stored_input, stored_result, stored_bvar_ub)) = bucket.get(&cur_canon) {
-                    if stored_input == cur || self.ctx.sem_eq(stored_input, cur) {
+                if let Some(&(stored_input, stored_result, stored_depth)) = bucket.get(&cur_canon) {
+                    if stored_depth == cur_depth && (stored_input == cur || self.ctx.sem_eq(stored_input, cur)) {
                         self.ctx.trace.wnu_cache_hits += 1;
                         break stored_result;
                     }
-                    // shift_eq: reuse result for cur = Shift(stored, delta).
-                    // Only sound when no let-bindings exist in the referenced
-                    // bvar range, since zeta reduction breaks shift-equivariance.
-                    if self.context_range_is_let_free(cur_bvar_ub) && cur_bvar_ub >= stored_bvar_ub {
-                        let delta = cur_bvar_ub - stored_bvar_ub;
-                        if delta > 0 && self.ctx.shift_eq(stored_input, cur, delta) {
+                    // Cross-depth shift_eq: sound because Shift peeling shrinks
+                    // context to stored_depth, making let-bindings above irrelevant.
+                    if cur_depth > stored_depth {
+                        let delta = cur_depth - stored_depth;
+                        if self.ctx.shift_eq(stored_input, cur, delta) {
                             self.ctx.trace.wnu_cache_hits += 1;
                             break self.ctx.push_shift(stored_result, delta, 0);
                         }
@@ -1190,13 +1189,20 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         };
         // Cache intermediate inputs (non-cheap_proj only).
         if !cheap_proj {
+            let store_depth = self.local_ctx.len() as u16;
             for entry in cache_entries {
                 let entry_canon = self.ctx.canonical_hash(entry);
-                let entry_bvar_ub = self.ctx.num_loose_bvars(entry);
-                let entry_bucket_idx = if entry_bvar_ub == 0 { 0 } else { self.local_ctx.len() };
+                let entry_nlbv = self.ctx.num_loose_bvars(entry);
+                let entry_bucket_idx = if entry_nlbv == 0 {
+                    0
+                } else {
+                    let entry_lb = self.ctx.fvar_lb(self.ctx.read_expr(entry).get_fvar_list());
+                    (store_depth - entry_lb) as usize
+                };
                 if let Some(bucket) = self.tc_cache.whnf_no_unfolding_cache.get_mut(entry_bucket_idx) {
-                    if bucket.get(&entry_canon).map_or(true, |&(_, _, s)| entry_bvar_ub < s) {
-                        bucket.insert(entry_canon, (entry, result, entry_bvar_ub));
+                    // Prefer lower depth (more reusable for cross-depth shift_eq).
+                    if bucket.get(&entry_canon).map_or(true, |&(_, _, sd)| store_depth < sd) {
+                        bucket.insert(entry_canon, (entry, result, store_depth));
                     }
                 }
             }
