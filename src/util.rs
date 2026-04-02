@@ -329,6 +329,13 @@ pub struct TcTrace {
     pub whnf_cache_no_bucket: u64,
     pub whnf_cache_no_entry: u64,
     pub whnf_cache_verify_fail: u64,
+    pub whnf_cache_vf_same: u64,   // same depth, sem_eq fail
+    pub whnf_cache_vf_above: u64,  // depth > stored, shift_eq fail
+    pub whnf_cache_vf_below: u64,  // depth < stored, shift_eq or shift_down fail
+    pub whnf_cache_vf_sign_would_fix: u64, // sign(ub_f - ub_a) would have discriminated
+    pub whnf_cache_vf_evictions: u64,     // times a collision caused eviction of a different expression
+    pub whnf_cache_overflow_stores: u64,
+    pub whnf_cache_overflow_hits: u64,
 }
 
 impl std::fmt::Display for TcTrace {
@@ -344,7 +351,7 @@ impl std::fmt::Display for TcTrace {
             write!(f, " | zeta={} wlet={} wbeta={} dag={} wnu={}/{}/{}", self.zeta_reductions, self.whnf_let_reductions, self.whnf_beta_reductions, self.dag_size, self.wnu_calls, self.wnu_cache_hits, self.wnu_shift_peel)?;
         }
         if self.whnf_cache_verify_fail > 0 {
-            write!(f, " | wmiss={}/{}/{}", self.whnf_cache_no_bucket, self.whnf_cache_no_entry, self.whnf_cache_verify_fail)?;
+            write!(f, " | wmiss={}/{}/{} vf={}/{}/{} sign_fix={} evict={} ov_store={} ov_hit={}", self.whnf_cache_no_bucket, self.whnf_cache_no_entry, self.whnf_cache_verify_fail, self.whnf_cache_vf_same, self.whnf_cache_vf_above, self.whnf_cache_vf_below, self.whnf_cache_vf_sign_would_fix, self.whnf_cache_vf_evictions, self.whnf_cache_overflow_stores, self.whnf_cache_overflow_hits)?;
         }
         Ok(())
     }
@@ -688,6 +695,32 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
     pub(crate) fn canonical_hash(&self, e: ExprPtr<'t>) -> (u64, u64) {
         let expr = self.read_expr(e);
         (expr.get_struct_hash(), self.fvar_normalize_hash(expr.get_fvar_list()))
+    }
+
+    /// Compute a shift-invariant "child nlbv sign" for collision discrimination.
+    /// For App(f,a): sign of (nlbv(f) - nlbv(a)), encoded as 0/1/2.
+    /// For Pi/Lambda/Let: sign of (nlbv(ty) - nlbv(body)).
+    /// For others: 0.
+    /// This is shift-invariant because shifting both children by the same amount
+    /// preserves the difference.
+    pub(crate) fn nlbv_sign(&self, e: ExprPtr<'t>) -> u8 {
+        match self.read_expr(e) {
+            Expr::App { fun, arg, .. } => {
+                let f_nlbv = self.read_expr(fun).num_loose_bvars();
+                let a_nlbv = self.read_expr(arg).num_loose_bvars();
+                if f_nlbv > a_nlbv { 2 } else if f_nlbv < a_nlbv { 1 } else { 0 }
+            }
+            Expr::Pi { binder_type, body, .. } | Expr::Lambda { binder_type, body, .. } => {
+                let ty_nlbv = self.read_expr(binder_type).num_loose_bvars();
+                let body_nlbv = self.read_expr(body).num_loose_bvars();
+                if ty_nlbv > body_nlbv { 2 } else if ty_nlbv < body_nlbv { 1 } else { 0 }
+            }
+            Expr::Shift { inner, .. } => {
+                // Shift preserves the sign — recurse through
+                self.nlbv_sign(inner)
+            }
+            _ => 0,
+        }
     }
 
     /// A constructor for the anonymous name.
@@ -1350,14 +1383,20 @@ pub struct NameCache<'p> {
     pub(crate) list_cons: Option<NamePtr<'p>>,
 }
 
+/// A single whnf cache slot: (input, result, depth).
+pub(crate) type WhnfSlot<'t> = (ExprPtr<'t>, ExprPtr<'t>, u16);
+
 pub(crate) struct TcCache<'t> {
     /// Shift-invariant WHNF cache, organized as a stack of maps (like infer_cache).
     /// Bucket 0: closed expressions (context-independent, never evicted by push/pop).
     /// Buckets 1..depth: open expressions at each context depth.
     /// With let-in-context, whnf is context-dependent for open expressions (zeta reduction),
     /// so per-depth bucketing ensures stale results are evicted on pop_local.
-    /// Each map: canonical hash → (input_expr, result_expr, bvar_ub).
-    pub(crate) whnf_cache: Vec<FxHashMap<(u64, u64), (ExprPtr<'t>, ExprPtr<'t>, u16)>>,
+    /// Each map: canonical hash → (input, result, depth). Primary cache.
+    pub(crate) whnf_cache: Vec<FxHashMap<(u64, u64), WhnfSlot<'t>>>,
+    /// Overflow cache: holds a second entry per canonical hash when different
+    /// shift-families collide. Separate map to preserve primary cache's memory layout.
+    pub(crate) whnf_cache_overflow: Vec<FxHashMap<(u64, u64), WhnfSlot<'t>>>,
     /// Shift-invariant whnf_no_unfolding cache: same stacked design as whnf_cache.
     pub(crate) whnf_no_unfolding_cache: Vec<FxHashMap<(u64, u64), (ExprPtr<'t>, ExprPtr<'t>, u16)>>,
     /// Shift-invariant positive def_eq cache for closed expressions.
@@ -1393,6 +1432,7 @@ impl<'t> TcCache<'t> {
     pub(crate) fn new() -> Self {
         Self {
             whnf_cache: vec![new_fx_hash_map()],              // bucket 0 = closed
+            whnf_cache_overflow: vec![new_fx_hash_map()],     // overflow for bucket 0
             whnf_no_unfolding_cache: vec![new_fx_hash_map()], // bucket 0 = closed
             eq_cache: new_fx_hash_map(),
             failure_cache: new_fx_hash_map(),
@@ -1406,6 +1446,8 @@ impl<'t> TcCache<'t> {
     pub(crate) fn clear(&mut self) {
         self.whnf_cache.truncate(1);
         self.whnf_cache[0].clear();
+        self.whnf_cache_overflow.truncate(1);
+        self.whnf_cache_overflow[0].clear();
         self.whnf_no_unfolding_cache.truncate(1);
         self.whnf_no_unfolding_cache[0].clear();
         self.eq_cache.clear();
