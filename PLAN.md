@@ -248,7 +248,7 @@ Result is a boolean (no delta to apply). On init: ~39K shift-invariant hits out 
 |-----------|--------------------------|------------------|
 | Init (54k decls, 310MB) | 26s | 30s (1.15x) |
 | app-lam N=4000 | 8.3s | 10ms (830x faster) |
-| Mathlib (630k decls, 4.9GB) | ~16min (est.) | ~238min (est.), 10 timeouts at 235K decls |
+| Mathlib (630k decls, 4.9GB) | ~16min (est.) | 233min (14.5x), 42 timeouts |
 | Mathlib 100k-110k segment | 14s | 34s (2.4x) |
 | Mathlib 300k-310k segment | 12s | 76s (6.3x) |
 | ofPointTensor_SpecTensorTo (#134719) | 214ms | 70s (327x) |
@@ -260,9 +260,12 @@ Result is a boolean (no delta to apply). On init: ~39K shift-invariant hits out 
 Note: Init was 29s before fvar_lb-based bucketing and infer below-depth hits.
 Previous Mathlib run (with canonicalize, before fvar_lb bucketing) had 213 timeouts.
 Previous full Mathlib run (pre-promotion): 260min wall time, 46 timeouts.
-Partial Mathlib run (with cache promotion, 235K/630K decls): 5061s vs 5534s baseline = **8.5% faster**.
-Extrapolated full run: ~238min (~14.9x nanoda), ~10 timeouts (projected similar to pre-promotion).
-Process crashed at ~235K decls; investigating whether accumulation effect causes memory issue.
+Full Mathlib run (with cache promotion): **13962s (232.7min, 14.5x nanoda)**, 42 timeouts.
+**10.6% faster** than pre-promotion baseline across the full run.
+Milestone comparison vs pre-promotion (old → new): 50K: 94s→87s (8%), 200K: 3104s→2954s (5%),
+300K: 7434s→6684s (10%), 400K: 10890s→9734s (11%), 500K: 13566s→12115s (11%), 629K: 15621s→13962s (10.6%).
+Note: 100K shows 9% regression (566s vs 517s) — likely a single pathological declaration.
+120 assert_def_eq panics (same in both old and new runs — pre-existing correctness issue, not caused by promotion).
 
 Profile (init, pre-deletion baseline, 375B instructions): `force_shift_aux` was the
 dominant cost — shift cache had ~40% hit rate (8M hits, 12M misses). Now deleted;
