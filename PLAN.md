@@ -347,9 +347,17 @@ Results on #334175 `toPartialMap._proof_6`:
 - Cascade: 23% fewer infer calls, 28% fewer whnf calls, 21% fewer inst_aux
 
 The overflow HashMap is separate from the primary to preserve memory layout (cache locality)
-for the common single-family case. The nlbv_sign discriminator (sign of nlbv_f - nlbv_a for
-App nodes) was tested but doesn't help (sign_fix=0 on pathological case — collisions happen
-at deeper tree levels where the sign is the same).
+for the common single-family case.
+
+**nlbv_sign measurement** (sign of nlbv(child1) - nlbv(child2) for App/Pi/Lambda — shift-invariant
+1.6-bit discriminator): Instrumented both whnf and infer verify_fail paths on #134719.
+Results show nlbv_sign is ineffective for collision reduction:
+- whnf: vf=618/206686/17614 (same/above/below), sign_fix=28 (0.01% of 225K total)
+- infer: ivf=8/9540/246654/21727 (check_flag/same/above/below), isign_fix=93 (0.03% of 278K total)
+The vast majority of verify_fails are above-depth (206K whnf, 246K infer) — cross-depth hash
+collisions where structurally different expressions share the same canonical hash
+(struct_hash, normalized_fvar_hash). nlbv_sign cannot discriminate these because the
+colliding expressions typically have similar tree shapes with different variable references.
 
 **No shift resolution**: The whole point of Shift nodes is to avoid traversals.
 We use `sem_eq` (non-allocating structural walk) for all equality comparisons — no deep
