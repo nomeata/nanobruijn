@@ -145,6 +145,16 @@ it goes to overflow. On lookup, primary is tried first, then overflow. This elim
 verify_fails on pathological cases without regressing Init (overflow map is rarely populated
 for non-pathological declarations).
 
+**Cache hit promotion (replace primary)**: After a successful shift_eq-verified cache hit
+where `stored_input != query`, replace the primary slot with `(query, result, depth)`.
+This enables future lookups with the same ExprPtr to hit via ptr_eq without needing the
+expensive shift_eq tree walk. Trade-off: replacing a lower-depth primary with a higher-depth
+entry increases verify_fails for lower-depth queries (28% more whnf verify_fails on #134719),
+but the ptr_eq savings outweigh the extra recomputations. Applied to both whnf and infer
+caches (primary hit path only; overflow hits are not promoted).
+- #134719: 78s → 70s (10-11% improvement)
+- Init: 32s → 30s (6-9% improvement)
+
 **Below-depth cache hits (infer only)**: When `depth < stored_depth`, we use reverse
 `shift_eq(query, stored, delta)` to detect that the query is a shift-down of the stored
 entry. On hit, `push_shift_down(result, delta)` subtracts `delta` from free variable
@@ -236,12 +246,12 @@ Result is a boolean (no delta to apply). On init: ~39K shift-invariant hits out 
 
 | Benchmark | nanoda (locally nameless) | lean-slop-kernel |
 |-----------|--------------------------|------------------|
-| Init (54k decls, 310MB) | 26s | 32s (1.23x) |
+| Init (54k decls, 310MB) | 26s | 30s (1.15x) |
 | app-lam N=4000 | 8.3s | 10ms (830x faster) |
 | Mathlib (630k decls, 4.9GB) | ~16min (est.) | full run in progress |
 | Mathlib 100k-110k segment | 14s | 34s (2.4x) |
 | Mathlib 300k-310k segment | 12s | 76s (6.3x) |
-| ofPointTensor_SpecTensorTo (#134719) | 214ms | 75s (350x) |
+| ofPointTensor_SpecTensorTo (#134719) | 214ms | 70s (327x) |
 | Ideal.comap_fiber... (#179806) | ~2s (est.) | 68.2s |
 | ModuleCat.monoidalCategory._proof_4 (#63709) | 503ms | 79s (157x) |
 | toPartialMap._proof_6 (pathological) | ~2s | 17.5s |
@@ -255,37 +265,34 @@ Profile (init, pre-deletion baseline, 375B instructions): `force_shift_aux` was 
 dominant cost — shift cache had ~40% hit rate (8M hits, 12M misses). Now deleted;
 all shifting uses `push_shift` (one-level push) or `mk_shift` (O(1) wrapper).
 
-### Current profile (#134719, 75s)
+### Current profile (#134719, 70s)
 
-After shift dedup + sem_eq cache, shift_eq is no longer a bottleneck (0.3% of CPU).
-The profile is now dominated by expression construction and traversal:
+The dominant bottleneck is shift_eq (cache hit verification): every cache hit (~574K whnf
++ ~515K infer + ~29K wnu ≈ 1.1M) requires a shift_eq tree walk to verify the stored entry
+matches the query. Cache hit promotion (replace primary) reduces this by enabling ptr_eq
+on repeated queries, but shift_eq still dominates.
 
 | Function | CPU% | Note |
 |----------|------|------|
+| shift_eq_aux | 33.6% | tree walk through Shift wrappers |
+| shift_eq_struct | 22.6% | structural comparison with delta/cutoff |
 | mk_lambda | 12.4% | hash + alloc_expr for every lambda construction |
-| check_declar (inlined) | 11.8% | inlined code attributed to dispatch function |
 | subst_aux | 6.2% | level substitution traversal |
-| DebugPrinter/parsing | ~14% | JSON parsing + heartbeat printing |
-| hashbrown rehash | 3.0% | IndexSet growth from 0 to 1.3M entries |
 | inst_aux | 3.0% | instantiation traversal |
 | whnf_no_unfolding_aux | 2.8% | whnf with projection reduction |
-| mk_let, mk_pi | ~4.3% | more expression construction |
 | push_shift | 1.8% | shift distribution into App spine |
 
 Operation count comparison (#134719):
 
 | Metric | Nanoda | Shift-based | Ratio |
 |--------|--------|-------------|-------|
-| def_eq | 84,582 | 292,406 | 3.46x |
-| whnf | 63,040 | 605,633 | 9.61x |
-| infer | 97,526 | 578,293 | 5.93x |
-| inst | 114,276 | 451,037 | 3.95x |
-| alloc_expr | 1,791,251 | 136,417,267 | **76x** |
-| inst_aux | 1,633,207 | 56,307,061 | **34.5x** |
-| eq cache hits | 20,099 | 10,374 | 0.52x |
-
-sem_eq breakdown (947K calls): ptr_eq 24.5%, hash_reject 64.7%, cache_hit 0.09%,
-walk_pos 0.11%, walk_neg 10.5%. 89.2% resolved in O(1).
+| def_eq | 84,582 | 296,455 | 3.50x |
+| whnf | 63,040 | 610,236 | 9.68x |
+| infer | 97,526 | 585,531 | 6.00x |
+| inst | 114,276 | 459,783 | 4.02x |
+| alloc_expr | 1,791,251 | 135,988,052 | **76x** |
+| inst_aux | 1,633,207 | 56,685,731 | **34.7x** |
+| eq cache hits | 20,099 | 10,885 | 0.54x |
 
 The 76x alloc_expr and 34.5x inst_aux gaps are the fundamental cost of de Bruijn + Shift
 vs locally-nameless. Each inst requires O(tree) traversal and reconstruction; nanoda
