@@ -738,6 +738,9 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                 } else {
                     self.ctx.trace.infer_cache_vf_below += 1;
                 }
+                if self.ctx.nlbv_sign(e) != self.ctx.nlbv_sign(stored_input) {
+                    self.ctx.trace.infer_cache_vf_sign_would_fix += 1;
+                }
                 if let Some((si2, sr2, sd2, ch2)) = overflow_infer {
                     if let Some(r) = self.try_infer_cache_hit(e, si2, sr2, sd2, depth, ch2, is_check) {
                         self.ctx.trace.infer_cache_hits += 1;
@@ -1109,9 +1112,20 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                 }
                 return result;
             }
-            // Primary miss — try overflow
-            if let Some((stored_input, stored_result, stored_depth)) = overflow_slot {
-                if let Some(result) = self.try_whnf_cache_hit(e, stored_input, stored_result, stored_depth, depth) {
+            // Primary miss — categorize and try overflow
+            if stored_depth == depth {
+                self.ctx.trace.whnf_cache_vf_same += 1;
+            } else if depth > stored_depth {
+                self.ctx.trace.whnf_cache_vf_above += 1;
+            } else {
+                self.ctx.trace.whnf_cache_vf_below += 1;
+            }
+            // Check if nlbv_sign would have discriminated this collision
+            if self.ctx.nlbv_sign(e) != self.ctx.nlbv_sign(stored_input) {
+                self.ctx.trace.whnf_cache_vf_sign_would_fix += 1;
+            }
+            if let Some((stored_input2, stored_result2, stored_depth2)) = overflow_slot {
+                if let Some(result) = self.try_whnf_cache_hit(e, stored_input2, stored_result2, stored_depth2, depth) {
                     self.ctx.trace.whnf_cache_hits += 1;
                     self.ctx.trace.whnf_cache_overflow_hits += 1;
                     return result;
@@ -1272,18 +1286,18 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                         }
                     }
                     // Try overflow slot
-                    if let Some((stored_input, stored_result, stored_depth)) = overflow {
-                        if stored_depth == cur_depth && (stored_input == cur || self.ctx.sem_eq(stored_input, cur)) {
+                    if let Some((stored_input2, stored_result2, stored_depth2)) = overflow {
+                        if stored_depth2 == cur_depth && (stored_input2 == cur || self.ctx.sem_eq(stored_input2, cur)) {
                             self.ctx.trace.wnu_cache_hits += 1;
                             self.ctx.trace.wnu_cache_overflow_hits += 1;
-                            break stored_result;
+                            break stored_result2;
                         }
-                        if cur_depth > stored_depth {
-                            let delta = cur_depth - stored_depth;
-                            if self.ctx.shift_eq(stored_input, cur, delta) {
+                        if cur_depth > stored_depth2 {
+                            let delta = cur_depth - stored_depth2;
+                            if self.ctx.shift_eq(stored_input2, cur, delta) {
                                 self.ctx.trace.wnu_cache_hits += 1;
                                 self.ctx.trace.wnu_cache_overflow_hits += 1;
-                                break self.ctx.push_shift(stored_result, delta, 0);
+                                break self.ctx.push_shift(stored_result2, delta, 0);
                             }
                         }
                     }

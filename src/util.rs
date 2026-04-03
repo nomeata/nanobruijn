@@ -354,6 +354,7 @@ pub struct TcTrace {
     pub infer_cache_vf_same: u64,         // same depth, sem_eq fail
     pub infer_cache_vf_above: u64,        // depth > stored, shift_eq fail
     pub infer_cache_vf_below: u64,        // depth < stored, not attempted
+    pub infer_cache_vf_sign_would_fix: u64, // nlbv_sign would have discriminated
     pub infer_cache_overflow_stores: u64,
     pub infer_cache_overflow_hits: u64,
     // open defeq cache
@@ -391,7 +392,7 @@ impl std::fmt::Display for TcTrace {
             write!(f, " | wmiss={}/{}/{} vf={}/{}/{} sign_fix={} evict={} ov_store={} ov_hit={}", self.whnf_cache_no_bucket, self.whnf_cache_no_entry, self.whnf_cache_verify_fail, self.whnf_cache_vf_same, self.whnf_cache_vf_above, self.whnf_cache_vf_below, self.whnf_cache_vf_sign_would_fix, self.whnf_cache_vf_evictions, self.whnf_cache_overflow_stores, self.whnf_cache_overflow_hits)?;
         }
         if self.infer_cache_verify_fail > 0 {
-            write!(f, " | ivf={}/{}/{}/{} iov_store={} iov_hit={}", self.infer_cache_vf_check_flag, self.infer_cache_vf_same, self.infer_cache_vf_above, self.infer_cache_vf_below, self.infer_cache_overflow_stores, self.infer_cache_overflow_hits)?;
+            write!(f, " | ivf={}/{}/{}/{} isign_fix={} iov_store={} iov_hit={}", self.infer_cache_vf_check_flag, self.infer_cache_vf_same, self.infer_cache_vf_above, self.infer_cache_vf_below, self.infer_cache_vf_sign_would_fix, self.infer_cache_overflow_stores, self.infer_cache_overflow_hits)?;
         }
         Ok(())
     }
