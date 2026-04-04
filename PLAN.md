@@ -277,6 +277,10 @@ After inst_aux shift-skip optimization: #63709 15s, #134719 52.5s, #334175 8.5s.
   Key finding: 94% of variables in inst_aux shift path were not being substituted.
   The shift-skip optimization returns O(1) when shift pushes vars past subst range.
   Saves 35% of allocations for #134719, 41% speedup for #63709.
+After shift_eq direct-mapped cache: #63709 5.6s, #134719 2.9s, #334175 7.0s.
+  Key finding: shift_eq was doing 9.6B recursive calls (50% of CPU) due to DAG→tree
+  explosion. 1M-slot direct-mapped cache reduces to 1M calls (9,570x reduction).
+  #134719 went from 52.5s to 2.9s (18x speedup). Gap to nanoda now ~15x.
 Previous Mathlib run (with canonicalize, before fvar_lb bucketing) had 213 timeouts.
 Previous full Mathlib run (pre-promotion): 260min wall time, 46 timeouts.
 Full Mathlib run (with cache promotion): **13962s (232.7min, 14.5x nanoda)**, 42 timeouts.
@@ -290,22 +294,22 @@ Profile (init, pre-deletion baseline, 375B instructions): `force_shift_aux` was 
 dominant cost — shift cache had ~40% hit rate (8M hits, 12M misses). Now deleted;
 all shifting uses `push_shift` (one-level push) or `mk_shift` (O(1) wrapper).
 
-### Current profile (#134719, 70s)
+### Current profile (#134719, 2.9s after shift_eq cache)
 
-The dominant bottleneck is shift_eq (cache hit verification): every cache hit (~574K whnf
-+ ~515K infer + ~29K wnu ≈ 1.1M) requires a shift_eq tree walk to verify the stored entry
-matches the query. Cache hit promotion (replace primary) reduces this by enabling ptr_eq
-on repeated queries, but shift_eq still dominates.
+Previous dominant bottleneck (shift_eq at 50%) eliminated by direct-mapped cache.
+shift_eq_aux calls reduced from 9.6B to 1M (9,570x) via DAG-level memoization.
 
+Pre-cache profile (52.5s):
 | Function | CPU% | Note |
 |----------|------|------|
-| shift_eq_aux | 33.6% | tree walk through Shift wrappers |
-| shift_eq_struct | 22.6% | structural comparison with delta/cutoff |
-| mk_lambda | 12.4% | hash + alloc_expr for every lambda construction |
-| subst_aux | 6.2% | level substitution traversal |
-| inst_aux | 3.0% | instantiation traversal |
-| whnf_no_unfolding_aux | 2.8% | whnf with projection reduction |
-| push_shift | 1.8% | shift distribution into App spine |
+| shift_eq_aux | 23.4% | tree walk through Shift wrappers |
+| shift_eq_struct | 20.6% | structural comparison with delta/cutoff |
+| shift_eq_pending | 5.6% | mismatched-cutoff BiShift comparison |
+| hashbrown rehash | 3.9% | hash table resizing |
+| IndexMap insert | 4.7% | alloc_expr dedup lookups |
+
+Remaining bottleneck after shift_eq cache: inst_aux (11.5x nanoda) and alloc_expr (42x).
+The 75.6M alloc_expr calls with 99.4% dedup rate are dominated by hash-and-lookup cost.
 
 Operation count comparison (#134719, after shift-skip optimization):
 
