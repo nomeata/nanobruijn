@@ -1149,6 +1149,11 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
             // a-side Shift: absorb amount into delta
             (Shift { inner, amount, cutoff: sc, .. }, _) if sc == cutoff =>
                 return self.shift_eq_aux(inner, b, delta + amount, cutoff),
+            // a-side Shift with mismatched cutoff: if all vars are above cutoff,
+            // the shift only affects free vars and is equivalent to Shift(inner, amount, cutoff)
+            (Shift { inner, amount, cutoff: sc, fvar_list, .. }, _) if sc < cutoff
+                && self.fvar_lb(fvar_list) >= cutoff =>
+                return self.shift_eq_aux(inner, b, delta + amount, cutoff),
             // b-side Shift: subtract from delta or reverse comparison
             (_, Shift { inner, amount, cutoff: sc, .. }) if sc == cutoff => {
                 return if amount <= delta {
@@ -1156,6 +1161,15 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
                 } else {
                     // amount > delta: shift(a, delta) == shift(inner, amount)
                     // iff shift(inner, amount - delta) == a
+                    self.shift_eq_aux(inner, a, amount - delta, cutoff)
+                };
+            }
+            // b-side Shift with mismatched cutoff: same optimization
+            (_, Shift { inner, amount, cutoff: sc, fvar_list, .. }) if sc < cutoff
+                && self.fvar_lb(fvar_list) >= cutoff => {
+                return if amount <= delta {
+                    self.shift_eq_aux(a, inner, delta - amount, cutoff)
+                } else {
                     self.shift_eq_aux(inner, a, amount - delta, cutoff)
                 };
             }
@@ -1217,7 +1231,18 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
             // Handle by stripping and adjusting delta.
             (Shift { inner, amount, cutoff: sc, .. }, _) if sc == cutoff =>
                 self.shift_eq_aux(inner, b, delta + amount, cutoff),
+            (Shift { inner, amount, cutoff: sc, fvar_list, .. }, _) if sc < cutoff
+                && self.fvar_lb(fvar_list) >= cutoff =>
+                self.shift_eq_aux(inner, b, delta + amount, cutoff),
             (_, Shift { inner, amount, cutoff: sc, .. }) if sc == cutoff => {
+                if amount <= delta {
+                    self.shift_eq_aux(a, inner, delta - amount, cutoff)
+                } else {
+                    self.shift_eq_aux(inner, a, amount - delta, cutoff)
+                }
+            }
+            (_, Shift { inner, amount, cutoff: sc, fvar_list, .. }) if sc < cutoff
+                && self.fvar_lb(fvar_list) >= cutoff => {
                 if amount <= delta {
                     self.shift_eq_aux(a, inner, delta - amount, cutoff)
                 } else {
