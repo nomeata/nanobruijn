@@ -1152,7 +1152,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
 
     /// Check if `b` equals `shift(a, delta)` without allocating.
     /// Used to verify shift-invariant cache hits.
-    pub(crate) fn shift_eq(&self, a: ExprPtr<'t>, b: ExprPtr<'t>, delta: u16) -> bool {
+    pub(crate) fn shift_eq(&mut self, a: ExprPtr<'t>, b: ExprPtr<'t>, delta: u16) -> bool {
         self.shift_eq_aux(a, b, delta, 0)
     }
 
@@ -1220,14 +1220,35 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         result
     }
 
-    fn shift_eq_aux(&self, a: ExprPtr<'t>, b: ExprPtr<'t>, delta: u16, cutoff: u16) -> bool {
+    fn shift_eq_aux(&mut self, a: ExprPtr<'t>, b: ExprPtr<'t>, delta: u16, cutoff: u16) -> bool {
         use crate::expr::Expr::*;
+        self.trace.shift_eq_aux_calls += 1;
         // Fast path: pointer equality. Valid when delta=0 (no shift needed)
         // or when a has no free vars above cutoff (shift is a no-op on a).
         if a == b {
-            if delta == 0 { return true; }
-            if self.num_loose_bvars(a) <= cutoff { return true; }
+            if delta == 0 { self.trace.shift_eq_ptr_eq_hits += 1; return true; }
+            if self.num_loose_bvars(a) <= cutoff { self.trace.shift_eq_ptr_eq_hits += 1; return true; }
         }
+        // Direct-mapped cache lookup: avoids re-comparing same (a,b,delta,cutoff) pairs
+        // that arise from DAG sharing (same sub-expression referenced by multiple parents).
+        let se_tag = {
+            let ak = (a.dag_marker as u64) << 32 | a.idx as u64;
+            let bk = (b.dag_marker as u64) << 32 | b.idx as u64;
+            let dc = (delta as u64) << 16 | cutoff as u64;
+            ak.wrapping_mul(0x9e3779b97f4a7c15).wrapping_add(bk).wrapping_mul(0x517cc1b727220a95).wrapping_add(dc)
+        };
+        let se_idx = (se_tag as usize) & (crate::util::SHIFT_EQ_CACHE_SIZE - 1);
+        let (cached_tag, cached_result) = self.expr_cache.shift_eq_cache[se_idx];
+        if cached_tag == se_tag {
+            return cached_result;
+        }
+        let result = self.shift_eq_aux_inner(a, b, delta, cutoff);
+        self.expr_cache.shift_eq_cache[se_idx] = (se_tag, result);
+        result
+    }
+
+    fn shift_eq_aux_inner(&mut self, a: ExprPtr<'t>, b: ExprPtr<'t>, delta: u16, cutoff: u16) -> bool {
+        use crate::expr::Expr::*;
         // Strip Shift wrappers before structural comparison.
         // This must come before the nlbv early-outs since Shift nodes change
         // the effective delta.
@@ -1296,10 +1317,11 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
     /// General shift-eq with per-side two-layer pending shifts.
     /// Checks: shift(shift(a, a1, as1), a2, as2) == shift(shift(b, b1, bs1), b2, bs2)
     /// This handles mismatched Shift cutoffs that shift_eq_aux can't absorb.
-    fn shift_eq_pending(&self, a: ExprPtr<'t>, b: ExprPtr<'t>,
+    fn shift_eq_pending(&mut self, a: ExprPtr<'t>, b: ExprPtr<'t>,
                         a1: u16, as1: u16, a2: u16, as2: u16,
                         b1: u16, bs1: u16, b2: u16, bs2: u16) -> bool {
         use crate::expr::Expr::*;
+        self.trace.shift_eq_pending_calls += 1;
         // Fast path: pointer equality with identical pending shifts
         if a == b && a1 == b1 && as1 == bs1 && a2 == b2 && as2 == bs2 {
             return true;
@@ -1370,8 +1392,9 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
     }
 
     /// Structural comparison for shift_eq, assuming top-level Shifts already stripped.
-    fn shift_eq_struct(&self, a: ExprPtr<'t>, b: ExprPtr<'t>, delta: u16, cutoff: u16) -> bool {
+    fn shift_eq_struct(&mut self, a: ExprPtr<'t>, b: ExprPtr<'t>, delta: u16, cutoff: u16) -> bool {
         use crate::expr::Expr::*;
+        self.trace.shift_eq_struct_calls += 1;
         match (self.read_expr(a), self.read_expr(b)) {
             (Var { dbj_idx: i, .. }, Var { dbj_idx: j, .. }) => {
                 if i >= cutoff {
