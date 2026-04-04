@@ -273,6 +273,10 @@ Result is a boolean (no delta to apply). On init: ~39K shift-invariant hits out 
 Note: Init was 29s before fvar_lb-based bucketing and infer below-depth hits.
 After shift_eq cutoff fix (partial): Init 27s, #63709 19s (was 79s), #134719 67s (was 70s).
 After general shift_eq_pending + sc>cutoff fix: Init 30s, #63709 16s, #134719 59s, #334175 8.5s (was 50s).
+After inst_aux shift-skip optimization: #63709 15s, #134719 52.5s, #334175 8.5s.
+  Key finding: 94% of variables in inst_aux shift path were not being substituted.
+  The shift-skip optimization returns O(1) when shift pushes vars past subst range.
+  Saves 35% of allocations for #134719, 41% speedup for #63709.
 Previous Mathlib run (with canonicalize, before fvar_lb bucketing) had 213 timeouts.
 Previous full Mathlib run (pre-promotion): 260min wall time, 46 timeouts.
 Full Mathlib run (with cache promotion): **13962s (232.7min, 14.5x nanoda)**, 42 timeouts.
@@ -303,22 +307,25 @@ on repeated queries, but shift_eq still dominates.
 | whnf_no_unfolding_aux | 2.8% | whnf with projection reduction |
 | push_shift | 1.8% | shift distribution into App spine |
 
-Operation count comparison (#134719):
+Operation count comparison (#134719, after shift-skip optimization):
 
 | Metric | Nanoda | Shift-based | Ratio |
 |--------|--------|-------------|-------|
-| def_eq | 84,582 | 296,455 | 3.50x |
-| whnf | 63,040 | 610,236 | 9.68x |
-| infer | 97,526 | 585,531 | 6.00x |
-| inst | 114,276 | 459,783 | 4.02x |
-| alloc_expr | 1,791,251 | 135,988,052 | **76x** |
-| inst_aux | 1,633,207 | 56,685,731 | **34.7x** |
-| eq cache hits | 20,099 | 10,885 | 0.54x |
+| Time | 190ms | 52.5s | 276x |
+| def_eq | 84,582 | 87,433 | 1.03x |
+| whnf | 63,040 | 72,878 | 1.16x |
+| infer | 97,526 | 106,738 | 1.09x |
+| inst | 114,276 | 105,587 | 0.92x |
+| alloc_expr | 1,791,251 | 75,602,103 | **42x** |
+| inst_aux | 1,633,207 | 18,843,003 | **11.5x** |
+| eq cache hits | 20,099 | 7,681 | 0.38x |
 
-The 76x alloc_expr and 34.5x inst_aux gaps are the fundamental cost of de Bruijn + Shift
-vs locally-nameless. Each inst requires O(tree) traversal and reconstruction; nanoda
-needs only O(vars_to_substitute). The per-inst node count is 124 (us) vs 14.3 (nanoda)
-= 8.7x, from accumulated Shift wrappers inflating effective tree size.
+TC-level operations (def_eq, whnf, infer) are now essentially identical to nanoda.
+The remaining gap is dominated by inst_aux (11.5x) and allocations (42x). The shift-skip
+optimization reduced these from 17x/65x but significant overhead remains from:
+- 54% of inst_aux calls still in shift path (sh_amt > 0), doing 4.6M structural allocs
+- Push_shift creating Shift wrappers that inflate expression trees
+- alloc_expr dedup cost: 99.4% dedup rate means 75M hash lookups to store 725K unique nodes
 
 **Experiments that didn't help**:
 - Identity check in subst_aux/abstr_aux/push_shift (children unchanged → skip rebuild):
