@@ -1113,6 +1113,49 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         self.shift_eq_aux(a, b, delta, 0)
     }
 
+    /// Two-layer pending shift: for Var(i), compute:
+    ///   r = if amt1 > 0 && i >= sc1 { i + amt1 } else { i }   (inner shift)
+    ///   eff = if amt2 > 0 && r >= sc2 { r + amt2 } else { r }  (outer shift)
+    /// This represents shift(shift(e, amt1, sc1), amt2, sc2) without allocation.
+    #[inline]
+    fn bishift_apply(amt1: u16, sc1: u16, amt2: u16, sc2: u16, i: u16) -> u16 {
+        let r = if amt1 > 0 && i >= sc1 { i + amt1 } else { i };
+        if amt2 > 0 && r >= sc2 { r + amt2 } else { r }
+    }
+
+    /// Try to absorb a Shift(_, new_amt, new_sc) as the new innermost layer
+    /// into an existing BiShift (amt1, sc1, amt2, sc2).
+    /// Returns Some((new_amt1, new_sc1, new_amt2, new_sc2)) for the composed BiShift, or None.
+    #[inline]
+    fn bishift_absorb(amt1: u16, sc1: u16, amt2: u16, sc2: u16,
+                      new_amt: u16, new_sc: u16) -> Option<(u16, u16, u16, u16)> {
+        if new_amt == 0 { return Some((amt1, sc1, amt2, sc2)); }
+        if amt1 == 0 {
+            // Inner layer is free; put the new shift there
+            return Some((new_amt, new_sc, amt2, sc2));
+        }
+        // Compose: new shift (new_amt, new_sc) applied first, then (amt1, sc1).
+        // For var i: r = if i >= new_sc { i + new_amt } else { i }
+        //            eff = if r >= sc1 { r + amt1 } else { r }
+        if new_sc == sc1 {
+            // Same cutoff: add amounts
+            return Some((amt1 + new_amt, sc1, amt2, sc2));
+        }
+        if new_sc < sc1 && new_amt >= sc1 - new_sc {
+            // Inner shift lifts everything >= new_sc past sc1: compose additively
+            return Some((amt1 + new_amt, new_sc, amt2, sc2));
+        }
+        if new_sc > sc1 && amt2 == 0 {
+            // new shift only affects vars >= new_sc; existing layer 1 affects >= sc1.
+            // For i < sc1: eff = i
+            // For sc1 <= i < new_sc: eff = i + amt1
+            // For i >= new_sc: eff = i + new_amt + amt1
+            // Represent as: layer 1 = (amt1, sc1), layer 2 = (new_amt, new_sc + amt1)
+            return Some((amt1, sc1, new_amt, new_sc + amt1));
+        }
+        None
+    }
+
     /// Semantic equality: checks if `a` and `b` are equal modulo internal Shift wrappers.
     /// Unlike pointer equality (`a == b`), this traverses the structure to handle
     /// expressions built by `push_shift` or `mk_shift` that are semantically
@@ -1149,11 +1192,18 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
             // a-side Shift: absorb amount into delta
             (Shift { inner, amount, cutoff: sc, .. }, _) if sc == cutoff =>
                 return self.shift_eq_aux(inner, b, delta + amount, cutoff),
-            // a-side Shift with mismatched cutoff: if all vars are above cutoff,
+            // a-side Shift with mismatched cutoff: if all vars are above both cutoffs,
             // the shift only affects free vars and is equivalent to Shift(inner, amount, cutoff)
-            (Shift { inner, amount, cutoff: sc, fvar_list, .. }, _) if sc < cutoff
-                && self.fvar_lb(fvar_list) >= cutoff =>
+            (Shift { inner, amount, cutoff: sc, fvar_list, .. }, _) if sc != cutoff
+                && self.fvar_lb(fvar_list) >= cutoff.max(sc) =>
                 return self.shift_eq_aux(inner, b, delta + amount, cutoff),
+            // a-side Shift with mismatched cutoff, general case: use pending-shift comparison
+            (Shift { inner, amount, cutoff: sc, .. }, _) if sc != cutoff =>
+                return self.shift_eq_pending(
+                    inner, b,
+                    amount, sc, delta, cutoff,  // a-side: inner shift (amount, sc), outer (delta, cutoff)
+                    0, 0, 0, 0,                 // b-side: no pending shifts
+                ),
             // b-side Shift: subtract from delta or reverse comparison
             (_, Shift { inner, amount, cutoff: sc, .. }) if sc == cutoff => {
                 return if amount <= delta {
@@ -1165,14 +1215,21 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
                 };
             }
             // b-side Shift with mismatched cutoff: same optimization
-            (_, Shift { inner, amount, cutoff: sc, fvar_list, .. }) if sc < cutoff
-                && self.fvar_lb(fvar_list) >= cutoff => {
+            (_, Shift { inner, amount, cutoff: sc, fvar_list, .. }) if sc != cutoff
+                && self.fvar_lb(fvar_list) >= cutoff.max(sc) => {
                 return if amount <= delta {
                     self.shift_eq_aux(a, inner, delta - amount, cutoff)
                 } else {
                     self.shift_eq_aux(inner, a, amount - delta, cutoff)
                 };
             }
+            // b-side Shift with mismatched cutoff, general case
+            (_, Shift { inner, amount, cutoff: sc, .. }) if sc != cutoff =>
+                return self.shift_eq_pending(
+                    a, inner,
+                    0, 0, delta, cutoff,        // a-side: only comparison shift
+                    amount, sc, 0, 0,           // b-side: inner shift (amount, sc)
+                ),
             _ => {}
         }
         // After stripping Shifts: if a has no free vars above cutoff,
@@ -1191,6 +1248,82 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         }
         // Structural comparison (no Shift nodes on either side at this point)
         self.shift_eq_struct(a, b, delta, cutoff)
+    }
+
+    /// General shift-eq with per-side two-layer pending shifts.
+    /// Checks: shift(shift(a, a1, as1), a2, as2) == shift(shift(b, b1, bs1), b2, bs2)
+    /// This handles mismatched Shift cutoffs that shift_eq_aux can't absorb.
+    fn shift_eq_pending(&self, a: ExprPtr<'t>, b: ExprPtr<'t>,
+                        a1: u16, as1: u16, a2: u16, as2: u16,
+                        b1: u16, bs1: u16, b2: u16, bs2: u16) -> bool {
+        use crate::expr::Expr::*;
+        // Fast path: pointer equality with identical pending shifts
+        if a == b && a1 == b1 && as1 == bs1 && a2 == b2 && as2 == bs2 {
+            return true;
+        }
+        // Pointer equality when both shifts are identity and expression is closed
+        if a == b && a1 == 0 && a2 == 0 && b1 == 0 && b2 == 0 {
+            return true;
+        }
+
+        let a_expr = self.read_expr(a);
+        let b_expr = self.read_expr(b);
+
+        // Absorb Shift nodes into pending shifts
+        if let Shift { inner, amount, cutoff: sc, .. } = a_expr {
+            if let Some((na1, nas1, na2, nas2)) = Self::bishift_absorb(a1, as1, a2, as2, amount, sc) {
+                return self.shift_eq_pending(inner, b, na1, nas1, na2, nas2, b1, bs1, b2, bs2);
+            }
+            // Can't absorb; conservative false
+            return false;
+        }
+        if let Shift { inner, amount, cutoff: sc, .. } = b_expr {
+            if let Some((nb1, nbs1, nb2, nbs2)) = Self::bishift_absorb(b1, bs1, b2, bs2, amount, sc) {
+                return self.shift_eq_pending(a, inner, a1, as1, a2, as2, nb1, nbs1, nb2, nbs2);
+            }
+            return false;
+        }
+
+        // Structural comparison with pending shifts applied at Var leaves
+        match (a_expr, b_expr) {
+            (Var { dbj_idx: i, .. }, Var { dbj_idx: j, .. }) =>
+                Self::bishift_apply(a1, as1, a2, as2, i) == Self::bishift_apply(b1, bs1, b2, bs2, j),
+            (App { fun: f1, arg: a1x, .. }, App { fun: f2, arg: a2x, .. }) =>
+                self.shift_eq_pending(f1, f2, a1, as1, a2, as2, b1, bs1, b2, bs2)
+                && self.shift_eq_pending(a1x, a2x, a1, as1, a2, as2, b1, bs1, b2, bs2),
+            (Pi { binder_name: n1, binder_style: s1, binder_type: t1, body: bd1, .. },
+             Pi { binder_name: n2, binder_style: s2, binder_type: t2, body: bd2, .. }) =>
+                n1 == n2 && s1 == s2
+                && self.shift_eq_pending(t1, t2, a1, as1, a2, as2, b1, bs1, b2, bs2)
+                && self.shift_eq_pending(bd1, bd2,
+                    a1, as1 + if a1 > 0 { 1 } else { 0 }, a2, as2 + if a2 > 0 { 1 } else { 0 },
+                    b1, bs1 + if b1 > 0 { 1 } else { 0 }, b2, bs2 + if b2 > 0 { 1 } else { 0 }),
+            (Lambda { binder_name: n1, binder_style: s1, binder_type: t1, body: bd1, .. },
+             Lambda { binder_name: n2, binder_style: s2, binder_type: t2, body: bd2, .. }) =>
+                n1 == n2 && s1 == s2
+                && self.shift_eq_pending(t1, t2, a1, as1, a2, as2, b1, bs1, b2, bs2)
+                && self.shift_eq_pending(bd1, bd2,
+                    a1, as1 + if a1 > 0 { 1 } else { 0 }, a2, as2 + if a2 > 0 { 1 } else { 0 },
+                    b1, bs1 + if b1 > 0 { 1 } else { 0 }, b2, bs2 + if b2 > 0 { 1 } else { 0 }),
+            (Let { binder_name: n1, binder_type: t1, val: v1, body: bd1, nondep: nd1, .. },
+             Let { binder_name: n2, binder_type: t2, val: v2, body: bd2, nondep: nd2, .. }) =>
+                n1 == n2 && nd1 == nd2
+                && self.shift_eq_pending(t1, t2, a1, as1, a2, as2, b1, bs1, b2, bs2)
+                && self.shift_eq_pending(v1, v2, a1, as1, a2, as2, b1, bs1, b2, bs2)
+                && self.shift_eq_pending(bd1, bd2,
+                    a1, as1 + if a1 > 0 { 1 } else { 0 }, a2, as2 + if a2 > 0 { 1 } else { 0 },
+                    b1, bs1 + if b1 > 0 { 1 } else { 0 }, b2, bs2 + if b2 > 0 { 1 } else { 0 }),
+            (Proj { ty_name: tn1, idx: i1, structure: s1, .. },
+             Proj { ty_name: tn2, idx: i2, structure: s2, .. }) =>
+                tn1 == tn2 && i1 == i2
+                && self.shift_eq_pending(s1, s2, a1, as1, a2, as2, b1, bs1, b2, bs2),
+            (Sort { level: l1, .. }, Sort { level: l2, .. }) => l1 == l2,
+            (Const { name: n1, levels: l1, .. }, Const { name: n2, levels: l2, .. }) =>
+                n1 == n2 && l1 == l2,
+            (NatLit { ptr: p1, .. }, NatLit { ptr: p2, .. }) => p1 == p2,
+            (StringLit { ptr: p1, .. }, StringLit { ptr: p2, .. }) => p1 == p2,
+            _ => false,
+        }
     }
 
     /// Structural comparison for shift_eq, assuming top-level Shifts already stripped.
@@ -1231,9 +1364,16 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
             // Handle by stripping and adjusting delta.
             (Shift { inner, amount, cutoff: sc, .. }, _) if sc == cutoff =>
                 self.shift_eq_aux(inner, b, delta + amount, cutoff),
-            (Shift { inner, amount, cutoff: sc, fvar_list, .. }, _) if sc < cutoff
-                && self.fvar_lb(fvar_list) >= cutoff =>
+            (Shift { inner, amount, cutoff: sc, fvar_list, .. }, _) if sc != cutoff
+                && self.fvar_lb(fvar_list) >= cutoff.max(sc) =>
                 self.shift_eq_aux(inner, b, delta + amount, cutoff),
+            // a-side Shift with mismatched cutoff, general case
+            (Shift { inner, amount, cutoff: sc, .. }, _) if sc != cutoff =>
+                self.shift_eq_pending(
+                    inner, b,
+                    amount, sc, delta, cutoff,
+                    0, 0, 0, 0,
+                ),
             (_, Shift { inner, amount, cutoff: sc, .. }) if sc == cutoff => {
                 if amount <= delta {
                     self.shift_eq_aux(a, inner, delta - amount, cutoff)
@@ -1241,14 +1381,21 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
                     self.shift_eq_aux(inner, a, amount - delta, cutoff)
                 }
             }
-            (_, Shift { inner, amount, cutoff: sc, fvar_list, .. }) if sc < cutoff
-                && self.fvar_lb(fvar_list) >= cutoff => {
+            (_, Shift { inner, amount, cutoff: sc, fvar_list, .. }) if sc != cutoff
+                && self.fvar_lb(fvar_list) >= cutoff.max(sc) => {
                 if amount <= delta {
                     self.shift_eq_aux(a, inner, delta - amount, cutoff)
                 } else {
                     self.shift_eq_aux(inner, a, amount - delta, cutoff)
                 }
             }
+            // b-side Shift with mismatched cutoff, general case
+            (_, Shift { inner, amount, cutoff: sc, .. }) if sc != cutoff =>
+                self.shift_eq_pending(
+                    a, inner,
+                    0, 0, delta, cutoff,
+                    amount, sc, 0, 0,
+                ),
             _ => false,
         }
     }

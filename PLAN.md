@@ -46,15 +46,19 @@ This is exactly a deferred `force_shift_aux(inner, amount, cutoff)`.
   Amounts are additive: `shift_eq_aux(Shift(e, k, c), b, delta, c)` checks `shift_eq_aux(e, b, delta+k, c)`.
   Works because `push_shift` creates `cutoff+1` on binder bodies and `shift_eq_aux`
   increments its cutoff under binders in sync.
-  **Mismatched cutoff handling**: When `Shift(inner, amount, sc)` has `sc < cutoff` (the Shift
-  was created at a shallower binder depth than the current comparison), and `fvar_lb(inner) >= cutoff`
-  (inner has no variables below the comparison cutoff), the shift only affects free variables
-  and is equivalent to `Shift(inner, amount, cutoff)` — safely absorbable. This was the root cause
-  of 99%+ of "above-depth" cache verify_fails: expressions with push_shift-created Shifts
-  (cutoff=0) deep inside binder bodies where the comparison cutoff was higher. Without this fix,
-  shift_eq conservatively rejected all mismatched cutoffs, causing 206K whnf verify_fails on
-  #134719. With the fix: 303 verify_fails (99.85% reduction). Cases where `fvar_lb < cutoff`
-  (inner references bound variables that the shift would affect) are still conservatively rejected.
+  **Mismatched cutoff handling** (both sc < cutoff AND sc > cutoff):
+  - **Fast path**: When `fvar_lb(inner) >= max(sc, cutoff)` (all vars above both cutoffs), the
+    shift only affects free variables and is equivalent to `Shift(inner, amount, cutoff)` — safely
+    absorbable into the delta. Handles the vast majority of cases.
+  - **General path** (`shift_eq_pending`): For the remaining cases where `fvar_lb < max(sc, cutoff)`,
+    uses a two-layer "BiShift" representation per side. Each side carries pending shifts
+    `(amt1, sc1, amt2, sc2)` representing `shift(shift(e, amt1, sc1), amt2, sc2)`. Variable indices
+    are computed by applying both layers. Under binders, all `sc` values increment. Nested Shifts
+    are absorbed by composing with the inner layer (works when cutoffs match or the inner shift
+    lifts past the outer's cutoff). Conservative false only when three distinct cutoff levels
+    would be needed (extremely rare in practice).
+  - **Impact**: #134719 above-depth VFs: 207K → 299 (all remaining are genuine hash collisions).
+    #334175: ~1M → 1. #63709: 9654 (all genuine collisions, confirmed by mk_shift + sem_eq check).
 
 **Current state**: whnf uses `push_shift` on results from both the direct
 Shift-peeling path and the shift-invariant cache hit path for ALL result types
@@ -267,7 +271,8 @@ Result is a boolean (no delta to apply). On init: ~39K shift-invariant hits out 
 | nonempty_algHom (was pathological) | 67ms | 1.4s |
 
 Note: Init was 29s before fvar_lb-based bucketing and infer below-depth hits.
-After shift_eq cutoff fix: Init 27s, #63709 19s (was 79s), #134719 67s (was 70s).
+After shift_eq cutoff fix (partial): Init 27s, #63709 19s (was 79s), #134719 67s (was 70s).
+After general shift_eq_pending + sc>cutoff fix: Init 30s, #63709 16s, #134719 59s, #334175 8.5s (was 50s).
 Previous Mathlib run (with canonicalize, before fvar_lb bucketing) had 213 timeouts.
 Previous full Mathlib run (pre-promotion): 260min wall time, 46 timeouts.
 Full Mathlib run (with cache promotion): **13962s (232.7min, 14.5x nanoda)**, 42 timeouts.
@@ -509,6 +514,16 @@ nested-let cascade. Together these handle all Init declarations.
 - **Investigate fvar_lb computation overhead**: fvar_lb-based bucketing regressed Init
   from 29s to 33s. The fvar_lb computation on every cache access may outweigh the
   cross-depth hit benefit for Init. Profile and consider caching fvar_lb.
+
+- **Optimize local context adjustments under shift**: When `infer` or `whnf` operates
+  under a `shift`, the local context is temporarily adjusted (popping entries). The data
+  structures aren't well-suited for this. Key improvements:
+  - Skip local context adjustment entirely when there's a cache hit (the result is already
+    shifted, no need to reconstruct the context).
+  - Investigate better data structures for temporary local context/cache truncation (e.g.,
+    persistent data structures, versioned contexts).
+  - Consider whether caches and local context should live in the same data structure for
+    efficient co-truncation.
 
 - **Investigate always-let-in-context alternatives**: Current eager infer_let works but
   doesn't avoid O(N²) cascade for deep lets in infer. Options:
