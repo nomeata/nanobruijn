@@ -1174,9 +1174,10 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                 return Some(self.ctx.push_shift(stored_result, delta, 0));
             }
         }
-        // Below-depth (depth < stored_depth) not attempted for whnf cache:
-        // push_shift_down does a full traversal of the result, which is catastrophically
-        // expensive for large expressions (700M+ alloc calls on Mathlib declarations).
+        // Below-depth (depth < stored_depth) not attempted: push_shift_down on the
+        // result is catastrophically expensive for large expressions (1B+ allocs on some
+        // algebraic geometry declarations). Even when fvar_lb >= delta makes it safe,
+        // the traversal cost outweighs the savings from avoiding recomputation.
         None
     }
 
