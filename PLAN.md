@@ -45,7 +45,16 @@ This is exactly a deferred `force_shift_aux(inner, amount, cutoff)`.
 - `shift_eq` handles Shift nodes where the Shift's cutoff matches the comparison cutoff.
   Amounts are additive: `shift_eq_aux(Shift(e, k, c), b, delta, c)` checks `shift_eq_aux(e, b, delta+k, c)`.
   Works because `push_shift` creates `cutoff+1` on binder bodies and `shift_eq_aux`
-  increments its cutoff under binders in sync. Returns false for mismatched cutoffs (conservative).
+  increments its cutoff under binders in sync.
+  **Mismatched cutoff handling**: When `Shift(inner, amount, sc)` has `sc < cutoff` (the Shift
+  was created at a shallower binder depth than the current comparison), and `fvar_lb(inner) >= cutoff`
+  (inner has no variables below the comparison cutoff), the shift only affects free variables
+  and is equivalent to `Shift(inner, amount, cutoff)` — safely absorbable. This was the root cause
+  of 99%+ of "above-depth" cache verify_fails: expressions with push_shift-created Shifts
+  (cutoff=0) deep inside binder bodies where the comparison cutoff was higher. Without this fix,
+  shift_eq conservatively rejected all mismatched cutoffs, causing 206K whnf verify_fails on
+  #134719. With the fix: 303 verify_fails (99.85% reduction). Cases where `fvar_lb < cutoff`
+  (inner references bound variables that the shift would affect) are still conservatively rejected.
 
 **Current state**: whnf uses `push_shift` on results from both the direct
 Shift-peeling path and the shift-invariant cache hit path for ALL result types
@@ -246,18 +255,19 @@ Result is a boolean (no delta to apply). On init: ~39K shift-invariant hits out 
 
 | Benchmark | nanoda (locally nameless) | lean-slop-kernel |
 |-----------|--------------------------|------------------|
-| Init (54k decls, 310MB) | 26s | 30s (1.15x) |
+| Init (54k decls, 310MB) | 26s | 27s (1.04x) |
 | app-lam N=4000 | 8.3s | 10ms (830x faster) |
 | Mathlib (630k decls, 4.9GB) | ~16min (est.) | 233min (14.5x), 42 timeouts |
 | Mathlib 100k-110k segment | 14s | 34s (2.4x) |
 | Mathlib 300k-310k segment | 12s | 76s (6.3x) |
-| ofPointTensor_SpecTensorTo (#134719) | 214ms | 70s (327x) |
-| Ideal.comap_fiber... (#179806) | ~2s (est.) | 68.2s |
-| ModuleCat.monoidalCategory._proof_4 (#63709) | 503ms | 79s (157x) |
-| toPartialMap._proof_6 (pathological) | ~2s | 17.5s |
+| ofPointTensor_SpecTensorTo (#134719) | 214ms | 67s (313x) |
+| Ideal.comap_fiber... (#179806) | ~2s (est.) | 50s |
+| ModuleCat.monoidalCategory._proof_4 (#63709) | 503ms | 19s (38x) |
+| toPartialMap._proof_6 (pathological) | ~2s | 13.9s |
 | nonempty_algHom (was pathological) | 67ms | 1.4s |
 
 Note: Init was 29s before fvar_lb-based bucketing and infer below-depth hits.
+After shift_eq cutoff fix: Init 27s, #63709 19s (was 79s), #134719 67s (was 70s).
 Previous Mathlib run (with canonicalize, before fvar_lb bucketing) had 213 timeouts.
 Previous full Mathlib run (pre-promotion): 260min wall time, 46 timeouts.
 Full Mathlib run (with cache promotion): **13962s (232.7min, 14.5x nanoda)**, 42 timeouts.
@@ -351,13 +361,10 @@ for the common single-family case.
 
 **nlbv_sign measurement** (sign of nlbv(child1) - nlbv(child2) for App/Pi/Lambda — shift-invariant
 1.6-bit discriminator): Instrumented both whnf and infer verify_fail paths on #134719.
-Results show nlbv_sign is ineffective for collision reduction:
-- whnf: vf=618/206686/17614 (same/above/below), sign_fix=28 (0.01% of 225K total)
-- infer: ivf=8/9540/246654/21727 (check_flag/same/above/below), isign_fix=93 (0.03% of 278K total)
-The vast majority of verify_fails are above-depth (206K whnf, 246K infer) — cross-depth hash
-collisions where structurally different expressions share the same canonical hash
-(struct_hash, normalized_fvar_hash). nlbv_sign cannot discriminate these because the
-colliding expressions typically have similar tree shapes with different variable references.
+Results show nlbv_sign is ineffective — but the verify_fails it was measured against turned out
+to be mostly mismatched-cutoff Shift failures (not true hash collisions). After the shift_eq
+cutoff fix, above-depth VFs dropped from 207K to 303, making the original measurement moot.
+The remaining VFs are a mix of true hash collisions and below-depth shift variants.
 
 **No shift resolution**: The whole point of Shift nodes is to avoid traversals.
 We use `sem_eq` (non-allocating structural walk) for all equality comparisons — no deep
