@@ -328,6 +328,13 @@ pub struct TcTrace {
     pub inst_aux_elided: u64,
     pub inst_aux_shift_nodes: u64,
     pub inst_aux_shift_mismatch: u64,
+    pub inst_aux_shifted_path: u64,   // calls where sh_amt > 0
+    pub inst_aux_shifted_alloc: u64,  // mk_app/mk_pi/etc in sh_amt > 0 path
+    pub inst_aux_shifted_var_subst: u64, // var actually substituted in shift path
+    pub inst_aux_shifted_var_nosubst: u64, // var NOT substituted in shift path (pure shift)
+    pub inst_aux_nonshift_identity: u64, // identity check saved alloc in sh_amt == 0 path
+    pub inst_aux_shift_skip_clean: u64,  // shift-skip optimization: sh_amt == n_substs (no wrapper)
+    pub inst_aux_shift_skip_wrap: u64,   // shift-skip optimization: sh_amt > n_substs (creates Shift wrapper)
     pub push_shift_cache_hits: u64,
     pub infer_cache_hash_hit: u64,
     pub infer_cache_verify_fail: u64,
@@ -388,6 +395,11 @@ impl std::fmt::Display for TcTrace {
             self.push_shift_calls, self.push_shift_cache_hits,
             self.inst_aux_calls, self.inst_aux_cache_hits, self.inst_aux_elided,
             self.inst_aux_shift_nodes, self.inst_aux_shift_mismatch)?;
+        write!(f, " | sh_path={} sh_alloc={} sh_var={}/{} nsh_id={} skip={}/{}",
+            self.inst_aux_shifted_path, self.inst_aux_shifted_alloc,
+            self.inst_aux_shifted_var_subst, self.inst_aux_shifted_var_nosubst,
+            self.inst_aux_nonshift_identity,
+            self.inst_aux_shift_skip_clean, self.inst_aux_shift_skip_wrap)?;
         if self.zeta_reductions > 0 || self.whnf_let_reductions > 0 || self.wnu_calls > 0 {
             write!(f, " | zeta={} wlet={} wbeta={} dag={} wnu={}/{}/{} wnu_miss={}/{}/{} wnuov={}/{}", self.zeta_reductions, self.whnf_let_reductions, self.whnf_beta_reductions, self.dag_size, self.wnu_calls, self.wnu_cache_hits, self.wnu_shift_peel, self.wnu_cache_no_bucket, self.wnu_cache_no_entry, self.wnu_cache_verify_fail, self.wnu_cache_overflow_stores, self.wnu_cache_overflow_hits)?;
         }

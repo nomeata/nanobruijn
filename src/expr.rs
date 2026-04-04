@@ -288,6 +288,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
     /// instantiation, without creating intermediate Shift wrapper expressions.
     fn inst_aux(&mut self, e: ExprPtr<'t>, substs: &[ExprPtr<'t>], offset: u16, shift_down: bool, sh_amt: u16, sh_cut: u16) -> ExprPtr<'t> {
         self.trace.inst_aux_calls += 1;
+        if sh_amt > 0 { self.trace.inst_aux_shifted_path += 1; }
         self.check_heartbeat();
 
         // Early exit: check if the (possibly shifted) expression has no loose bvars
@@ -321,6 +322,39 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
 
         let n_substs = substs.len() as u16;
 
+        // Key optimization: when the shift pushes all vars past the substitution range,
+        // no variable will be substituted. We can return the shift-adjusted result in O(1)
+        // instead of traversing the entire subtree.
+        //
+        // Condition: sh_cut <= offset (unshifted vars can't reach substitution range)
+        //        AND sh_amt + sh_cut >= offset + n_substs (shifted vars are past substitution)
+        // This implies sh_amt >= n_substs (shift never goes negative with shift_down).
+        // When the shift exactly cancels shift_down (sh_amt == n_substs, sh_cut == offset),
+        // no variable gets substituted and the result is just `e` — O(1) with no new allocations.
+        if sh_amt > 0 && shift_down && sh_amt == n_substs && sh_cut == offset {
+            self.trace.inst_aux_shift_skip_clean += 1;
+            self.trace.inst_aux_elided += 1;
+            self.expr_cache.inst_cache.insert(cache_key, e);
+            return e;
+        }
+        // More general case: shift pushes vars past substitution range but sh_amt > n_substs
+        // or !shift_down. Creates a Shift wrapper — saves inst_aux traversal at the cost of
+        // potentially increasing downstream TC work from Shift wrappers.
+        if sh_amt > 0 && sh_cut <= offset && sh_amt + sh_cut >= offset + n_substs {
+            let r = if shift_down {
+                let new_amt = sh_amt - n_substs;
+                debug_assert!(new_amt > 0);
+                self.trace.inst_aux_shift_skip_wrap += 1;
+                self.mk_shift_cutoff(e, new_amt, sh_cut)
+            } else {
+                self.trace.inst_aux_shift_skip_wrap += 1;
+                self.mk_shift_cutoff(e, sh_amt, sh_cut)
+            };
+            self.trace.inst_aux_elided += 1;
+            self.expr_cache.inst_cache.insert(cache_key, r);
+            return r;
+        }
+
         // If there's a pending shift, we need to look through Shift nodes on e as well
         let calcd = if sh_amt > 0 {
             match self.read_expr(e) {
@@ -351,40 +385,49 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
                     } else {
                         let rel_idx = shifted_idx - offset;
                         if rel_idx < n_substs {
+                            self.trace.inst_aux_shifted_var_subst += 1;
                             let val = substs[substs.len() - 1 - rel_idx as usize];
                             if offset > 0 { self.mk_shift(val, offset) } else { val }
-                        } else if shift_down {
-                            self.mk_var(shifted_idx - n_substs)
                         } else {
-                            // Return Shift(Var(dbj_idx), sh_amt, sh_cut) — the original shifted form
-                            self.mk_shift_cutoff(e, sh_amt, sh_cut)
+                            self.trace.inst_aux_shifted_var_nosubst += 1;
+                            if shift_down {
+                                self.mk_var(shifted_idx - n_substs)
+                            } else {
+                                // Return Shift(Var(dbj_idx), sh_amt, sh_cut) — the original shifted form
+                                self.mk_shift_cutoff(e, sh_amt, sh_cut)
+                            }
                         }
                     }
                 }
                 App { fun, arg, .. } => {
-                    let fun = self.inst_aux(fun, substs, offset, shift_down, sh_amt, sh_cut);
-                    let arg = self.inst_aux(arg, substs, offset, shift_down, sh_amt, sh_cut);
-                    self.mk_app(fun, arg)
+                    let new_fun = self.inst_aux(fun, substs, offset, shift_down, sh_amt, sh_cut);
+                    let new_arg = self.inst_aux(arg, substs, offset, shift_down, sh_amt, sh_cut);
+                    self.trace.inst_aux_shifted_alloc += 1;
+                    self.mk_app(new_fun, new_arg)
                 }
                 Pi { binder_name, binder_style, binder_type, body, .. } => {
-                    let binder_type = self.inst_aux(binder_type, substs, offset, shift_down, sh_amt, sh_cut);
-                    let body = self.inst_aux(body, substs, offset + 1, shift_down, sh_amt, sh_cut + 1);
-                    self.mk_pi(binder_name, binder_style, binder_type, body)
+                    let new_type = self.inst_aux(binder_type, substs, offset, shift_down, sh_amt, sh_cut);
+                    let new_body = self.inst_aux(body, substs, offset + 1, shift_down, sh_amt, sh_cut + 1);
+                    self.trace.inst_aux_shifted_alloc += 1;
+                    self.mk_pi(binder_name, binder_style, new_type, new_body)
                 }
                 Lambda { binder_name, binder_style, binder_type, body, .. } => {
-                    let binder_type = self.inst_aux(binder_type, substs, offset, shift_down, sh_amt, sh_cut);
-                    let body = self.inst_aux(body, substs, offset + 1, shift_down, sh_amt, sh_cut + 1);
-                    self.mk_lambda(binder_name, binder_style, binder_type, body)
+                    let new_type = self.inst_aux(binder_type, substs, offset, shift_down, sh_amt, sh_cut);
+                    let new_body = self.inst_aux(body, substs, offset + 1, shift_down, sh_amt, sh_cut + 1);
+                    self.trace.inst_aux_shifted_alloc += 1;
+                    self.mk_lambda(binder_name, binder_style, new_type, new_body)
                 }
                 Let { binder_name, binder_type, val, body, nondep, .. } => {
-                    let binder_type = self.inst_aux(binder_type, substs, offset, shift_down, sh_amt, sh_cut);
-                    let val = self.inst_aux(val, substs, offset, shift_down, sh_amt, sh_cut);
-                    let body = self.inst_aux(body, substs, offset + 1, shift_down, sh_amt, sh_cut + 1);
-                    self.mk_let(binder_name, binder_type, val, body, nondep)
+                    let new_type = self.inst_aux(binder_type, substs, offset, shift_down, sh_amt, sh_cut);
+                    let new_val = self.inst_aux(val, substs, offset, shift_down, sh_amt, sh_cut);
+                    let new_body = self.inst_aux(body, substs, offset + 1, shift_down, sh_amt, sh_cut + 1);
+                    self.trace.inst_aux_shifted_alloc += 1;
+                    self.mk_let(binder_name, new_type, new_val, new_body, nondep)
                 }
                 Proj { ty_name, idx, structure, .. } => {
-                    let structure = self.inst_aux(structure, substs, offset, shift_down, sh_amt, sh_cut);
-                    self.mk_proj(ty_name, idx, structure)
+                    let new_structure = self.inst_aux(structure, substs, offset, shift_down, sh_amt, sh_cut);
+                    self.trace.inst_aux_shifted_alloc += 1;
+                    self.mk_proj(ty_name, idx, new_structure)
                 }
             }
         } else {
@@ -418,17 +461,17 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
                 App { fun, arg, .. } => {
                     let new_fun = self.inst_aux(fun, substs, offset, shift_down, 0, 0);
                     let new_arg = self.inst_aux(arg, substs, offset, shift_down, 0, 0);
-                    if new_fun == fun && new_arg == arg { e } else { self.mk_app(new_fun, new_arg) }
+                    if new_fun == fun && new_arg == arg { self.trace.inst_aux_nonshift_identity += 1; e } else { self.mk_app(new_fun, new_arg) }
                 }
                 Pi { binder_name, binder_style, binder_type, body, .. } => {
                     let new_type = self.inst_aux(binder_type, substs, offset, shift_down, 0, 0);
                     let new_body = self.inst_aux(body, substs, offset + 1, shift_down, 0, 0);
-                    if new_type == binder_type && new_body == body { e } else { self.mk_pi(binder_name, binder_style, new_type, new_body) }
+                    if new_type == binder_type && new_body == body { self.trace.inst_aux_nonshift_identity += 1; e } else { self.mk_pi(binder_name, binder_style, new_type, new_body) }
                 }
                 Lambda { binder_name, binder_style, binder_type, body, .. } => {
                     let new_type = self.inst_aux(binder_type, substs, offset, shift_down, 0, 0);
                     let new_body = self.inst_aux(body, substs, offset + 1, shift_down, 0, 0);
-                    if new_type == binder_type && new_body == body { e } else { self.mk_lambda(binder_name, binder_style, new_type, new_body) }
+                    if new_type == binder_type && new_body == body { self.trace.inst_aux_nonshift_identity += 1; e } else { self.mk_lambda(binder_name, binder_style, new_type, new_body) }
                 }
                 Let { binder_name, binder_type, val, body, nondep, .. } => {
                     let binder_type = self.inst_aux(binder_type, substs, offset, shift_down, 0, 0);
