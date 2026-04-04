@@ -370,6 +370,9 @@ pub struct TcTrace {
     pub wnu_cache_verify_fail: u64,
     pub wnu_cache_overflow_stores: u64,
     pub wnu_cache_overflow_hits: u64,
+    // below-depth analysis: how many are true shift variants
+    pub whnf_vf_below_is_shift: u64,
+    pub infer_vf_below_is_shift: u64,
 }
 
 impl std::fmt::Display for TcTrace {
@@ -389,10 +392,10 @@ impl std::fmt::Display for TcTrace {
             write!(f, " | zeta={} wlet={} wbeta={} dag={} wnu={}/{}/{} wnu_miss={}/{}/{} wnuov={}/{}", self.zeta_reductions, self.whnf_let_reductions, self.whnf_beta_reductions, self.dag_size, self.wnu_calls, self.wnu_cache_hits, self.wnu_shift_peel, self.wnu_cache_no_bucket, self.wnu_cache_no_entry, self.wnu_cache_verify_fail, self.wnu_cache_overflow_stores, self.wnu_cache_overflow_hits)?;
         }
         if self.whnf_cache_verify_fail > 0 {
-            write!(f, " | wmiss={}/{}/{} vf={}/{}/{} sign_fix={} evict={} ov_store={} ov_hit={}", self.whnf_cache_no_bucket, self.whnf_cache_no_entry, self.whnf_cache_verify_fail, self.whnf_cache_vf_same, self.whnf_cache_vf_above, self.whnf_cache_vf_below, self.whnf_cache_vf_sign_would_fix, self.whnf_cache_vf_evictions, self.whnf_cache_overflow_stores, self.whnf_cache_overflow_hits)?;
+            write!(f, " | wmiss={}/{}/{} vf={}/{}/{} below_shift={} sign_fix={} evict={} ov_store={} ov_hit={}", self.whnf_cache_no_bucket, self.whnf_cache_no_entry, self.whnf_cache_verify_fail, self.whnf_cache_vf_same, self.whnf_cache_vf_above, self.whnf_cache_vf_below, self.whnf_vf_below_is_shift, self.whnf_cache_vf_sign_would_fix, self.whnf_cache_vf_evictions, self.whnf_cache_overflow_stores, self.whnf_cache_overflow_hits)?;
         }
         if self.infer_cache_verify_fail > 0 {
-            write!(f, " | ivf={}/{}/{}/{} isign_fix={} iov_store={} iov_hit={}", self.infer_cache_vf_check_flag, self.infer_cache_vf_same, self.infer_cache_vf_above, self.infer_cache_vf_below, self.infer_cache_vf_sign_would_fix, self.infer_cache_overflow_stores, self.infer_cache_overflow_hits)?;
+            write!(f, " | ivf={}/{}/{}/{} ibelow_shift={} isign_fix={} iov_store={} iov_hit={}", self.infer_cache_vf_check_flag, self.infer_cache_vf_same, self.infer_cache_vf_above, self.infer_cache_vf_below, self.infer_vf_below_is_shift, self.infer_cache_vf_sign_would_fix, self.infer_cache_overflow_stores, self.infer_cache_overflow_hits)?;
         }
         Ok(())
     }
@@ -761,6 +764,67 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
                 self.nlbv_sign(inner)
             }
             _ => 0,
+        }
+    }
+
+    /// Format a name as a string (for diagnostics).
+    pub fn name_to_string(&self, n: NamePtr<'t>) -> String {
+        match self.read_name(n) {
+            crate::name::Name::Anon => String::new(),
+            crate::name::Name::Str(pfx, sfx, _) => {
+                let mut out = self.name_to_string(pfx);
+                if !out.is_empty() { out.push('.'); }
+                out.push_str(self.read_string(sfx).as_ref());
+                out
+            }
+            crate::name::Name::Num(pfx, sfx, _) => {
+                let mut out = self.name_to_string(pfx);
+                if !out.is_empty() { out.push('.'); }
+                out.push_str(&format!("{}", sfx));
+                out
+            }
+        }
+    }
+
+    /// Compact expression descriptor for diagnostics: tag + key info.
+    /// Returns e.g. "App(Const(Eq),nlbv=3,fvl={2,5})" or "Var(7)"
+    pub fn expr_desc(&self, e: ExprPtr<'t>, max_depth: u32) -> String {
+        if max_depth == 0 { return "...".to_string(); }
+        match self.read_expr(e) {
+            Expr::Var { dbj_idx, .. } => format!("V{}", dbj_idx),
+            Expr::Sort { .. } => "Sort".to_string(),
+            Expr::Const { name, .. } => {
+                let n = self.name_to_string(name);
+                let short = n.rsplit('.').next().unwrap_or(&n);
+                format!("C({})", short)
+            }
+            Expr::App { fun, arg, fvar_list, .. } => {
+                let lb = self.fvar_lb(fvar_list);
+                format!("App({},{},lb={})", self.expr_desc(fun, max_depth - 1), self.expr_desc(arg, max_depth - 1), lb)
+            }
+            Expr::Pi { binder_type, body, fvar_list, .. } => {
+                let lb = self.fvar_lb(fvar_list);
+                format!("Pi({},{},lb={})", self.expr_desc(binder_type, max_depth - 1), self.expr_desc(body, max_depth - 1), lb)
+            }
+            Expr::Lambda { binder_type, body, fvar_list, .. } => {
+                let lb = self.fvar_lb(fvar_list);
+                format!("Lam({},{},lb={})", self.expr_desc(binder_type, max_depth - 1), self.expr_desc(body, max_depth - 1), lb)
+            }
+            Expr::Let { val, body, fvar_list, .. } => {
+                let lb = self.fvar_lb(fvar_list);
+                format!("Let({},{},lb={})", self.expr_desc(val, max_depth - 1), self.expr_desc(body, max_depth - 1), lb)
+            }
+            Expr::Proj { ty_name, idx, structure, .. } => {
+                let n = self.name_to_string(ty_name);
+                let short = n.rsplit('.').next().unwrap_or(&n);
+                format!("Proj({}.{},{})", short, idx, self.expr_desc(structure, max_depth - 1))
+            }
+            Expr::Shift { inner, amount, cutoff, .. } => {
+                format!("Sh({},+{},c={})", self.expr_desc(inner, max_depth - 1), amount, cutoff)
+            }
+            Expr::Local { .. } => "Local".to_string(),
+            Expr::NatLit { .. } => "Nat".to_string(),
+            Expr::StringLit { .. } => "Str".to_string(),
         }
     }
 

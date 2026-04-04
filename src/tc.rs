@@ -737,6 +737,11 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                     self.ctx.trace.infer_cache_vf_above += 1;
                 } else {
                     self.ctx.trace.infer_cache_vf_below += 1;
+                    // Check if this is a true shift variant (reverse direction)
+                    let delta = stored_depth - depth;
+                    if self.ctx.shift_eq(e, stored_input, delta) {
+                        self.ctx.trace.infer_vf_below_is_shift += 1;
+                    }
                 }
                 if self.ctx.nlbv_sign(e) != self.ctx.nlbv_sign(stored_input) {
                     self.ctx.trace.infer_cache_vf_sign_would_fix += 1;
@@ -1119,6 +1124,11 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                 self.ctx.trace.whnf_cache_vf_above += 1;
             } else {
                 self.ctx.trace.whnf_cache_vf_below += 1;
+                // Check if this is a true shift variant (reverse direction)
+                let delta = stored_depth - depth;
+                if self.ctx.shift_eq(e, stored_input, delta) {
+                    self.ctx.trace.whnf_vf_below_is_shift += 1;
+                }
             }
             // Check if nlbv_sign would have discriminated this collision
             if self.ctx.nlbv_sign(e) != self.ctx.nlbv_sign(stored_input) {
