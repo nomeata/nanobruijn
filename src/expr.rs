@@ -370,7 +370,17 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
                         self.expr_cache.inst_cache.insert(cache_key, r);
                         return r;
                     }
-                    // Different cutoffs: push the inner shift, then apply outer shift
+                    // Compose when inner shift moves all vars past outer cutoff:
+                    // If cutoff < sh_cut and amount >= (sh_cut - cutoff), then
+                    // all vars >= cutoff become >= cutoff + amount >= sh_cut,
+                    // so both shifts apply uniformly. Compose as (sh_amt + amount, cutoff).
+                    if cutoff < sh_cut && amount >= sh_cut - cutoff {
+                        self.trace.inst_aux_shift_compose += 1;
+                        let r = self.inst_aux(inner, substs, offset, shift_down, sh_amt + amount, cutoff);
+                        self.expr_cache.inst_cache.insert(cache_key, r);
+                        return r;
+                    }
+                    // Different cutoffs where composition doesn't work: push the inner shift, then apply outer
                     self.trace.inst_aux_shift_mismatch += 1;
                     let forced = self.push_shift(inner, amount, cutoff);
                     let r = self.inst_aux(forced, substs, offset, shift_down, sh_amt, sh_cut);

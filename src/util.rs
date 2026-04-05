@@ -351,6 +351,7 @@ pub struct TcTrace {
     pub inst_aux_elided: u64,
     pub inst_aux_shift_nodes: u64,
     pub inst_aux_shift_mismatch: u64,
+    pub inst_aux_shift_compose: u64,   // shift composition: cutoff < sh_cut but amount >= sh_cut - cutoff
     pub inst_aux_shifted_path: u64,   // calls where sh_amt > 0
     pub inst_aux_shifted_alloc: u64,  // mk_app/mk_pi/etc in sh_amt > 0 path
     pub inst_aux_shifted_var_subst: u64, // var actually substituted in shift path
@@ -414,7 +415,7 @@ pub struct TcTrace {
 
 impl std::fmt::Display for TcTrace {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "def_eq={} dei={}/{} whnf={} infer={} inst={} alloc={} | hits: whnf={} eq={} uf={} dop={}/{} seq={} sd={} infer={} infer_hash={} infer_vfail={} | ps={}/{} | inst_aux={}/{}/{} sh={}/{}",
+        write!(f, "def_eq={} dei={}/{} whnf={} infer={} inst={} alloc={} | hits: whnf={} eq={} uf={} dop={}/{} seq={} sd={} infer={} infer_hash={} infer_vfail={} | ps={}/{} | inst_aux={}/{}/{} sh={}/{}/{}",
             self.def_eq_calls, self.def_eq_inner_calls, self.def_eq_deep_calls, self.whnf_calls, self.infer_calls,
             self.inst_calls, self.alloc_expr_calls,
             self.whnf_cache_hits, self.eq_cache_hits, self.eq_cache_uf_hits,
@@ -424,7 +425,7 @@ impl std::fmt::Display for TcTrace {
             self.infer_cache_hash_hit, self.infer_cache_verify_fail,
             self.push_shift_calls, self.push_shift_cache_hits,
             self.inst_aux_calls, self.inst_aux_cache_hits, self.inst_aux_elided,
-            self.inst_aux_shift_nodes, self.inst_aux_shift_mismatch)?;
+            self.inst_aux_shift_nodes, self.inst_aux_shift_mismatch, self.inst_aux_shift_compose)?;
         write!(f, " | sh_path={} sh_alloc={}/{} sh_var={}/{} nsh_id={} skip={}/{} se={}/{}/{}/{} sep_hit={}",
             self.inst_aux_shifted_path, self.inst_aux_shifted_alloc, self.inst_aux_shifted_identity,
             self.inst_aux_shifted_var_subst, self.inst_aux_shifted_var_nosubst,
