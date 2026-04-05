@@ -205,13 +205,16 @@ pub struct ExprCache<'t> {
     /// Direct-mapped cache for shift_eq_pending results.
     /// Avoids re-traversing the same (a, b, bishift_a, bishift_b) comparisons.
     pub(crate) shift_eq_pending_cache: Vec<(u64, bool)>,
-    /// Memoization cache for mk_app: (fun, arg) → ExprPtr.
-    /// Skips expensive metadata computation and alloc_expr hash lookup on repeated calls.
-    pub(crate) mk_app_cache: FxHashMap<(ExprPtr<'t>, ExprPtr<'t>), ExprPtr<'t>>,
+    /// Direct-mapped cache for mk_app: tag(fun,arg) → (tag, result).
+    /// 64-bit tag combines both ExprPtrs. Much faster than FxHashMap for the extremely hot mk_app path.
+    pub(crate) mk_app_cache: Vec<(u64, ExprPtr<'t>)>,
     /// Memoization cache for mk_pi: (name, style, type, body) → ExprPtr.
     pub(crate) mk_pi_cache: FxHashMap<(NamePtr<'t>, BinderStyle, ExprPtr<'t>, ExprPtr<'t>), ExprPtr<'t>>,
     /// Memoization cache for mk_lambda: (name, style, type, body) → ExprPtr.
     pub(crate) mk_lambda_cache: FxHashMap<(NamePtr<'t>, BinderStyle, ExprPtr<'t>, ExprPtr<'t>), ExprPtr<'t>>,
+    /// Direct-mapped cache for mk_var: index → ExprPtr.
+    /// Since dbj_idx is u16, we use a Vec of Option<ExprPtr> for O(1) lookup.
+    pub(crate) mk_var_cache: Vec<Option<ExprPtr<'t>>>,
 }
 
 impl<'t> ExprCache<'t> {
@@ -228,15 +231,17 @@ impl<'t> ExprCache<'t> {
             shift_dedup: new_fx_hash_map(),
             shift_eq_cache: Vec::new(),
             shift_eq_pending_cache: Vec::new(),
-            mk_app_cache: new_fx_hash_map(),
+            mk_app_cache: Vec::new(),
             mk_pi_cache: new_fx_hash_map(),
             mk_lambda_cache: new_fx_hash_map(),
+            mk_var_cache: Vec::new(),
         }
     }
 }
 
 pub const SHIFT_EQ_CACHE_SIZE: usize = 1 << 20; // 1M entries ≈ 24MB
 pub const SHIFT_EQ_PENDING_CACHE_SIZE: usize = 1 << 18; // 256K entries
+pub const MK_APP_CACHE_SIZE: usize = 1 << 20; // 1M entries
 
 pub struct ExportFile<'p> {
     /// The underlying storage for `Name`, `Level`, and `Expr` items (and Strings).
@@ -411,6 +416,16 @@ pub struct TcTrace {
     pub whnf_vf_below_is_shift: u64,
     pub whnf_below_depth_hits: u64,
     pub infer_vf_below_is_shift: u64,
+    // per-function alloc counters (mk_* cache misses that call alloc_expr)
+    pub alloc_mk_app: u64,
+    pub alloc_mk_pi: u64,
+    pub alloc_mk_lambda: u64,
+    pub alloc_mk_let: u64,
+    pub alloc_mk_var: u64,
+    pub alloc_mk_shift: u64,
+    pub alloc_mk_proj: u64,
+    pub alloc_mk_other: u64,
+    pub alloc_mk_app_cache_hit: u64,
 }
 
 impl std::fmt::Display for TcTrace {
@@ -442,6 +457,10 @@ impl std::fmt::Display for TcTrace {
         if self.infer_cache_verify_fail > 0 {
             write!(f, " | ivf={}/{}/{}/{} ibelow_shift={} isign_fix={} iov_store={} iov_hit={}", self.infer_cache_vf_check_flag, self.infer_cache_vf_same, self.infer_cache_vf_above, self.infer_cache_vf_below, self.infer_vf_below_is_shift, self.infer_cache_vf_sign_would_fix, self.infer_cache_overflow_stores, self.infer_cache_overflow_hits)?;
         }
+        write!(f, " | mka={}/{} mkp={} mkl={} mklt={} mkv={} mks={} mkpr={} mko={}",
+            self.alloc_mk_app, self.alloc_mk_app_cache_hit,
+            self.alloc_mk_pi, self.alloc_mk_lambda, self.alloc_mk_let,
+            self.alloc_mk_var, self.alloc_mk_shift, self.alloc_mk_proj, self.alloc_mk_other)?;
         Ok(())
     }
 }
@@ -927,13 +946,26 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
     }
 
     pub fn mk_var(&mut self, dbj_idx: u16) -> ExprPtr<'t> {
+        self.trace.alloc_mk_var += 1;
+        let idx = dbj_idx as usize;
+        if idx < self.expr_cache.mk_var_cache.len() {
+            if let Some(cached) = self.expr_cache.mk_var_cache[idx] {
+                return cached;
+            }
+        }
         let hash = hash64!(crate::expr::VAR_HASH, dbj_idx);
         let struct_hash = crate::expr::VAR_HASH;
         let fvar_list = self.fvar_singleton(dbj_idx);
-        self.alloc_expr(Expr::Var { dbj_idx, hash, struct_hash, fvar_list })
+        let result = self.alloc_expr(Expr::Var { dbj_idx, hash, struct_hash, fvar_list });
+        if idx >= self.expr_cache.mk_var_cache.len() {
+            self.expr_cache.mk_var_cache.resize(idx + 1, None);
+        }
+        self.expr_cache.mk_var_cache[idx] = Some(result);
+        result
     }
 
     pub fn mk_sort(&mut self, level: LevelPtr<'t>) -> ExprPtr<'t> {
+        self.trace.alloc_mk_other += 1;
         let hash = hash64!(crate::expr::SORT_HASH, level);
         let struct_hash = hash;
         let fvar_list = None;
@@ -941,6 +973,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
     }
 
     pub fn mk_const(&mut self, name: NamePtr<'t>, levels: LevelsPtr<'t>) -> ExprPtr<'t> {
+        self.trace.alloc_mk_other += 1;
         let hash = hash64!(crate::expr::CONST_HASH, name, levels);
         let struct_hash = hash;
         let fvar_list = None;
@@ -948,9 +981,25 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
     }
 
     pub fn mk_app(&mut self, fun: ExprPtr<'t>, arg: ExprPtr<'t>) -> ExprPtr<'t> {
-        if let Some(&cached) = self.expr_cache.mk_app_cache.get(&(fun, arg)) {
-            return cached;
+        // Direct-mapped cache: combine fun and arg hashes into a tag.
+        let tag = fun.get_hash().wrapping_mul(0x9e3779b97f4a7c15) ^ arg.get_hash();
+        if self.expr_cache.mk_app_cache.is_empty() {
+            // Lazy init: Ptr is packed and doesn't implement Default, so we create a dummy.
+            let dummy: ExprPtr<'t> = Ptr::from(DagMarker::ExportFile, 0);
+            self.expr_cache.mk_app_cache.resize(MK_APP_CACHE_SIZE, (0, dummy));
         }
+        let slot = (tag as usize) & (MK_APP_CACHE_SIZE - 1);
+        let (cached_tag, cached_result) = self.expr_cache.mk_app_cache[slot];
+        if cached_tag == tag {
+            // Verify: read the cached result and check fun/arg match
+            if let Expr::App { fun: cf, arg: ca, .. } = self.read_expr(cached_result) {
+                if cf == fun && ca == arg {
+                    self.trace.alloc_mk_app_cache_hit += 1;
+                    return cached_result;
+                }
+            }
+        }
+        self.trace.alloc_mk_app += 1;
         let hash = hash64!(crate::expr::APP_HASH, fun, arg);
         let fun_e = self.read_expr(fun);
         let arg_e = self.read_expr(arg);
@@ -959,7 +1008,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         let struct_hash = hash64!(crate::expr::APP_HASH, fun_e.get_struct_hash(), arg_e.get_struct_hash());
         let fvar_list = self.fvar_union(fun_e.get_fvar_list(), arg_e.get_fvar_list());
         let result = self.alloc_expr(Expr::App { fun, arg, num_loose_bvars, has_fvars, hash, struct_hash, fvar_list });
-        self.expr_cache.mk_app_cache.insert((fun, arg), result);
+        self.expr_cache.mk_app_cache[slot] = (tag, result);
         result
     }
 
@@ -974,6 +1023,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         if let Some(&cached) = self.expr_cache.mk_lambda_cache.get(&key) {
             return cached;
         }
+        self.trace.alloc_mk_lambda += 1;
         let hash = hash64!(crate::expr::LAMBDA_HASH, binder_name, binder_style, binder_type, body);
         let ty_e = self.read_expr(binder_type);
         let body_e = self.read_expr(body);
@@ -998,6 +1048,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         if let Some(&cached) = self.expr_cache.mk_pi_cache.get(&key) {
             return cached;
         }
+        self.trace.alloc_mk_pi += 1;
         let hash = hash64!(crate::expr::PI_HASH, binder_name, binder_style, binder_type, body);
         let ty_e = self.read_expr(binder_type);
         let body_e = self.read_expr(body);
@@ -1019,6 +1070,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         body: ExprPtr<'t>,
         nondep: bool
     ) -> ExprPtr<'t> {
+        self.trace.alloc_mk_let += 1;
         let hash = hash64!(crate::expr::LET_HASH, binder_name, binder_type, val, body, nondep);
         let ty_e = self.read_expr(binder_type);
         let val_e = self.read_expr(val);
@@ -1038,6 +1090,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
     }
 
     pub fn mk_proj(&mut self, ty_name: NamePtr<'t>, idx: u32, structure: ExprPtr<'t>) -> ExprPtr<'t> {
+        self.trace.alloc_mk_proj += 1;
         let hash = hash64!(crate::expr::PROJ_HASH, ty_name, idx, structure);
         let s_e = self.read_expr(structure);
         let num_loose_bvars = s_e.num_loose_bvars();
@@ -1194,6 +1247,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
             self.trace.shift_dedup_hits += 1;
             return existing;
         }
+        self.trace.alloc_mk_shift += 1;
         let has_fvars = inner_expr.has_fvars();
         let hash = hash64!(crate::expr::SHIFT_HASH, inner, amount, cutoff);
         let struct_hash = inner_expr.get_struct_hash();

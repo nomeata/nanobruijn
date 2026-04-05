@@ -708,12 +708,26 @@ binder mismatches. The pattern repeats at every binder depth because composition
 sh_cut to the inner cutoff (0), then the next binder increments it to 1, and the next
 Shift(inner, amount≥1, 0) composes again.
 
+**mk_var cache and direct-mapped mk_app cache** (implemented):
+Profiling #298261 (PiTensorProduct.norm_eval_le_injectiveSeminorm) revealed 1.48B
+alloc_expr calls dominated by 1.475B mk_var calls (no cache) and 2.47B mk_app calls
+(FxHashMap cache hit overhead). Fix: added a per-index Vec cache for mk_var (O(1)
+array lookup, eliminates 1.475B hash table lookups), and replaced mk_app's FxHashMap
+with a 1M-entry direct-mapped cache (tag-based, ~2x faster per hit). Results:
+- #298261: 45.1s → 26.4s (1.7x speedup)
+- #272519: 26.4s → ~24.8s
+Per-function alloc breakdown (mka/mkv/mkp/etc.) counters added for future profiling.
+
 **Remaining bottleneck: pointer identity divergence from nanoda.**
 For #272519 (26s ours vs 10.7s nanoda): 2.8x more inst_aux calls (181M vs 64M),
 2.2x more whnf calls (68M vs 31M), 1.4x more def_eq (27.7M vs 19.7M).
 nanoda's whnf cache has 99.997% hit rate vs ours at 79%. The shift wrapper approach
 creates distinct expression pointers where nanoda has identical ones, preventing
-cache hits and causing cascading extra work.
+cache hits and causing cascading extra work. For #298261, nanoda takes 487ms vs our
+26.4s (54x). The 2.47B mk_app cache lookups (~10ns each with L3 misses) account for
+~25s. These come from inst_aux traversing large expression trees — each inst/inst_beta
+call (309K total) averages ~8000 mk_app calls. nanoda achieves 1.05M total allocs
+because pointer identity prevents redundant tree reconstruction.
 
 ## References
 
