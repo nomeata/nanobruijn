@@ -1233,6 +1233,9 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
             let dc = (delta as u64) << 16 | cutoff as u64;
             ak.wrapping_mul(0x9e3779b97f4a7c15).wrapping_add(bk).wrapping_mul(0x517cc1b727220a95).wrapping_add(dc)
         };
+        if self.expr_cache.shift_eq_cache.is_empty() {
+            self.expr_cache.shift_eq_cache = vec![(0u64, false); crate::util::SHIFT_EQ_CACHE_SIZE];
+        }
         let se_idx = (se_tag as usize) & (crate::util::SHIFT_EQ_CACHE_SIZE - 1);
         let (cached_tag, cached_result) = self.expr_cache.shift_eq_cache[se_idx];
         if cached_tag == se_tag {
@@ -1327,26 +1330,55 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
             return true;
         }
 
+        // Direct-mapped cache: hash all 10 parameters (lazily allocated)
+        let sep_tag = {
+            let ak = (a.dag_marker as u64) << 32 | a.idx as u64;
+            let bk = (b.dag_marker as u64) << 32 | b.idx as u64;
+            let shifts_a = (a1 as u64) | ((as1 as u64) << 16) | ((a2 as u64) << 32) | ((as2 as u64) << 48);
+            let shifts_b = (b1 as u64) | ((bs1 as u64) << 16) | ((b2 as u64) << 32) | ((bs2 as u64) << 48);
+            ak.wrapping_mul(0x9e3779b97f4a7c15)
+              .wrapping_add(bk)
+              .wrapping_mul(0x517cc1b727220a95)
+              .wrapping_add(shifts_a)
+              .wrapping_mul(0x6c62272e07bb0142)
+              .wrapping_add(shifts_b)
+        };
+        if self.expr_cache.shift_eq_pending_cache.is_empty() {
+            self.expr_cache.shift_eq_pending_cache = vec![(0u64, false); crate::util::SHIFT_EQ_PENDING_CACHE_SIZE];
+        }
+        let sep_idx = (sep_tag as usize) & (crate::util::SHIFT_EQ_PENDING_CACHE_SIZE - 1);
+        let (cached_tag, cached_result) = self.expr_cache.shift_eq_pending_cache[sep_idx];
+        if cached_tag == sep_tag {
+            self.trace.shift_eq_pending_cache_hits += 1;
+            return cached_result;
+        }
+
         let a_expr = self.read_expr(a);
         let b_expr = self.read_expr(b);
 
         // Absorb Shift nodes into pending shifts
         if let Shift { inner, amount, cutoff: sc, .. } = a_expr {
             if let Some((na1, nas1, na2, nas2)) = Self::bishift_absorb(a1, as1, a2, as2, amount, sc) {
-                return self.shift_eq_pending(inner, b, na1, nas1, na2, nas2, b1, bs1, b2, bs2);
+                let result = self.shift_eq_pending(inner, b, na1, nas1, na2, nas2, b1, bs1, b2, bs2);
+                self.expr_cache.shift_eq_pending_cache[sep_idx] = (sep_tag, result);
+                return result;
             }
             // Can't absorb; conservative false
+            self.expr_cache.shift_eq_pending_cache[sep_idx] = (sep_tag, false);
             return false;
         }
         if let Shift { inner, amount, cutoff: sc, .. } = b_expr {
             if let Some((nb1, nbs1, nb2, nbs2)) = Self::bishift_absorb(b1, bs1, b2, bs2, amount, sc) {
-                return self.shift_eq_pending(a, inner, a1, as1, a2, as2, nb1, nbs1, nb2, nbs2);
+                let result = self.shift_eq_pending(a, inner, a1, as1, a2, as2, nb1, nbs1, nb2, nbs2);
+                self.expr_cache.shift_eq_pending_cache[sep_idx] = (sep_tag, result);
+                return result;
             }
+            self.expr_cache.shift_eq_pending_cache[sep_idx] = (sep_tag, false);
             return false;
         }
 
         // Structural comparison with pending shifts applied at Var leaves
-        match (a_expr, b_expr) {
+        let result = match (a_expr, b_expr) {
             (Var { dbj_idx: i, .. }, Var { dbj_idx: j, .. }) =>
                 Self::bishift_apply(a1, as1, a2, as2, i) == Self::bishift_apply(b1, bs1, b2, bs2, j),
             (App { fun: f1, arg: a1x, .. }, App { fun: f2, arg: a2x, .. }) =>
@@ -1384,7 +1416,9 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
             (NatLit { ptr: p1, .. }, NatLit { ptr: p2, .. }) => p1 == p2,
             (StringLit { ptr: p1, .. }, StringLit { ptr: p2, .. }) => p1 == p2,
             _ => false,
-        }
+        };
+        self.expr_cache.shift_eq_pending_cache[sep_idx] = (sep_tag, result);
+        result
     }
 
     /// Structural comparison for shift_eq, assuming top-level Shifts already stripped.

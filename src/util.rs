@@ -202,6 +202,9 @@ pub struct ExprCache<'t> {
     /// Each slot stores: (tag, result) where tag=hash(a,b,delta,cutoff).
     /// On collision, overwrites. False positives are possible but rare.
     pub(crate) shift_eq_cache: Vec<(u64, bool)>,
+    /// Direct-mapped cache for shift_eq_pending results.
+    /// Avoids re-traversing the same (a, b, bishift_a, bishift_b) comparisons.
+    pub(crate) shift_eq_pending_cache: Vec<(u64, bool)>,
 }
 
 impl<'t> ExprCache<'t> {
@@ -216,12 +219,14 @@ impl<'t> ExprCache<'t> {
             abstr_cache_levels: new_fx_hash_map(),
             sem_eq_cache: new_fx_hash_set(),
             shift_dedup: new_fx_hash_map(),
-            shift_eq_cache: vec![(0u64, false); SHIFT_EQ_CACHE_SIZE],
+            shift_eq_cache: Vec::new(), // lazily allocated on first use
+            shift_eq_pending_cache: Vec::new(), // lazily allocated on first use
         }
     }
 }
 
 pub const SHIFT_EQ_CACHE_SIZE: usize = 1 << 20; // 1M entries ≈ 24MB
+pub const SHIFT_EQ_PENDING_CACHE_SIZE: usize = 1 << 18; // 256K entries
 
 pub struct ExportFile<'p> {
     /// The underlying storage for `Name`, `Level`, and `Expr` items (and Strings).
@@ -347,6 +352,7 @@ pub struct TcTrace {
     pub shift_eq_aux_calls: u64,         // total shift_eq_aux recursive calls
     pub shift_eq_struct_calls: u64,      // total shift_eq_struct recursive calls
     pub shift_eq_pending_calls: u64,     // total shift_eq_pending calls
+    pub shift_eq_pending_cache_hits: u64, // cache hits in shift_eq_pending
     pub shift_eq_ptr_eq_hits: u64,       // ptr_eq fast path in shift_eq_aux
     pub push_shift_cache_hits: u64,
     pub infer_cache_hash_hit: u64,
@@ -409,13 +415,13 @@ impl std::fmt::Display for TcTrace {
             self.push_shift_calls, self.push_shift_cache_hits,
             self.inst_aux_calls, self.inst_aux_cache_hits, self.inst_aux_elided,
             self.inst_aux_shift_nodes, self.inst_aux_shift_mismatch)?;
-        write!(f, " | sh_path={} sh_alloc={}/{} sh_var={}/{} nsh_id={} skip={}/{} se={}/{}/{}/{}",
+        write!(f, " | sh_path={} sh_alloc={}/{} sh_var={}/{} nsh_id={} skip={}/{} se={}/{}/{}/{} sep_hit={}",
             self.inst_aux_shifted_path, self.inst_aux_shifted_alloc, self.inst_aux_shifted_identity,
             self.inst_aux_shifted_var_subst, self.inst_aux_shifted_var_nosubst,
             self.inst_aux_nonshift_identity,
             self.inst_aux_shift_skip_clean, self.inst_aux_shift_skip_wrap,
             self.shift_eq_aux_calls, self.shift_eq_struct_calls, self.shift_eq_pending_calls,
-            self.shift_eq_ptr_eq_hits)?;
+            self.shift_eq_ptr_eq_hits, self.shift_eq_pending_cache_hits)?;
         if self.zeta_reductions > 0 || self.whnf_let_reductions > 0 || self.wnu_calls > 0 {
             write!(f, " | zeta={} wlet={} wbeta={} dag={} wnu={}/{}/{} wnu_miss={}/{}/{} wnuov={}/{}", self.zeta_reductions, self.whnf_let_reductions, self.whnf_beta_reductions, self.dag_size, self.wnu_calls, self.wnu_cache_hits, self.wnu_shift_peel, self.wnu_cache_no_bucket, self.wnu_cache_no_entry, self.wnu_cache_verify_fail, self.wnu_cache_overflow_stores, self.wnu_cache_overflow_hits)?;
         }
