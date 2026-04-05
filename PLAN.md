@@ -641,6 +641,49 @@ nested-let cascade. Together these handle all Init declarations.
   Once all comparisons became shift-transparent, mk_shift in inst_aux works and
   force_shift_aux was deleted entirely.
 
+- **shift_eq_pending had no cache — exponential blowup**: `shift_eq_pending` (the bi-shift
+  structural comparison for mismatched cutoffs) had no result cache, causing up to 17 billion
+  calls on #122833 (85s!). These arise because cache verification via `shift_eq` encounters
+  Shift nodes with mismatched cutoffs, falling into the uncached `shift_eq_pending` path.
+  The same sub-expression comparisons are repeated exponentially through DAG sharing.
+  Fix: add a direct-mapped cache (256K entries, lazily allocated to avoid 2MB zero-init
+  per declaration). Results: #122833: 85s→5s (16x), #329219: 52s→31s, #89921: 4.0s→3.5s.
+  The lazy allocation also fixed a 100s Init regression from the eager shift_eq_cache (1M
+  entries × 16 bytes = 16MB zeroed per declaration).
+
+- **Below-depth whnf cache matching is impractical**: `push_shift_down` on whnf results
+  to reuse cached results at shallower depths costs more than recomputation. On algebraic
+  geometry declarations with huge types, `push_shift_down` triggers 1B+ allocations.
+  Even with `fvar_lb >= delta` safety check, traversal cost cancels savings. Only infer
+  cache benefits from below-depth matching (types are smaller).
+
+- **Eagerly resolving shifts is counterproductive**: All attempts to eagerly push/resolve
+  shifts (push_shift in lookup_var, push_shift in inst_aux substitution values) made
+  things worse because they create different expression identities that cascade poorly
+  through downstream caches. #63709: 24% slower with push_shift in lookup_var.
+  #134719: 9x slower (push_shift traverses huge AlgGeom type expressions).
+
+- **Identity check in inst_aux shift path**: In the shift path of inst_aux, checking
+  if children are unchanged (new_fun == fun && new_arg == arg) before allocating saves
+  ~46% of shift path allocations. 11% overall speedup on #63709.
+
+### Current profile (after all optimizations)
+
+Full Mathlib benchmark (with shift_eq_pending cache):
+| Declaration | Time | Notes |
+|-------------|------|-------|
+| Init (54k, init.ndjson) | 38.5s | |
+| #63709 ModuleCat.monoidalCategory._proof_4 | 4.6s | 119M inst_aux, shift-dominated |
+| #89921 PrimeSpectrum | 3.5s | was 4.0s (pending cache) |
+| #122833 CategoryTheory.Limits.colimitLimitToLimitColimit_surjective | 5.2s | was 85s (pending cache!) |
+| #134719 AlgebraicGeometry.Scheme.Pullback | 2.7s | |
+| #329219 HopfAlgCat.MonoidalCategory | 31s | 1.1B allocs |
+| #409494 AlgebraicGeometry.Scheme.Hom.toNormalization | 60s | 2.8B allocs |
+
+Remaining bottleneck: alloc_expr calls (billions on worst cases) from inst_aux creating
+Shift wrappers and new App/Pi/Lambda nodes. This is the fundamental cost of the Shift
+architecture vs nanoda's level-based approach.
+
 ## References
 
 - [Lean Kernel Arena](https://arena.lean-lang.org/) — benchmarks and test cases
