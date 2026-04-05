@@ -679,41 +679,41 @@ nested-let cascade. Together these handle all Init declarations.
   (3) identity (whnf was no-op, return query). Check adjustability FIRST (O(1)) before
   shift_eq verification. Init: 37.9s → 35.6s (6%).
 
-### Current profile (full Mathlib benchmark, after all optimizations)
+### Current profile (full Mathlib benchmark, after shift composition)
 
-| Declaration | Nanoda | Baseline | Optimized | Speedup | Notes |
-|-------------|--------|----------|-----------|---------|-------|
-| Init (54k, init.ndjson) | 26s | ~38s | 35.6s | 1.07x | |
-| #63709 ModuleCat | 456ms | 4674ms | 2631ms | 1.8x | |
-| #89921 PrimeSpectrum | ? | 3978ms | 1677ms | 2.4x | |
-| #122833 CategoryTheory.Limits | 64ms | 85402ms | 2266ms | 37.7x | sep cache: 929M→196K calls |
-| #134719 AlgGeom.Scheme.Pullback | 190ms | 2803ms | 1296ms | 2.2x | |
-| #135216 AlgGeom.HasRingHomProperty | ? | 13316ms | 4506ms | 3.0x | sep cache: 929M→1.2M calls |
-| #235200 AlgGeom.exists_eq | ? | 53107ms | 19309ms | 2.8x | 50M inst_aux, 1.5M sh mismatch |
-| #242721 AlgGeom.equivalence_rel | ? | 49740ms | 12937ms | 3.8x | |
-| #272519 AlgGeom.PartialMap | ? | 41650ms | 26024ms | 1.6x | def_eq-heavy (27.7M calls), not shift-heavy |
-| #329213 HopfAlgCat._proof_4 | ? | 47879ms | 11219ms | 4.3x | |
-| #329219 HopfAlgCat | 65ms | ~52000ms | 11057ms | 4.7x | TC ops 2x nanoda |
-| #345976 | ? | 38120ms | 27005ms | 1.4x | |
-| #350524 commBialgCat._proof_9 | ? | 24195ms | 950ms | 25.5x | sep cache: 5.1B→196K calls |
-| #350525 commBialgCat._proof_10 | ? | 24249ms | 978ms | 24.8x | sep cache similar |
+| Declaration | Nanoda | Baseline | Pre-compose | Post-compose | Speedup | Notes |
+|-------------|--------|----------|-------------|--------------|---------|-------|
+| Init (54k) | 26s | ~38s | 35.6s | 32.2s | 1.18x | |
+| #235200 AlgGeom.exists_eq | ? | 98,879ms | timeout | **476ms** | **207x** | shift composition eliminates 99% mismatch |
+| #272519 AlgGeom.PartialMap | 10,753ms | 41,650ms | 26,024ms | **26,051ms** | ~1x | def_eq-heavy (27.7M calls), not shift-heavy |
+| #329219 HopfAlgCat | 65ms | ~52,000ms | timeout | **6,179ms** | **>19x** | |
+| #350525 commBialgCat._proof_10 | ? | 24,249ms | timeout | **788ms** | **>152x** | |
+| #380722 Algebra.H1Cotangent | ? | timeout | timeout | **3ms** | ∞ | |
+| #409494 AlgGeom.toNormalization | ? | timeout | timeout | **12,025ms** | ∞ | |
 
-Overall: up to #272K, total SLOW time went from 1279s to 734s = **1.74x aggregate speedup**.
-Same number of timeouts (29) in the range tested. No new correctness issues.
+Previous pre-composition benchmark (134 timeouts). Shift composition fixed the 5 remaining timeout-class failures.
 
-Remaining bottleneck: inst_aux calls are 12-24x nanoda's due to Shift traversal.
-Cutoff mismatches in inst_aux are 78-99% of Shift node encounters. When inst_aux
-processes binder bodies (sh_cut increments), encountering a Shift(inner, amount, 0)
-causes a mismatch (cutoff 0 ≠ sh_cut > 0) that forces expensive push_shift traversals.
+**Lazy zeta args-shift bug** (fixed): The `whnf_no_unfolding_aux` Let handler used
+"lazy zeta" — pushing the let binding into context and reducing the body there. When the
+Let was applied to arguments (via `unfold_apps`), the args' de Bruijn indices were NOT
+shifted to account for the new let binder. This caused 120+ def_eq assertion failures
+across Mathlib (e.g. `MeasureTheory.SimpleFunc.inst*`, `iInf_dite`, `OrderedFinpartition.*`).
+Fix: shift args up by 1 with `mk_shift(a, 1)` before combining with the let body.
 
-**Shift composition optimization** (implemented, not yet benchmarked):
+**Shift composition optimization** (implemented and benchmarked):
 When cutoff < sh_cut and amount >= (sh_cut - cutoff), the two shifts compose into
 a single (sh_amt + amount, cutoff). This eliminates the force_shift call entirely.
 For the common case (cutoff=0, amount≥1, sh_cut=1), this captures ~100% of first-level
 binder mismatches. The pattern repeats at every binder depth because composition resets
 sh_cut to the inner cutoff (0), then the next binder increments it to 1, and the next
-Shift(inner, amount≥1, 0) composes again. Expected to eliminate most of the 78-99%
-mismatch rates observed in the worst outliers.
+Shift(inner, amount≥1, 0) composes again.
+
+**Remaining bottleneck: pointer identity divergence from nanoda.**
+For #272519 (26s ours vs 10.7s nanoda): 2.8x more inst_aux calls (181M vs 64M),
+2.2x more whnf calls (68M vs 31M), 1.4x more def_eq (27.7M vs 19.7M).
+nanoda's whnf cache has 99.997% hit rate vs ours at 79%. The shift wrapper approach
+creates distinct expression pointers where nanoda has identical ones, preventing
+cache hits and causing cascading extra work.
 
 ## References
 

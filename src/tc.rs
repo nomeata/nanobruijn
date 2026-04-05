@@ -1384,7 +1384,15 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                     // then pop and inst_beta on the (much smaller) whnf result.
                     // This avoids unbounded inst_beta growth on nested lets.
                     self.push_local_let(binder_type, val);
-                    let inner = self.ctx.foldl_apps(body, args.into_iter());
+                    // Args from unfold_apps are in the outer context; body is in
+                    // the let-extended context (one more binder). Shift args up by 1
+                    // so their de Bruijn indices are valid under the let binder.
+                    let inner = if args.is_empty() {
+                        body
+                    } else {
+                        let shifted_args: Vec<_> = args.into_iter().map(|a| self.ctx.mk_shift(a, 1)).collect();
+                        self.ctx.foldl_apps(body, shifted_args.into_iter())
+                    };
                     let reduced = self.whnf_no_unfolding_aux(inner, cheap_proj);
                     self.pop_local();
                     let result = self.ctx.inst_beta(reduced, &[val]);
