@@ -1174,10 +1174,36 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                 return Some(self.ctx.push_shift(stored_result, delta, 0));
             }
         }
-        // Below-depth (depth < stored_depth) not attempted: push_shift_down on the
-        // result is catastrophically expensive for large expressions (1B+ allocs on some
-        // algebraic geometry declarations). Even when fvar_lb >= delta makes it safe,
-        // the traversal cost outweighs the savings from avoiding recomputation.
+        // Below-depth (depth < stored_depth): only attempt O(1) result adjustment.
+        // Full push_shift_down is catastrophically expensive for large expressions.
+        // Check result adjustability FIRST (O(1)), then verify with shift_eq only if worthwhile.
+        if depth < stored_depth {
+            let delta = stored_depth - depth;
+            let adjustable = if self.ctx.num_loose_bvars(stored_result) == 0 {
+                true // closed result is depth-independent
+            } else if let Expr::Shift { amount, cutoff: 0, .. } = self.ctx.read_expr(stored_result) {
+                amount >= delta // can subtract delta from shift amount
+            } else if stored_result == stored_input {
+                true // whnf was a no-op
+            } else {
+                false
+            };
+            if adjustable && self.ctx.shift_eq(e, stored_input, delta) {
+                self.ctx.trace.whnf_below_depth_hits += 1;
+                if self.ctx.num_loose_bvars(stored_result) == 0 {
+                    return Some(stored_result);
+                } else if let Expr::Shift { inner, amount, cutoff: 0, .. } = self.ctx.read_expr(stored_result) {
+                    if amount == delta {
+                        return Some(inner);
+                    } else {
+                        return Some(self.ctx.mk_shift(inner, amount - delta));
+                    }
+                } else {
+                    // stored_result == stored_input, whnf was no-op
+                    return Some(e);
+                }
+            }
+        }
         None
     }
 
