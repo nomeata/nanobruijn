@@ -262,7 +262,7 @@ Result is a boolean (no delta to apply). On init: ~39K shift-invariant hits out 
 |-----------|--------------------------|------------------|
 | Init (54k decls, 310MB) | 26s | 27s (1.04x) |
 | app-lam N=4000 | 8.3s | 10ms (830x faster) |
-| Mathlib (630k decls, 4.9GB) | ~16min (est.) | **28min (~1.75x), 0 timeouts** |
+| Mathlib (630k decls, 4.9GB) | **978s (16.3min)** | **1675s (27.9min), 1.71x, 0 timeouts** |
 | Mathlib 100k-110k segment | 14s | 34s (2.4x) |
 | Mathlib 300k-310k segment | 12s | 76s (6.3x) |
 | ofPointTensor_SpecTensorTo (#134719) | 214ms | 67s (313x) |
@@ -804,6 +804,87 @@ not on above-depth hits. Combined with lazy push_shift, results:
 Overall 350K declarations: 1315s → 987s (25% faster).
 54K Init: 101s → 72s (29% faster).
 mk_var calls for parent: 1.4B → 255K (5500x reduction).
+
+## Full Nanoda Comparison (630K Mathlib declarations)
+
+**Total time**: Our TC 1675s, Nanoda 978s, **ratio 1.71x** (consistently 1.65-1.74x throughout).
+
+Timing at checkpoints:
+| Declarations | Our TC | Nanoda | Ratio |
+|-------------|--------|--------|-------|
+| 100K | 174s | 104s | 1.68x |
+| 200K | 440s | 267s | 1.65x |
+| 300K | 790s | 455s | 1.74x |
+| 400K | 1137s | 663s | 1.71x |
+| 500K | 1422s | 822s | 1.73x |
+| 600K | 1617s | 942s | 1.72x |
+
+### Gap breakdown by ratio band
+
+| Ratio band | Count | Extra time |
+|-----------|-------|-----------|
+| >=10x | 11 | 16s |
+| 5-10x | 105 | 13s |
+| 3-5x | 4,868 | 68s |
+| 2-3x | 33,151 | 239s |
+| 1-2x | 61,573 | 262s |
+
+**84% of the gap (501s / 598s) is in the 1-3x ratio band** — uniform overhead, not outliers.
+We save 11s on declarations where we're faster than nanoda (22 declarations at ratio < 0.5).
+
+### Top outlier declarations
+
+| # | Declaration | Ours | Nanoda | Ratio | Root cause |
+|---|-----------|------|--------|-------|-----------|
+| 357120 | isBasis_preimage_isAffineOpen | 2308ms | 49ms | 47x | 32M push_shift, 112M mk_var, 200M mk_app |
+| 298261 | norm_eval_le_injectiveSeminorm | 11490ms | 443ms | 26x | |
+| 228736 | retractionKer | 2753ms | 237ms | 11.6x | |
+| 211138 | freeObj._proof_2 | 2406ms | 406ms | 5.9x | inst_aux 67.5M vs 10.6M (6.4x) |
+
+### Root cause: inst shift_down creates new Var nodes
+
+Nanoda's inst does NOT shift_down: free variables are Locals (absolute level refs), so
+Var(k) past the substitution range returns `e` UNCHANGED (original pointer). Our inst
+with shift_down creates `mk_var(k - n_substs)` — a new Var node. This propagates up:
+new Var → new App/Pi/Lambda parents → all the way to root. Every beta reduction
+creates O(tree_size) new nodes that break pointer identity for all caches.
+
+Representative comparison (#20700, ratio 1.58x, typical medium declaration):
+| Metric | Ours | Nanoda | Ratio |
+|--------|------|--------|-------|
+| def_eq | 16,806 | 14,776 | 1.14x |
+| whnf | 6,174 | 5,361 | 1.15x |
+| inst_aux | 280,660 | 251,180 | 1.12x |
+| mk_var | **11,456** | 372 | **31x** |
+| mk_shift | 3,781 | 0 | ∞ |
+| eq_hits | 611 | 1,291 | 0.47x |
+
+Even with nearly identical operation counts (1.1-1.15x), the mk_var/mk_shift overhead
+and reduced cache hit rates (eq_hits 0.47x) create the 1.58x time ratio.
+
+### Attempted: overflow store for above-depth hits
+
+Storing shifted results from above-depth whnf/infer cache hits in the overflow slot.
+For #357120 specifically: stored 9K entries, 0 hits (each above-depth query is for
+a different expression). For #272519: stored 82M entries, 1461 hits (massive overhead).
+General case: **14.5% slower at 100K declarations** due to HashMap insertion overhead.
+Reverted. The fundamental issue is that each above-depth hit is for a different
+expression, so caching the shifted result doesn't help.
+
+### Architectural fix: switch to Locals (de Bruijn levels) for free variables
+
+The definitive fix is adopting nanoda's approach: represent free variables as
+Local(DbjLevel(n)) instead of Var(k). This eliminates shift_down entirely:
+- inst replaces Var(0) with substitution value, leaves other Vars unchanged
+- inst cache key is 2D (e, offset) instead of 4D (e, offset|sh_amt|sh_cut)
+- Subexpressions not containing the bound variable keep their pointer identity
+- All caches (whnf, infer, wnu, defeq) get nanoda-like hit rates
+
+Cost: Additional inst call per binder opening (to replace Var(0) with Local),
+plus abstract call when closing (Local back to Var). But each inst is cheaper
+(no shift_down), and the cache hit improvement dwarfs the opening cost.
+
+This is a major refactor touching most of tc.rs but would close the 1.71x gap.
 
 ## References
 
