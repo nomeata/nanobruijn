@@ -205,6 +205,13 @@ pub struct ExprCache<'t> {
     /// Direct-mapped cache for shift_eq_pending results.
     /// Avoids re-traversing the same (a, b, bishift_a, bishift_b) comparisons.
     pub(crate) shift_eq_pending_cache: Vec<(u64, bool)>,
+    /// Memoization cache for mk_app: (fun, arg) → ExprPtr.
+    /// Skips expensive metadata computation and alloc_expr hash lookup on repeated calls.
+    pub(crate) mk_app_cache: FxHashMap<(ExprPtr<'t>, ExprPtr<'t>), ExprPtr<'t>>,
+    /// Memoization cache for mk_pi: (name, style, type, body) → ExprPtr.
+    pub(crate) mk_pi_cache: FxHashMap<(NamePtr<'t>, BinderStyle, ExprPtr<'t>, ExprPtr<'t>), ExprPtr<'t>>,
+    /// Memoization cache for mk_lambda: (name, style, type, body) → ExprPtr.
+    pub(crate) mk_lambda_cache: FxHashMap<(NamePtr<'t>, BinderStyle, ExprPtr<'t>, ExprPtr<'t>), ExprPtr<'t>>,
 }
 
 impl<'t> ExprCache<'t> {
@@ -219,8 +226,11 @@ impl<'t> ExprCache<'t> {
             abstr_cache_levels: new_fx_hash_map(),
             sem_eq_cache: new_fx_hash_set(),
             shift_dedup: new_fx_hash_map(),
-            shift_eq_cache: Vec::new(), // lazily allocated on first use
-            shift_eq_pending_cache: Vec::new(), // lazily allocated on first use
+            shift_eq_cache: Vec::new(),
+            shift_eq_pending_cache: Vec::new(),
+            mk_app_cache: new_fx_hash_map(),
+            mk_pi_cache: new_fx_hash_map(),
+            mk_lambda_cache: new_fx_hash_map(),
         }
     }
 }
@@ -937,6 +947,9 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
     }
 
     pub fn mk_app(&mut self, fun: ExprPtr<'t>, arg: ExprPtr<'t>) -> ExprPtr<'t> {
+        if let Some(&cached) = self.expr_cache.mk_app_cache.get(&(fun, arg)) {
+            return cached;
+        }
         let hash = hash64!(crate::expr::APP_HASH, fun, arg);
         let fun_e = self.read_expr(fun);
         let arg_e = self.read_expr(arg);
@@ -944,7 +957,9 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         let has_fvars = fun_e.has_fvars() || arg_e.has_fvars();
         let struct_hash = hash64!(crate::expr::APP_HASH, fun_e.get_struct_hash(), arg_e.get_struct_hash());
         let fvar_list = self.fvar_union(fun_e.get_fvar_list(), arg_e.get_fvar_list());
-        self.alloc_expr(Expr::App { fun, arg, num_loose_bvars, has_fvars, hash, struct_hash, fvar_list })
+        let result = self.alloc_expr(Expr::App { fun, arg, num_loose_bvars, has_fvars, hash, struct_hash, fvar_list });
+        self.expr_cache.mk_app_cache.insert((fun, arg), result);
+        result
     }
 
     pub fn mk_lambda(
@@ -954,6 +969,10 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         binder_type: ExprPtr<'t>,
         body: ExprPtr<'t>,
     ) -> ExprPtr<'t> {
+        let key = (binder_name, binder_style, binder_type, body);
+        if let Some(&cached) = self.expr_cache.mk_lambda_cache.get(&key) {
+            return cached;
+        }
         let hash = hash64!(crate::expr::LAMBDA_HASH, binder_name, binder_style, binder_type, body);
         let ty_e = self.read_expr(binder_type);
         let body_e = self.read_expr(body);
@@ -962,7 +981,9 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         let struct_hash = hash64!(crate::expr::LAMBDA_HASH, binder_name, binder_style, ty_e.get_struct_hash(), body_e.get_struct_hash());
         let body_free_fvl = self.fvar_unbind(body_e.get_fvar_list());
         let fvar_list = self.fvar_union(ty_e.get_fvar_list(), body_free_fvl);
-        self.alloc_expr(Expr::Lambda { binder_name, binder_style, binder_type, body, num_loose_bvars, has_fvars, hash, struct_hash, fvar_list })
+        let result = self.alloc_expr(Expr::Lambda { binder_name, binder_style, binder_type, body, num_loose_bvars, has_fvars, hash, struct_hash, fvar_list });
+        self.expr_cache.mk_lambda_cache.insert(key, result);
+        result
     }
 
     pub fn mk_pi(
@@ -972,6 +993,10 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         binder_type: ExprPtr<'t>,
         body: ExprPtr<'t>,
     ) -> ExprPtr<'t> {
+        let key = (binder_name, binder_style, binder_type, body);
+        if let Some(&cached) = self.expr_cache.mk_pi_cache.get(&key) {
+            return cached;
+        }
         let hash = hash64!(crate::expr::PI_HASH, binder_name, binder_style, binder_type, body);
         let ty_e = self.read_expr(binder_type);
         let body_e = self.read_expr(body);
@@ -980,7 +1005,9 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         let struct_hash = hash64!(crate::expr::PI_HASH, binder_name, binder_style, ty_e.get_struct_hash(), body_e.get_struct_hash());
         let body_free_fvl = self.fvar_unbind(body_e.get_fvar_list());
         let fvar_list = self.fvar_union(ty_e.get_fvar_list(), body_free_fvl);
-        self.alloc_expr(Expr::Pi { binder_name, binder_style, binder_type, body, num_loose_bvars, has_fvars, hash, struct_hash, fvar_list })
+        let result = self.alloc_expr(Expr::Pi { binder_name, binder_style, binder_type, body, num_loose_bvars, has_fvars, hash, struct_hash, fvar_list });
+        self.expr_cache.mk_pi_cache.insert(key, result);
+        result
     }
 
     pub fn mk_let(
