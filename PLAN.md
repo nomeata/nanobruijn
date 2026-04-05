@@ -262,7 +262,7 @@ Result is a boolean (no delta to apply). On init: ~39K shift-invariant hits out 
 |-----------|--------------------------|------------------|
 | Init (54k decls, 310MB) | 26s | 27s (1.04x) |
 | app-lam N=4000 | 8.3s | 10ms (830x faster) |
-| Mathlib (630k decls, 4.9GB) | ~16min (est.) | 233min (14.5x), 42 timeouts |
+| Mathlib (630k decls, 4.9GB) | ~16min (est.) | **28min (1.75x), 0 timeouts** |
 | Mathlib 100k-110k segment | 14s | 34s (2.4x) |
 | Mathlib 300k-310k segment | 12s | 76s (6.3x) |
 | ofPointTensor_SpecTensorTo (#134719) | 214ms | 67s (313x) |
@@ -290,6 +290,26 @@ Milestone comparison vs pre-promotion (old → new): 50K: 94s→87s (8%), 200K: 
 300K: 7434s→6684s (10%), 400K: 10890s→9734s (11%), 500K: 13566s→12115s (11%), 629K: 15621s→13962s (10.6%).
 Note: 100K shows 9% regression (566s vs 517s) — likely a single pathological declaration.
 120 assert_def_eq panics (same in both old and new runs — pre-existing correctness issue, not caused by promotion).
+
+**Latest full Mathlib run** (lazy push_shift + canonical entry preservation):
+**~1675s (27.9min, ~1.75x nanoda), 0 timeouts, 0 errors.**
+Milestone comparison (previous run → latest):
+| Milestone | Previous | Latest | Improvement |
+|-----------|----------|--------|-------------|
+| 50K | 85s | 62s | 27% |
+| 100K | 248s | 174s | 30% |
+| 200K | 652s | 440s | 32% |
+| 300K | 1094s | 790s | 28% |
+| 350K | 1315s | 993s | 24% |
+| 400K | 1997s | 1137s | 43% |
+| 500K | 2404s | 1422s | 41% |
+| 630K | ~3200s (est.) | ~1675s | ~48% |
+
+The 43% jump at 400K reflects the commBialgCat and AlgGeom improvements.
+Top 3 slowest: #272519 (30s), #272517/#334136/#426287 (18s each, same underlying proof),
+#345976 (18s). Note: #272519 is 19% SLOWER than previous run due to the canonical entry
+preservation — the old behavior of replacing with high-depth entries happened to work better
+for this declaration's pattern (massive wnu calls on small DAG). Net effect is still very positive.
 
 Profile (init, pre-deletion baseline, 375B instructions): `force_shift_aux` was the
 dominant cost — shift cache had ~40% hit rate (8M hits, 12M misses). Now deleted;
