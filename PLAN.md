@@ -667,22 +667,35 @@ nested-let cascade. Together these handle all Init declarations.
   if children are unchanged (new_fun == fun && new_arg == arg) before allocating saves
   ~46% of shift path allocations. 11% overall speedup on #63709.
 
+- **mk_app/pi/lambda memoization caches**: Adding (children) → ExprPtr caches skips
+  expensive metadata computation (fvar_list, struct_hash, nlbv) and alloc_expr hash
+  lookup on repeated calls. Huge win because 99.9% of alloc_expr calls are dedup hits.
+  Results: #409494: 60s→29s (2x), #329219: 31s→11s (2.8x), #63709: 4.6s→2.6s (1.8x),
+  #122833: 5.2s→2.3s (2.3x).
+
+- **O(1) below-depth whnf cache matching works for simple results**: When a whnf cache entry
+  exists at higher depth, we can reuse it at lower depth if the result is: (1) closed
+  (depth-independent), (2) Shift(inner, k, 0) with k >= delta (subtract delta), or
+  (3) identity (whnf was no-op, return query). Check adjustability FIRST (O(1)) before
+  shift_eq verification. Init: 37.9s → 35.6s (6%).
+
 ### Current profile (after all optimizations)
 
-Full Mathlib benchmark (with shift_eq_pending cache):
-| Declaration | Time | Notes |
-|-------------|------|-------|
-| Init (54k, init.ndjson) | 38.5s | |
-| #63709 ModuleCat.monoidalCategory._proof_4 | 4.6s | 119M inst_aux, shift-dominated |
-| #89921 PrimeSpectrum | 3.5s | was 4.0s (pending cache) |
-| #122833 CategoryTheory.Limits.colimitLimitToLimitColimit_surjective | 5.2s | was 85s (pending cache!) |
-| #134719 AlgebraicGeometry.Scheme.Pullback | 2.7s | |
-| #329219 HopfAlgCat.MonoidalCategory | 31s | 1.1B allocs |
-| #409494 AlgebraicGeometry.Scheme.Hom.toNormalization | 60s | 2.8B allocs |
+| Declaration | Nanoda | Ours | Ratio | Notes |
+|-------------|--------|------|-------|-------|
+| Init (54k, init.ndjson) | 26s | 35.6s | 1.37x | |
+| #63709 ModuleCat.monoidalCategory | 456ms | 2.6s | 5.7x | 119M inst_aux |
+| #89921 PrimeSpectrum | ? | 1.7s | ? | was 4.0s pre-opt |
+| #122833 CategoryTheory.Limits | 64ms | 2.3s | 36x | was 85s!! |
+| #134719 AlgebraicGeometry.Scheme.Pullback | 190ms | 1.4s | 7.4x | |
+| #329219 HopfAlgCat.MonoidalCategory | 65ms | 11s | 169x | TC ops 2x nanoda |
+| #409494 AlgebraicGeometry.Scheme.Hom | 634ms | 29s | 46x | 2.8B→459M allocs |
 
-Remaining bottleneck: alloc_expr calls (billions on worst cases) from inst_aux creating
-Shift wrappers and new App/Pi/Lambda nodes. This is the fundamental cost of the Shift
-architecture vs nanoda's level-based approach.
+Remaining bottleneck: inst_aux calls are 12-24x nanoda's due to Shift traversal.
+alloc_expr calls remain high despite mk_* caches because many unique (fun, arg)
+combinations arise from Shift wrappers creating distinct expression identities.
+TC-level operations (def_eq, whnf, infer) are 1.3-2x nanoda's from cache misses
+caused by pointer divergence. These are fundamental to the Shift architecture.
 
 ## References
 
