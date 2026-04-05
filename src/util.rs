@@ -205,9 +205,10 @@ pub struct ExprCache<'t> {
     /// Direct-mapped cache for shift_eq_pending results.
     /// Avoids re-traversing the same (a, b, bishift_a, bishift_b) comparisons.
     pub(crate) shift_eq_pending_cache: Vec<(u64, bool)>,
-    /// Direct-mapped cache for mk_app: tag(fun,arg) → (tag, result).
-    /// 64-bit tag combines both ExprPtrs. Much faster than FxHashMap for the extremely hot mk_app path.
-    pub(crate) mk_app_cache: Vec<(u64, ExprPtr<'t>)>,
+    /// Direct-mapped mk_app cache, lazily allocated after enough misses.
+    /// Avoids 16MB alloc for trivial declarations while speeding up heavy ones.
+    pub(crate) mk_app_dm_cache: Vec<(u64, ExprPtr<'t>)>,
+    pub(crate) mk_app_miss_count: u32,
     /// Memoization cache for mk_pi: (name, style, type, body) → ExprPtr.
     pub(crate) mk_pi_cache: FxHashMap<(NamePtr<'t>, BinderStyle, ExprPtr<'t>, ExprPtr<'t>), ExprPtr<'t>>,
     /// Memoization cache for mk_lambda: (name, style, type, body) → ExprPtr.
@@ -231,7 +232,8 @@ impl<'t> ExprCache<'t> {
             shift_dedup: new_fx_hash_map(),
             shift_eq_cache: Vec::new(),
             shift_eq_pending_cache: Vec::new(),
-            mk_app_cache: Vec::new(),
+            mk_app_dm_cache: Vec::new(),
+            mk_app_miss_count: 0,
             mk_pi_cache: new_fx_hash_map(),
             mk_lambda_cache: new_fx_hash_map(),
             mk_var_cache: Vec::new(),
@@ -242,6 +244,7 @@ impl<'t> ExprCache<'t> {
 pub const SHIFT_EQ_CACHE_SIZE: usize = 1 << 20; // 1M entries ≈ 24MB
 pub const SHIFT_EQ_PENDING_CACHE_SIZE: usize = 1 << 18; // 256K entries
 pub const MK_APP_CACHE_SIZE: usize = 1 << 20; // 1M entries
+pub const MK_APP_DM_THRESHOLD: u32 = 10_000; // allocate DM cache after this many misses
 
 pub struct ExportFile<'p> {
     /// The underlying storage for `Name`, `Level`, and `Expr` items (and Strings).
@@ -981,21 +984,18 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
     }
 
     pub fn mk_app(&mut self, fun: ExprPtr<'t>, arg: ExprPtr<'t>) -> ExprPtr<'t> {
-        // Direct-mapped cache: combine fun and arg hashes into a tag.
+        // Direct-mapped cache (only allocated for heavy declarations)
         let tag = fun.get_hash().wrapping_mul(0x9e3779b97f4a7c15) ^ arg.get_hash();
-        if self.expr_cache.mk_app_cache.is_empty() {
-            // Lazy init: Ptr is packed and doesn't implement Default, so we create a dummy.
-            let dummy: ExprPtr<'t> = Ptr::from(DagMarker::ExportFile, 0);
-            self.expr_cache.mk_app_cache.resize(MK_APP_CACHE_SIZE, (0, dummy));
-        }
-        let slot = (tag as usize) & (MK_APP_CACHE_SIZE - 1);
-        let (cached_tag, cached_result) = self.expr_cache.mk_app_cache[slot];
-        if cached_tag == tag {
-            // Verify: read the cached result and check fun/arg match
-            if let Expr::App { fun: cf, arg: ca, .. } = self.read_expr(cached_result) {
-                if cf == fun && ca == arg {
-                    self.trace.alloc_mk_app_cache_hit += 1;
-                    return cached_result;
+        let dm_len = self.expr_cache.mk_app_dm_cache.len();
+        if dm_len > 0 {
+            let slot = (tag as usize) & (dm_len - 1);
+            let (cached_tag, cached_result) = self.expr_cache.mk_app_dm_cache[slot];
+            if cached_tag == tag {
+                if let Expr::App { fun: cf, arg: ca, .. } = self.read_expr(cached_result) {
+                    if cf == fun && ca == arg {
+                        self.trace.alloc_mk_app_cache_hit += 1;
+                        return cached_result;
+                    }
                 }
             }
         }
@@ -1008,7 +1008,19 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         let struct_hash = hash64!(crate::expr::APP_HASH, fun_e.get_struct_hash(), arg_e.get_struct_hash());
         let fvar_list = self.fvar_union(fun_e.get_fvar_list(), arg_e.get_fvar_list());
         let result = self.alloc_expr(Expr::App { fun, arg, num_loose_bvars, has_fvars, hash, struct_hash, fvar_list });
-        self.expr_cache.mk_app_cache[slot] = (tag, result);
+        // Lazily allocate DM cache after enough misses to justify 16MB
+        if dm_len == 0 {
+            self.expr_cache.mk_app_miss_count += 1;
+            if self.expr_cache.mk_app_miss_count >= MK_APP_DM_THRESHOLD {
+                let dummy: ExprPtr<'t> = Ptr::from(DagMarker::ExportFile, 0);
+                self.expr_cache.mk_app_dm_cache.resize(MK_APP_CACHE_SIZE, (0, dummy));
+                let slot = (tag as usize) & (MK_APP_CACHE_SIZE - 1);
+                self.expr_cache.mk_app_dm_cache[slot] = (tag, result);
+            }
+        } else {
+            let slot = (tag as usize) & (MK_APP_CACHE_SIZE - 1);
+            self.expr_cache.mk_app_dm_cache[slot] = (tag, result);
+        }
         result
     }
 
