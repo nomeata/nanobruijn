@@ -158,15 +158,16 @@ it goes to overflow. On lookup, primary is tried first, then overflow. This elim
 verify_fails on pathological cases without regressing Init (overflow map is rarely populated
 for non-pathological declarations).
 
-**Cache hit promotion (replace primary)**: After a successful shift_eq-verified cache hit
-where `stored_input != query`, replace the primary slot with `(query, result, depth)`.
+**Cache hit promotion (replace primary)**: After a successful **same-depth** shift_eq-verified
+cache hit where `stored_input != query`, replace the primary slot with `(query, result, depth)`.
 This enables future lookups with the same ExprPtr to hit via ptr_eq without needing the
-expensive shift_eq tree walk. Trade-off: replacing a lower-depth primary with a higher-depth
-entry increases verify_fails for lower-depth queries (28% more whnf verify_fails on #134719),
-but the ptr_eq savings outweigh the extra recomputations. Applied to both whnf and infer
-caches (primary hit path only; overflow hits are not promoted).
-- #134719: 78s → 70s (10-11% improvement)
-- Init: 32s → 30s (6-9% improvement)
+expensive shift_eq tree walk. **Critical: on above-depth hits, do NOT replace the primary.**
+Replacing with a higher-depth entry loses the low-depth canonical entry that whnf_cache_store
+deliberately preserves (prefers lowest depth for maximum cross-depth reuse). This caused
+catastrophic cascading misses on commBialgCat (3 timeouts, 26s parent → 2s after fix).
+Applied to both whnf and infer caches (primary hit path only; overflow hits are not promoted).
+- Original promotion: #134719: 78s → 70s (10-11% improvement), Init: 32s → 30s (6-9%)
+- Above-depth fix: commBialgCat parent 26s → 2s, overall 350K: 1315s → 987s
 
 **Below-depth cache hits (infer only)**: When `depth < stored_depth`, we use reverse
 `shift_eq(query, stored, delta)` to detect that the query is a shift-down of the stored
@@ -760,6 +761,29 @@ Expected savings: proportional to total arg subtree size (bulk of the 401M mk_va
 calls). The commBialgCatEquivComonCommAlgCat family shows exponential growth of
 push_shift calls (proof_5: 4K → proof_9: 1.1M → proof_11: timeout), making this
 optimization critical for avoiding timeouts on algebraically complex declarations.
+
+**Cache canonical entry preservation fix.**
+On above-depth cache hits, the whnf and infer caches were replacing the primary slot
+with (query, shifted_result, higher_depth). This lost the low-depth canonical entry
+that `whnf_cache_store` deliberately preserves (prefers lowest depth for maximum
+cross-depth reuse). The cascade: low-depth entry evicted → subsequent queries at
+intermediate depths become verify-fails → full recomputation → exponential blowup.
+Fix: only replace primary on same-depth hits (for pointer identity optimization),
+not on above-depth hits. Combined with lazy push_shift, results:
+
+| commBialgCat declaration | Old (pre-fix) | New (both fixes) | Speedup |
+|--------------------------|---------------|------------------|---------|
+| proof_7 | 91ms | 66ms | 1.4x |
+| proof_8 | 251ms | 164ms | 1.5x |
+| proof_9 | 749ms | 530ms | 1.4x |
+| proof_11 | TIMEOUT (120s) | 1646ms | **73x** |
+| proof_12 | TIMEOUT (120s) | 1656ms | **72x** |
+| proof_13 | TIMEOUT (120s) | 2251ms | **53x** |
+| parent (all proofs) | 26063ms | 2050ms | **12.7x** |
+
+Overall 350K declarations: 1315s → 987s (25% faster).
+54K Init: 101s → 72s (29% faster).
+mk_var calls for parent: 1.4B → 255K (5500x reduction).
 
 ## References
 
