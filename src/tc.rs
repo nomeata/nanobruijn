@@ -1175,8 +1175,8 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             }
         }
         // Below-depth (depth < stored_depth): only attempt O(1) result adjustment.
-        // Full push_shift_down is catastrophically expensive for large expressions.
-        // Check result adjustability FIRST (O(1)), then verify with shift_eq only if worthwhile.
+        // Full push_shift_down creates new expressions that break cache identity downstream,
+        // causing catastrophic cascading recomputation. Only use cheap adjustments.
         if depth < stored_depth {
             let delta = stored_depth - depth;
             let adjustable = if self.ctx.num_loose_bvars(stored_result) == 0 {

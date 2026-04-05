@@ -712,22 +712,43 @@ Shift(inner, amount≥1, 0) composes again.
 Profiling #298261 (PiTensorProduct.norm_eval_le_injectiveSeminorm) revealed 1.48B
 alloc_expr calls dominated by 1.475B mk_var calls (no cache) and 2.47B mk_app calls
 (FxHashMap cache hit overhead). Fix: added a per-index Vec cache for mk_var (O(1)
-array lookup, eliminates 1.475B hash table lookups), and replaced mk_app's FxHashMap
-with a 1M-entry direct-mapped cache (tag-based, ~2x faster per hit). Results:
-- #298261: 45.1s → 26.4s (1.7x speedup)
-- #272519: 26.4s → ~24.8s
+array lookup, eliminates 1.475B hash table lookups), and a 1M-entry direct-mapped
+cache for mk_app (tag-based, lazily allocated after 10K misses to avoid 16MB
+per-declaration overhead for small declarations). Results:
+- #298261: 45.1s → 25.6s (1.76x speedup)
+- Init 54K: 130s → 119s (slight improvement)
 Per-function alloc breakdown (mka/mkv/mkp/etc.) counters added for future profiling.
 
 **Remaining bottleneck: pointer identity divergence from nanoda.**
-For #272519 (26s ours vs 10.7s nanoda): 2.8x more inst_aux calls (181M vs 64M),
-2.2x more whnf calls (68M vs 31M), 1.4x more def_eq (27.7M vs 19.7M).
-nanoda's whnf cache has 99.997% hit rate vs ours at 79%. The shift wrapper approach
-creates distinct expression pointers where nanoda has identical ones, preventing
-cache hits and causing cascading extra work. For #298261, nanoda takes 487ms vs our
-26.4s (54x). The 2.47B mk_app cache lookups (~10ns each with L3 misses) account for
-~25s. These come from inst_aux traversing large expression trees — each inst/inst_beta
-call (309K total) averages ~8000 mk_app calls. nanoda achieves 1.05M total allocs
-because pointer identity prevents redundant tree reconstruction.
+
+Root cause analysis: nanoda uses de Bruijn LEVELS (Local variables) to open binders,
+while our TC uses de Bruijn indices directly. This fundamental difference means:
+1. Nanoda's `inst` never needs shift_down (no binder removal changes variable indices)
+2. Nanoda's inst_cache key is 2D (e, offset) vs our 4D (e, offset, sh_amt, sh_cut)
+3. Nanoda has no Shift AST nodes, no push_shift, no shift_eq machinery
+4. Nanoda's whnf cache achieves 99.997% hit rate because pointer identity is preserved
+
+The cascade: Shift wrappers → pointer identity divergence → lower cache hit rates →
+more whnf/infer calls → more inst calls → billions of mk_app/mk_var calls.
+
+Quantified comparison (per declaration):
+| Declaration | Our TC | Nanoda TC | Ratio | Key metric |
+|-------------|--------|-----------|-------|------------|
+| #228736 | 8.4s | 241ms | 35x | mk_var: 401M vs 227 |
+| #170616 | 2.3s | 431ms | 5.4x | inst_aux: 6.1M vs 2.2M |
+| #63709 | 1.2s | 416ms | 2.8x | whnf: 481K vs 120K |
+| #272519 | 24.8s | 10.0s | 2.5x | fundamentally heavy (10s nanoda) |
+
+Attempted fix: using push_shift_down for below-depth whnf cache hits (converting
+24K verify fails into hits for #228736). Result: CATASTROPHIC regression from 8.4s
+to 72s. The shifted-down results have different pointer identity from "naturally
+computed" whnf results at the target depth, causing cascading cache misses downstream.
+This confirms that the fix must be architectural (eliminate Shift nodes) rather than
+incremental (adjust cached results).
+
+The architectural fix would be switching tc.rs to use de Bruijn levels (Locals) like
+nanoda_tc.rs. This is a major refactor touching most of tc.rs but could close the
+2.5-35x gap vs nanoda.
 
 ## References
 
