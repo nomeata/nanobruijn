@@ -720,8 +720,10 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                 self.ctx.trace.infer_cache_vf_check_flag += 1;
             } else if let Some(r) = self.try_infer_cache_hit(e, stored_input, stored_result, stored_depth, depth, checked, is_check) {
                 self.ctx.trace.infer_cache_hits += 1;
-                // Replace primary with query's ExprPtr so future lookups hit via ptr_eq.
-                if stored_input != e {
+                // On same-depth hit: replace primary input ptr for future ptr_eq lookups.
+                // On above-depth hit: do NOT replace — keep the low-depth canonical entry,
+                // which infer_cache_store deliberately preserves for cross-depth reuse.
+                if stored_depth == depth && stored_input != e {
                     if let Some(bucket) = self.tc_cache.infer_cache.get_mut(bucket_idx) {
                         if let Some(slot) = bucket.get_mut(&canon) {
                             *slot = (e, r, depth, is_check || checked);
@@ -1107,8 +1109,10 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         if let Some((stored_input, stored_result, stored_depth)) = primary_slot {
             if let Some(result) = self.try_whnf_cache_hit(e, stored_input, stored_result, stored_depth, depth) {
                 self.ctx.trace.whnf_cache_hits += 1;
-                // Replace primary with query's ExprPtr so future lookups hit via ptr_eq.
-                if stored_input != e {
+                // On same-depth hit: replace primary input ptr for future ptr_eq lookups.
+                // On above-depth hit: do NOT replace — keep the low-depth canonical entry,
+                // which whnf_cache_store deliberately preserves for cross-depth reuse.
+                if stored_depth == depth && stored_input != e {
                     if let Some(bucket) = self.tc_cache.whnf_cache.get_mut(whnf_bucket_idx) {
                         if let Some(slot) = bucket.get_mut(&canon) {
                             *slot = (e, result, depth);
