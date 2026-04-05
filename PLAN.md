@@ -750,6 +750,17 @@ The architectural fix would be switching tc.rs to use de Bruijn levels (Locals) 
 nanoda_tc.rs. This is a major refactor touching most of tc.rs but could close the
 2.5-35x gap vs nanoda.
 
+**Incremental fix: lazy push_shift for App args.**
+push_shift previously recursed into BOTH fun and arg of App nodes, traversing entire
+expression trees. For #228736 (8.8s), this caused 401M mk_var calls from push_shift
+traversals of above-depth cache results (sd=782K hits). Changed to only recurse into
+fun (keeping the App spine visible for unfold_apps) and lazily Shift-wrap args. This
+defers arg shift work to when the args are actually inspected (inst_aux, unfold_apps).
+Expected savings: proportional to total arg subtree size (bulk of the 401M mk_var
+calls). The commBialgCatEquivComonCommAlgCat family shows exponential growth of
+push_shift calls (proof_5: 4K → proof_9: 1.1M → proof_11: timeout), making this
+optimization critical for avoiding timeouts on algebraically complex declarations.
+
 ## References
 
 - [Lean Kernel Arena](https://arena.lean-lang.org/) — benchmarks and test cases
