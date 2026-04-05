@@ -262,7 +262,7 @@ Result is a boolean (no delta to apply). On init: ~39K shift-invariant hits out 
 |-----------|--------------------------|------------------|
 | Init (54k decls, 310MB) | 26s | 27s (1.04x) |
 | app-lam N=4000 | 8.3s | 10ms (830x faster) |
-| Mathlib (630k decls, 4.9GB) | ~16min (est.) | **28min (1.75x), 0 timeouts** |
+| Mathlib (630k decls, 4.9GB) | ~16min (est.) | **28min (~1.75x), 0 timeouts** |
 | Mathlib 100k-110k segment | 14s | 34s (2.4x) |
 | Mathlib 300k-310k segment | 12s | 76s (6.3x) |
 | ofPointTensor_SpecTensorTo (#134719) | 214ms | 67s (313x) |
