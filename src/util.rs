@@ -482,6 +482,12 @@ pub struct TcTrace {
     pub whnf_cache_hits: u64,
     pub eq_cache_hits: u64,
     pub eq_cache_uf_hits: u64,
+    pub eq_cache_verify_fail: u64,
+    pub fail_cache_verify_fail: u64,
+    pub eq_cache_overflow_stores: u64,
+    pub eq_cache_overflow_hits: u64,
+    pub fail_cache_overflow_stores: u64,
+    pub fail_cache_overflow_hits: u64,
     pub infer_cache_hits: u64,
     pub push_shift_calls: u64,
     pub inst_aux_calls: u64,
@@ -572,10 +578,10 @@ pub struct TcTrace {
 
 impl std::fmt::Display for TcTrace {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "def_eq={} dei={}/{} whnf={} infer={} inst={} alloc={} | hits: whnf={} eq={} uf={} dop={}/{} seq={} sd={} infer={} infer_hash={} infer_vfail={} | ps={}/{} | inst_aux={}/{}/{} sh={}/{}/{}",
+        write!(f, "def_eq={} dei={}/{} whnf={} infer={} inst={} alloc={} | hits: whnf={} eq={}/vf{} uf={} dop={}/{} seq={} sd={} infer={} infer_hash={} infer_vfail={} | ps={}/{} | inst_aux={}/{}/{} sh={}/{}/{}",
             self.def_eq_calls, self.def_eq_inner_calls, self.def_eq_deep_calls, self.whnf_calls, self.infer_calls,
             self.inst_calls, self.alloc_expr_calls,
-            self.whnf_cache_hits, self.eq_cache_hits, self.eq_cache_uf_hits,
+            self.whnf_cache_hits, self.eq_cache_hits, self.eq_cache_verify_fail, self.eq_cache_uf_hits,
             self.defeq_open_pos_hits, self.defeq_open_neg_hits,
             self.sem_eq_cache_hits, self.shift_dedup_hits,
             self.infer_cache_hits,
@@ -598,6 +604,12 @@ impl std::fmt::Display for TcTrace {
         }
         if self.infer_cache_verify_fail > 0 {
             write!(f, " | ivf={}/{}/{}/{} ibelow_shift={} isign_fix={} iov_store={} iov_hit={}", self.infer_cache_vf_check_flag, self.infer_cache_vf_same, self.infer_cache_vf_above, self.infer_cache_vf_below, self.infer_vf_below_is_shift, self.infer_cache_vf_sign_would_fix, self.infer_cache_overflow_stores, self.infer_cache_overflow_hits)?;
+        }
+        if self.eq_cache_verify_fail > 0 || self.fail_cache_verify_fail > 0 || self.eq_cache_overflow_hits > 0 || self.fail_cache_overflow_hits > 0 {
+            write!(f, " | eqvf={}/{} eqov={}/{}/{}/{}",
+                self.eq_cache_verify_fail, self.fail_cache_verify_fail,
+                self.eq_cache_overflow_stores, self.eq_cache_overflow_hits,
+                self.fail_cache_overflow_stores, self.fail_cache_overflow_hits)?;
         }
         write!(f, " | wnu_st={}/{}/{}/{}", self.wnu_cache_new_inserts, self.wnu_cache_update_lower, self.wnu_cache_update_higher, self.wnu_cache_update_skip)?;
         write!(f, " | mka={}/{} mkp={} mkl={} mklt={} mkv={} mks={} mkpr={} mko={}",
@@ -1794,8 +1806,12 @@ pub(crate) struct TcCache<'t> {
     // === Flat caches (not depth-stacked) ===
     /// Positive def_eq cache for closed expressions.
     pub(crate) eq_cache: FxHashMap<DefeqCacheKey, (ExprPtr<'t>, ExprPtr<'t>)>,
+    /// Positive def_eq cache overflow (second entry per key, avoids eviction on hash collision).
+    pub(crate) eq_cache_overflow: FxHashMap<DefeqCacheKey, (ExprPtr<'t>, ExprPtr<'t>)>,
     /// Negative def_eq cache for closed expressions.
     pub(crate) failure_cache: FxHashMap<DefeqCacheKey, (ExprPtr<'t>, ExprPtr<'t>)>,
+    /// Negative def_eq cache overflow.
+    pub(crate) failure_cache_overflow: FxHashMap<DefeqCacheKey, (ExprPtr<'t>, ExprPtr<'t>)>,
     /// Strong reduction cache (library/inspection feature).
     pub(crate) strong_cache: UniqueHashMap<(ExprPtr<'t>, bool, bool), ExprPtr<'t>>,
     /// Pointer-based UnionFind for transitive def_eq caching.
@@ -1816,7 +1832,9 @@ impl<'t> TcCache<'t> {
             infer_cache_base: new_fx_hash_map(),
             infer_cache_overflow_base: new_fx_hash_map(),
             eq_cache: new_fx_hash_map(),
+            eq_cache_overflow: new_fx_hash_map(),
             failure_cache: new_fx_hash_map(),
+            failure_cache_overflow: new_fx_hash_map(),
             strong_cache: new_unique_hash_map(),
             eq_cache_uf: UnionFind::new(),
             frames: Vec::new(),
@@ -1830,7 +1848,9 @@ impl<'t> TcCache<'t> {
         self.infer_cache_base.clear();
         self.infer_cache_overflow_base.clear();
         self.eq_cache.clear();
+        self.eq_cache_overflow.clear();
         self.failure_cache.clear();
+        self.failure_cache_overflow.clear();
         self.strong_cache.clear();
         self.eq_cache_uf.clear();
         self.frames.clear();

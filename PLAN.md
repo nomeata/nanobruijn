@@ -443,6 +443,33 @@ push_shift on Shift nodes) + alloc_expr. Nanoda does: read_expr + match + recurs
 the number of operations (better caching at higher levels) is more impactful than optimizing
 each operation.
 
+### Tracing results (post-GenCache, 70K Mathlib segment)
+
+**#36955 (AnalyticOnNhd.iteratedFDeriv):**
+| Metric | Our TC | Nanoda | Ratio |
+|--------|--------|--------|-------|
+| Time | 1291ms | 597ms | **2.16x** |
+| def_eq | 300,728 | 207,210 | **1.45x** |
+| whnf | 384,935 | 231,439 | **1.66x** |
+| infer | 363,014 | 249,156 | **1.46x** |
+| inst_aux | 11,744,690 | 3,954,227 | **2.97x** |
+| eq_cache_hits | 27,889 | 36,777 | **0.76x** |
+
+**#63709 (ModuleCat.monoidalCategory._proof_4):**
+| Metric | Our TC | Nanoda | Ratio |
+|--------|--------|--------|-------|
+| Time | 1154ms | 387ms | **2.98x** |
+| def_eq | 58,586 | 34,803 | **1.68x** |
+| whnf | 510,129 | 119,860 | **4.25x** |
+| infer | 156,852 | 50,407 | **3.11x** |
+| inst_aux | 26,074,737 | 3,248,768 | **8.03x** |
+| eq_cache_hits | 1,093 | 3,574 | **0.31x** |
+
+The eq_cache hit gap (0.31-0.76x) drives the TC-level operation gap. The operation gap
+cascades: fewer cache hits → more def_eq → more whnf → more inst_beta → more expressions.
+Root cause: canonical hash collisions from shift-invariant hashing group many distinct
+expression pairs under the same key, causing eviction of useful cache entries.
+
 ### Combined inst_shift_aux optimization
 
 `inst_aux` now carries pending shift parameters `(sh_amt, sh_cut)` instead of creating
@@ -539,9 +566,31 @@ nested-let cascade. Together these handle all Init declarations.
 
   Ideas (not yet implemented):
   - Persistent inst_cache across inst_beta calls (include subst fingerprint in key)
+    ATTEMPTED: fingerprint-based persistent cache has soundness issues (hash collisions
+    cause incorrect results — 2 panics on Init with 64-bit fingerprint). Would need
+    verified cache with stored substs, which is impractical for stack-allocated slices.
   - Size-bounded eager shift (resolve small vals, defer large ones)
   - Avoid creating Shift wrappers for subst vals consumed by whnf
   - Improve def_eq/infer cache hit rates to reduce operation count at the source
+
+  **eq_cache overflow** (DONE): The eq_cache and failure_cache use canonical-hash keys
+  with sem_eq verification. When two different expression pairs have the same canonical hash
+  (common with shift-invariant hashing), one evicts the other. Instrumentation on #36955
+  showed 34,637 verify failures vs 27,889 hits (56% of lookups found wrong entry).
+
+  Fix: 2-slot overflow HashMap (same as whnf cache). On insert, if primary has a different
+  entry (by pointer comparison), store in overflow. On lookup, check both primary and overflow.
+
+  Results (70K Mathlib declarations):
+  - 827K eq_cache overflow hits across segment
+  - 122K fewer def_eq calls (22.0M → 21.9M = 0.55%)
+  - 25 declarations >5ms faster, 2 slower
+  - Total slow-decl time: -771ms (-1.0%)
+  - Init: neutral (~40s)
+
+  The remaining 33K verify failures (after overflow) suggest >2 colliding families per key
+  at many positions. The shift-invariant canonical hash inherently groups expressions at
+  different depths under the same key.
 
 - **Investigate fvar_lb computation overhead**: fvar_lb-based bucketing regressed Init
   from 29s to 33s. The fvar_lb computation on every cache access may outweigh the

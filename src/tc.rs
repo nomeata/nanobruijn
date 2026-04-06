@@ -1823,11 +1823,19 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
 
     fn failure_cache_contains(&mut self, x: ExprPtr<'t>, y: ExprPtr<'t>) -> bool {
         let (key, swapped) = self.defeq_canon_key(x, y);
+        let (qx, qy) = if swapped { (y, x) } else { (x, y) };
         if let Some(&(stored_a, stored_b)) = self.tc_cache.failure_cache.get(&key) {
-            let (qx, qy) = if swapped { (y, x) } else { (x, y) };
             if self.ctx.sem_eq(stored_a, qx) && self.ctx.sem_eq(stored_b, qy) {
                 return true;
             }
+            // Check overflow
+            if let Some(&(stored_a2, stored_b2)) = self.tc_cache.failure_cache_overflow.get(&key) {
+                if self.ctx.sem_eq(stored_a2, qx) && self.ctx.sem_eq(stored_b2, qy) {
+                    self.ctx.trace.fail_cache_overflow_hits += 1;
+                    return true;
+                }
+            }
+            self.ctx.trace.fail_cache_verify_fail += 1;
         }
         if self.defeq_open_lookup(false, x, y) {
             return true;
@@ -1838,7 +1846,15 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
     fn failure_cache_insert(&mut self, x: ExprPtr<'t>, y: ExprPtr<'t>) {
         let (key, swapped) = self.defeq_canon_key(x, y);
         let (a, b) = if swapped { (y, x) } else { (x, y) };
-        self.tc_cache.failure_cache.insert(key, (a, b));
+        // 2-slot insert: if primary has a different entry, store in overflow
+        if let Some(&(stored_a, stored_b)) = self.tc_cache.failure_cache.get(&key) {
+            if stored_a != a || stored_b != b {
+                self.ctx.trace.fail_cache_overflow_stores += 1;
+                self.tc_cache.failure_cache_overflow.insert(key, (a, b));
+            }
+        } else {
+            self.tc_cache.failure_cache.insert(key, (a, b));
+        }
         self.defeq_open_store_neg(x, y);
     }
 
@@ -1865,21 +1881,44 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
     /// Uses sem_eq to verify (handles internal Shift wrappers).
     fn eq_cache_contains(&mut self, x: ExprPtr<'t>, y: ExprPtr<'t>) -> bool {
         let (key, swapped) = self.defeq_canon_key(x, y);
+        let (qx, qy) = if swapped { (y, x) } else { (x, y) };
+        // Check primary cache
         if let Some(&(stored_a, stored_b)) = self.tc_cache.eq_cache.get(&key) {
-            let (qx, qy) = if swapped { (y, x) } else { (x, y) };
-            let hit = self.ctx.sem_eq(stored_a, qx) && self.ctx.sem_eq(stored_b, qy);
-            if hit { self.ctx.trace.eq_cache_hits += 1; }
-            hit
-        } else {
-            false
+            if self.ctx.sem_eq(stored_a, qx) && self.ctx.sem_eq(stored_b, qy) {
+                self.ctx.trace.eq_cache_hits += 1;
+                return true;
+            }
+            // Primary didn't match, check overflow
+            if let Some(&(stored_a2, stored_b2)) = self.tc_cache.eq_cache_overflow.get(&key) {
+                if self.ctx.sem_eq(stored_a2, qx) && self.ctx.sem_eq(stored_b2, qy) {
+                    self.ctx.trace.eq_cache_hits += 1;
+                    self.ctx.trace.eq_cache_overflow_hits += 1;
+                    return true;
+                }
+            }
+            self.ctx.trace.eq_cache_verify_fail += 1;
         }
+        false
     }
 
     /// Canonical-hash-keyed eq_cache insert for closed expressions.
+    /// Uses 2-slot design: primary map stores one entry per key, overflow stores a second
+    /// colliding entry. This prevents eviction of useful entries due to hash collisions.
     fn eq_cache_insert(&mut self, x: ExprPtr<'t>, y: ExprPtr<'t>) {
         let (key, swapped) = self.defeq_canon_key(x, y);
         let (a, b) = if swapped { (y, x) } else { (x, y) };
-        self.tc_cache.eq_cache.insert(key, (a, b));
+        // Check if primary already has an entry for this key
+        if let Some(&(stored_a, stored_b)) = self.tc_cache.eq_cache.get(&key) {
+            // Same pointers → no need to insert
+            if stored_a == a && stored_b == b {
+                return;
+            }
+            // Different entry in primary — store new entry in overflow
+            self.ctx.trace.eq_cache_overflow_stores += 1;
+            self.tc_cache.eq_cache_overflow.insert(key, (a, b));
+        } else {
+            self.tc_cache.eq_cache.insert(key, (a, b));
+        }
     }
 
     /// Ordered canonical hash key for a pair of expressions.
