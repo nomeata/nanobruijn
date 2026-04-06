@@ -588,9 +588,22 @@ nested-let cascade. Together these handle all Init declarations.
   - Total slow-decl time: -771ms (-1.0%)
   - Init: neutral (~40s)
 
-  The remaining 33K verify failures (after overflow) suggest >2 colliding families per key
-  at many positions. The shift-invariant canonical hash inherently groups expressions at
-  different depths under the same key.
+  The remaining 33M verify failures (full Mathlib, 7.5% of def_eq calls) come from
+  shift-related expressions: the shift-invariant canonical hash inherently groups expressions
+  at different depths under the same key. Experiments confirmed:
+  - **nlbv_diff in struct_hash** (mixing `nlbv(child1) - nlbv(child2)` into App/Pi/Lambda/Let
+    struct_hash): Zero effect — colliding expressions differ only by uniform shift, so all
+    nlbv differences are preserved. Any shift-invariant hash improvement is fundamentally
+    unable to distinguish shift-related expressions.
+  - **Depth-sensitive canonical hash** (mixing top-level shift amount): Eliminates cross-depth
+    VFs but loses 11% of eq_cache hits (182K/1.66M) that come from cross-depth matches.
+    Net regression: 14ms on IntermediateField. UF cannot compensate — it only handles
+    pointer-identical expressions, not structurally-equivalent-at-different-depths.
+  - **Full-hash for closed expressions**: No effect — most eq_cache entries are open (nlbv > 0).
+
+  The VFs are an inherent cost of shift-invariant caching. Reducing them requires either
+  (a) non-shift-invariant keys with a mechanism to recover cross-depth hits, or
+  (b) reducing the number of distinct shift-depths at which the same expression is queried.
 
 - **Investigate fvar_lb computation overhead**: fvar_lb-based bucketing regressed Init
   from 29s to 33s. The fvar_lb computation on every cache access may outweigh the
@@ -619,6 +632,12 @@ nested-let cascade. Together these handle all Init declarations.
   - Accept the limitation (whnf lazy zeta already handles the cascade for reduction)
   - Find a convergence-preserving approach to Shift-aware let-in-context
   - Consider hybrid: de Bruijn + locally-nameless for let-bound vars only
+
+- **struct_hash fvar_list interleaving** (idea): For App(f, a), extract the interleaving
+  pattern between f's and a's fvar_lists (the sequence of left/right/same when merging).
+  This is shift-invariant (shifts apply to both lists equally). Could reduce struct_hash
+  collisions where struct_hash alone can't. Concern: may be too expensive per mk_app call.
+  Note: nlbv_diff approach was tried and had zero effect (see eq_cache overflow section).
 
 - **Fill in Theory.lean sorry's**: `decode_shift`, `fvars_shift_zero`
 

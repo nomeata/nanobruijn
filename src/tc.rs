@@ -1886,6 +1886,9 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         if let Some(&(stored_a, stored_b)) = self.tc_cache.eq_cache.get(&key) {
             if self.ctx.sem_eq(stored_a, qx) && self.ctx.sem_eq(stored_b, qy) {
                 self.ctx.trace.eq_cache_hits += 1;
+                if stored_a != qx || stored_b != qy {
+                    self.ctx.trace.eq_cache_cross_depth_hits += 1;
+                }
                 return true;
             }
             // Primary didn't match, check overflow
@@ -1893,6 +1896,9 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                 if self.ctx.sem_eq(stored_a2, qx) && self.ctx.sem_eq(stored_b2, qy) {
                     self.ctx.trace.eq_cache_hits += 1;
                     self.ctx.trace.eq_cache_overflow_hits += 1;
+                    if stored_a2 != qx || stored_b2 != qy {
+                        self.ctx.trace.eq_cache_cross_depth_hits += 1;
+                    }
                     return true;
                 }
             }

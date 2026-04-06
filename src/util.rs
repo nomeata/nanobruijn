@@ -486,6 +486,7 @@ pub struct TcTrace {
     pub fail_cache_verify_fail: u64,
     pub eq_cache_overflow_stores: u64,
     pub eq_cache_overflow_hits: u64,
+    pub eq_cache_cross_depth_hits: u64,  // hit where stored_ptr != query_ptr (sem_eq through Shift)
     pub fail_cache_overflow_stores: u64,
     pub fail_cache_overflow_hits: u64,
     pub infer_cache_hits: u64,
@@ -606,10 +607,11 @@ impl std::fmt::Display for TcTrace {
             write!(f, " | ivf={}/{}/{}/{} ibelow_shift={} isign_fix={} iov_store={} iov_hit={}", self.infer_cache_vf_check_flag, self.infer_cache_vf_same, self.infer_cache_vf_above, self.infer_cache_vf_below, self.infer_vf_below_is_shift, self.infer_cache_vf_sign_would_fix, self.infer_cache_overflow_stores, self.infer_cache_overflow_hits)?;
         }
         if self.eq_cache_verify_fail > 0 || self.fail_cache_verify_fail > 0 || self.eq_cache_overflow_hits > 0 || self.fail_cache_overflow_hits > 0 {
-            write!(f, " | eqvf={}/{} eqov={}/{}/{}/{}",
+            write!(f, " | eqvf={}/{} eqov={}/{}/{}/{} eqxd={}",
                 self.eq_cache_verify_fail, self.fail_cache_verify_fail,
                 self.eq_cache_overflow_stores, self.eq_cache_overflow_hits,
-                self.fail_cache_overflow_stores, self.fail_cache_overflow_hits)?;
+                self.fail_cache_overflow_stores, self.fail_cache_overflow_hits,
+                self.eq_cache_cross_depth_hits)?;
         }
         write!(f, " | wnu_st={}/{}/{}/{}", self.wnu_cache_new_inserts, self.wnu_cache_update_lower, self.wnu_cache_update_higher, self.wnu_cache_update_skip)?;
         write!(f, " | mka={}/{} mkp={} mkl={} mklt={} mkv={} mks={} mkpr={} mko={}",
