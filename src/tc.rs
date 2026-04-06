@@ -1605,8 +1605,10 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             }
         }
 
-        if let Some(easy) = self.def_eq_quick_check(x_n, y_n) {
-            return easy
+        if (x_n != x || y_n != y) {
+            if let Some(easy) = self.def_eq_quick_check(x_n, y_n) {
+                return easy
+            }
         }
 
         // Second speculative app congruence on whnf-reduced forms (x_n, y_n)
