@@ -950,6 +950,43 @@ Best families (where we're BETTER):
 - **QuadraticForm.tensorAssoc**: 0.08x def_eq (12x less work)
 - **AdicCompletion**: 0.29x def_eq
 
+Common theme: winning declarations involve **tensor products** and **categorical diagrams** with
+deep nesting and repeated subexpressions at different binder depths. Our shift-based cross-depth
+caching avoids recomputing whnf/infer at each depth, cascading into massive savings (the infer
+cache finds shifted versions of already-computed results, avoiding entire computation subgraphs
+including their beta reductions and inst calls).
+
+### Detailed overhead analysis
+
+For the PartialMap/RationalMap family (our biggest time sink at ~136s total):
+
+| Declaration | Our time | Nanoda | Time ratio | def_eq ratio |
+|-------------|----------|--------|------------|--------------|
+| equivalence_rel (#272519) | 29.8s | 10.1s | 2.95x | 1.40x |
+| match_1_1 (#272517) | 18.4s | 6.5s | 2.81x | 1.27x |
+| exists_restrict (#334179) | 7.9s | 3.7s | 2.12x | 0.96x |
+| equiv_of_fromSpec (#426326) | 13.5s | 3.9s | 3.49x | 1.60x |
+
+#334179 is notable: we do 4% FEWER def_eq but are 2.12x slower — pure constant-factor overhead.
+
+**Breakdown**: Per-operation cost is ~2.2x nanoda's. This comes from:
+- `shift_eq_aux` calls (25M for #334179) — but these are efficient (44% ptr-eq, 56% direct-mapped cache, only 5K struct comparisons)
+- Extra expression nodes from Shift infrastructure (134M mk_app vs 101M for nanoda)
+- `fvar_union`/`fvar_shift_cutoff` operations on every mk_app/mk_pi/mk_lambda
+
+**No quadratic behavior detected**: Average inst_aux traversal per inst DECREASES as total inst
+increases (4.8 for 10M+ inst, 25.9 for 10K-100K inst).
+
+**Cross-declaration dedup opportunity**: #272517, #334136, #426287 have EXACTLY identical
+def_eq/whnf/inst counts (17,585,368 def_eq each). They're auto-generated match helpers that do
+the same computation 3 times. However, their ExprPtrs differ (different Const names), so simple
+ptr-based dedup doesn't apply. Would need name-blind hashing.
+
+**Conclusion**: The 1.71x gap is primarily constant-factor overhead from the Shift infrastructure
+(per-expression cost of managing Shift nodes, fvar lists, shift_eq). The algorithmic component
+(1.0-1.6x more operations) comes from wnu cache misses due to pointer identity divergence.
+No clear algorithmic fix available without fundamental design change (e.g., de Bruijn levels).
+
 ## References
 
 - [Lean Kernel Arena](https://arena.lean-lang.org/) — benchmarks and test cases
