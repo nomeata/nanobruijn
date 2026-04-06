@@ -873,17 +873,19 @@ expression, so caching the shifted result doesn't help.
 
 ### Analysis: where is the extra work?
 
-The 1.69x ratio breaks down into:
+The 1.71x ratio breaks down into:
 - **84% in the 1-3x band** (uniform overhead) — constant-factor cost of shift infrastructure
 - **16% from outliers** (3x+) — algorithmic blowup from push_shift on long App spines
 
-Top outliers vs nanoda:
+**After shift-down-only optimization** (n_substs >= 4 guard), the worst outliers are fixed:
+
+Top outliers vs nanoda (after optimization):
 | # | Declaration | Ours | Nanoda | Ratio | Key bloat |
 |---|-------------|------|--------|-------|-----------|
-| 298261 | norm_eval_le_injectiveSeminorm | 11.6s | 463ms | 25x | mk_app 329x, mk_var 5Mx |
-| 357120 | isBasis_preimage_isAffineOpen | 2.3s | 56ms | 41x | mk_app 945x, mk_var 420Kx |
-| 228736 | retractionKer | 2.7s | 241ms | 11x | mk_var 401M vs 227 |
-| 345976 | diagramComp | 17.8s | 26.1s | **0.68x** | We're FASTER (mk_app DM cache) |
+| 298261 | norm_eval_le_injectiveSeminorm | **830ms** | 463ms | **1.8x** | mk_var: 674M → 154K (fixed) |
+| 357120 | isBasis_preimage_isAffineOpen | **85ms** | 56ms | **1.5x** | mk_var: 112M → 5K (fixed) |
+| 228736 | retractionKer | 1.6s | 241ms | 6.6x | still shift-heavy |
+| 345976 | diagramComp | 18.0s | 26.1s | **0.69x** | We're FASTER (cross-depth cache) |
 
 Root cause for outliers: above-depth whnf cache hits (sd) trigger push_shift(result, delta, 0).
 Each push_shift call traverses the entire App spine of the result (O(spine_length)):
@@ -928,6 +930,25 @@ re-traversing shared subtrees across inst_beta calls.
 
 n_substs >= 4 threshold avoids overhead on common single-substitution inst_beta calls
 where the optimization saves negligible work. Without the threshold: 7.5% overall regression.
+
+### Algorithmic divergence analysis (309 declarations with def_eq ratio > 1.5x or < 0.7x)
+
+278 declarations where we do MORE def_eq than nanoda (total: 18.1M excess).
+31 declarations where we do LESS (total: 4.4M deficit from our cross-depth caching).
+
+Worst families:
+- **PresheafOfModules** (3-5x def_eq, 4-8x whnf): #211138 freeObj 3.17x, #244294 relativeDifferentials 4.85x
+- **DoubleQuot/AdjoinRoot** (7-8x def_eq, 10-15x whnf): #65796 mk_self 7.23x, #595952 quotQuotEquivComm 7.54x
+
+Root cause: push_shift creates new App/Pi/Lambda nodes with unique ExprPtrs → wnu cache
+has 480K+ no-entry misses (unique canonical hashes) → full whnf_no_unfolding recomputation →
+cascade of additional def_eq/infer calls. This is NOT a verify-fail problem (those are
+rare at 5.9K) but a genuine structural divergence from nanoda's computation.
+
+Best families (where we're BETTER):
+- **diagramComp**: 0.42x def_eq (cross-depth shift-invariant caching catches reuse)
+- **QuadraticForm.tensorAssoc**: 0.08x def_eq (12x less work)
+- **AdicCompletion**: 0.29x def_eq
 
 ## References
 
