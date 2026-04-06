@@ -1,4 +1,4 @@
-# lean-slop-kernel
+# nanodb
 
 Forked from [nanoda_lib](https://github.com/ammkrn/nanoda_lib) (Rust Lean 4 type checker).
 

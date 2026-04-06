@@ -1,4 +1,4 @@
-use nanoda_lib::util::Config;
+use nanodb::util::Config;
 use std::error::Error;
 use std::path::Path;
 
@@ -6,7 +6,7 @@ fn main() {
     // Run on a thread with a large stack to avoid stack overflow on deep expressions (e.g. mathlib).
     let builder = std::thread::Builder::new()
         .name("main-worker".into())
-        .stack_size(nanoda_lib::STACK_SIZE);
+        .stack_size(nanodb::STACK_SIZE);
     let handler = builder.spawn(main_inner).unwrap();
     handler.join().unwrap();
 }
@@ -74,7 +74,7 @@ impl std::fmt::Debug for MainError {
 
 const HELP_SHORT: &str = "run with `-h` or `--help` for help";
 const HELP_LONG: &str = concat!(
-    "nanoda_bin",
+    "nanodb",
     " ",
     env!("CARGO_PKG_VERSION"),
     "\n\n",
