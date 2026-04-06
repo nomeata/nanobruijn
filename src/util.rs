@@ -261,14 +261,7 @@ pub struct ExprCache<'t> {
     /// Ensures mk_shift(a, k) always returns the same ExprPtr,
     /// enabling O(1) pointer equality in cache verification instead of O(tree) shift_eq.
     pub(crate) shift_dedup: FxHashMap<(ExprPtr<'t>, u16, u16), ExprPtr<'t>>,
-    /// Direct-mapped cache for shift_eq_aux results.
-    /// Avoids re-comparing the same (a, b, delta, cutoff) pairs in DAG walks.
-    /// Each slot stores: (tag, result) where tag=hash(a,b,delta,cutoff).
-    /// On collision, overwrites. False positives are possible but rare.
-    pub(crate) shift_eq_cache: Vec<(u64, bool)>,
-    /// Direct-mapped cache for shift_eq_pending results.
-    /// Avoids re-traversing the same (a, b, bishift_a, bishift_b) comparisons.
-    pub(crate) shift_eq_pending_cache: Vec<(u64, bool)>,
+    // shift_eq_cache and shift_eq_pending_cache moved to ReusableCaches (avoids 24MB memset/decl)
     /// Direct-mapped mk_app cache, lazily allocated after enough misses.
     /// Avoids 16MB alloc for trivial declarations while speeding up heavy ones.
     pub(crate) mk_app_dm_cache: Vec<(u64, ExprPtr<'t>)>,
@@ -294,8 +287,6 @@ impl<'t> ExprCache<'t> {
             abstr_cache_levels: new_fx_hash_map(),
             sem_eq_cache: new_fx_hash_set(),
             shift_dedup: new_fx_hash_map(),
-            shift_eq_cache: Vec::new(),
-            shift_eq_pending_cache: Vec::new(),
             mk_app_dm_cache: Vec::new(),
             mk_app_miss_count: 0,
             mk_pi_cache: new_fx_hash_map(),
@@ -305,8 +296,72 @@ impl<'t> ExprCache<'t> {
     }
 }
 
-pub const SHIFT_EQ_CACHE_SIZE: usize = 1 << 20; // 1M entries ≈ 24MB
+pub const SHIFT_EQ_CACHE_SIZE: usize = 1 << 20; // 1M entries
 pub const SHIFT_EQ_PENDING_CACHE_SIZE: usize = 1 << 18; // 256K entries
+
+/// Direct-mapped cache with generation counting.
+/// Avoids expensive O(N) memset on "clear" — just bumps a generation counter.
+/// Each slot stores (tag, generation, result). A slot is valid iff its generation
+/// matches the current generation. Slots from prior generations are stale and ignored.
+/// Size per entry: u64(8) + u32(4) + bool(1) + padding(3) = 16 bytes (same as (u64, bool)).
+pub struct GenCache {
+    data: Vec<(u64, u32, bool)>,
+    generation: u32,
+}
+
+impl GenCache {
+    pub fn new() -> Self {
+        GenCache { data: Vec::new(), generation: 0 }
+    }
+
+    /// Reset the cache in O(1) by bumping the generation.
+    pub fn reset(&mut self) {
+        self.generation = self.generation.wrapping_add(1);
+    }
+
+    /// Lazily allocate on first use, then look up by index.
+    #[inline]
+    pub fn get(&self, size: usize, tag: u64, idx: usize) -> Option<bool> {
+        if self.data.len() < size { return None; }
+        let (cached_tag, cached_gen, cached_result) = self.data[idx];
+        if cached_gen == self.generation && cached_tag == tag {
+            Some(cached_result)
+        } else {
+            None
+        }
+    }
+
+    /// Ensure allocated and store a value.
+    #[inline]
+    pub fn insert(&mut self, size: usize, tag: u64, idx: usize, result: bool) {
+        if self.data.len() < size {
+            self.data.resize(size, (0u64, 0u32, false));
+        }
+        self.data[idx] = (tag, self.generation, result);
+    }
+}
+
+/// Pre-allocated caches that survive across declarations.
+/// Avoids 24MB+ memset per declaration for direct-mapped caches.
+pub struct ReusableCaches {
+    pub shift_eq_cache: GenCache,
+    pub shift_eq_pending_cache: GenCache,
+}
+
+impl ReusableCaches {
+    pub fn new() -> Self {
+        ReusableCaches {
+            shift_eq_cache: GenCache::new(),
+            shift_eq_pending_cache: GenCache::new(),
+        }
+    }
+
+    /// Reset all caches for a new declaration (O(1), no memset).
+    pub fn reset(&mut self) {
+        self.shift_eq_cache.reset();
+        self.shift_eq_pending_cache.reset();
+    }
+}
 pub const MK_APP_CACHE_SIZE: usize = 1 << 20; // 1M entries
 pub const MK_APP_DM_THRESHOLD: u32 = 10_000; // allocate DM cache after this many misses
 
@@ -331,7 +386,7 @@ impl<'p> ExportFile<'p> {
     where
         F: FnOnce(&mut TcCtx<'_, 'p>) -> A, {
         let mut dag = LeanDag::new(&self.config);
-        let mut ctx = TcCtx::new(self, &mut dag);
+        let mut ctx = TcCtx::new(self, &mut dag, ReusableCaches::new());
         f(&mut ctx)
     }
 
@@ -339,7 +394,7 @@ impl<'p> ExportFile<'p> {
     where
         F: FnOnce(&mut TypeChecker<'_, '_, 'p>) -> A, {
         let mut dag = LeanDag::new(&self.config);
-        let mut ctx = TcCtx::new(self, &mut dag);
+        let mut ctx = TcCtx::new(self, &mut dag, ReusableCaches::new());
         let env = self.new_env(env_limit);
         let mut tc = TypeChecker::new(&mut ctx, &env, None);
         f(&mut tc)
@@ -348,21 +403,30 @@ impl<'p> ExportFile<'p> {
     pub fn with_tc_and_declar<F, A>(&self, d: crate::env::DeclarInfo<'p>, f: F) -> (A, TcTrace)
     where
         F: FnOnce(&mut TypeChecker<'_, '_, 'p>) -> A, {
+        self.with_tc_and_declar_reusing(d, ReusableCaches::new(), f).0
+    }
+
+    /// Like `with_tc_and_declar`, but reuses pre-allocated caches across declarations.
+    pub fn with_tc_and_declar_reusing<F, A>(&self, d: crate::env::DeclarInfo<'p>, mut reusable: ReusableCaches, f: F) -> ((A, TcTrace), ReusableCaches)
+    where
+        F: FnOnce(&mut TypeChecker<'_, '_, 'p>) -> A, {
+        reusable.reset();
         let mut dag = LeanDag::new(&self.config);
-        let mut ctx = TcCtx::new(self, &mut dag);
+        let mut ctx = TcCtx::new(self, &mut dag, reusable);
         let env = self.new_env(EnvLimit::ByName(d.name));
         let mut tc = TypeChecker::new(&mut ctx, &env, Some(d));
         let result = f(&mut tc);
         let mut trace = tc.ctx.trace;
         trace.dag_size = tc.ctx.dag.exprs.len() as u64;
-        (result, trace)
+        let reusable = std::mem::replace(&mut tc.ctx.reusable, ReusableCaches::new());
+        ((result, trace), reusable)
     }
 
     pub fn with_nanoda_tc_and_declar<F, A>(&self, d: crate::env::DeclarInfo<'p>, f: F) -> (A, TcTrace)
     where
         F: FnOnce(&mut crate::nanoda_tc::NanodaTypeChecker<'_, '_, 'p>) -> A, {
         let mut dag = LeanDag::new(&self.config);
-        let mut ctx = TcCtx::new(self, &mut dag);
+        let mut ctx = TcCtx::new(self, &mut dag, ReusableCaches::new());
         let env = self.new_env(EnvLimit::ByName(d.name));
         let mut tc = crate::nanoda_tc::NanodaTypeChecker::new(&mut ctx, &env, Some(d));
         let result = f(&mut tc);
@@ -395,6 +459,8 @@ pub struct TcCtx<'t, 'p> {
     pub(crate) unique_counter: u32,
     /// A cache for instantiation, free variable abstraction, and level substitution
     pub(crate) expr_cache: ExprCache<'t>,
+    /// Pre-allocated caches that survive across declarations (avoids 24MB memset/decl).
+    pub(crate) reusable: ReusableCaches,
     pub(crate) eager_mode: bool,
     /// Heartbeat counter: incremented in hot paths. When a deadline is set,
     /// checked periodically to enforce per-declaration timeouts.
@@ -525,7 +591,7 @@ impl std::fmt::Display for TcTrace {
             self.shift_eq_aux_calls, self.shift_eq_struct_calls, self.shift_eq_pending_calls,
             self.shift_eq_ptr_eq_hits, self.shift_eq_pending_cache_hits)?;
         if self.zeta_reductions > 0 || self.whnf_let_reductions > 0 || self.wnu_calls > 0 {
-            write!(f, " | zeta={} wlet={} wbeta={} dag={} wnu={}/{}/{} wnu_miss={}/{}/{} wnuov={}/{} peel={}/{}/{}/{}f/{}us", self.zeta_reductions, self.whnf_let_reductions, self.whnf_beta_reductions, self.dag_size, self.wnu_calls, self.wnu_cache_hits, self.wnu_shift_peel, self.wnu_cache_no_bucket, self.wnu_cache_no_entry, self.wnu_cache_verify_fail, self.wnu_cache_overflow_stores, self.wnu_cache_overflow_hits, self.infer_shift_peel, self.whnf_shift_peel, self.wnu_shift_peel, self.shift_peel_frames_total, self.shift_peel_nanos / 1000)?;
+            write!(f, " | zeta={} wlet={} wbeta={} dag={} wnu={}/{}/{} wnu_miss={}/{}/{} wnuov={}/{} peel={}/{}/{}/{}f", self.zeta_reductions, self.whnf_let_reductions, self.whnf_beta_reductions, self.dag_size, self.wnu_calls, self.wnu_cache_hits, self.wnu_shift_peel, self.wnu_cache_no_bucket, self.wnu_cache_no_entry, self.wnu_cache_verify_fail, self.wnu_cache_overflow_stores, self.wnu_cache_overflow_hits, self.infer_shift_peel, self.whnf_shift_peel, self.wnu_shift_peel, self.shift_peel_frames_total)?;
         }
         if self.whnf_cache_verify_fail > 0 {
             write!(f, " | wmiss={}/{}/{} vf={}/{}/{} below_shift={}/{} sign_fix={} evict={} ov_store={} ov_hit={}", self.whnf_cache_no_bucket, self.whnf_cache_no_entry, self.whnf_cache_verify_fail, self.whnf_cache_vf_same, self.whnf_cache_vf_above, self.whnf_cache_vf_below, self.whnf_vf_below_is_shift, self.whnf_below_depth_hits, self.whnf_cache_vf_sign_would_fix, self.whnf_cache_vf_evictions, self.whnf_cache_overflow_stores, self.whnf_cache_overflow_hits)?;
@@ -543,13 +609,14 @@ impl std::fmt::Display for TcTrace {
 }
 
 impl<'t, 'p: 't> TcCtx<'t, 'p> {
-    pub fn new(export_file: &'t ExportFile<'p>, tdag: &'t mut LeanDag<'t>) -> Self {
+    pub fn new(export_file: &'t ExportFile<'p>, tdag: &'t mut LeanDag<'t>, reusable: ReusableCaches) -> Self {
         Self {
             export_file,
             dag: tdag,
             dbj_level_counter: 0u16,
             unique_counter: 0u32,
             expr_cache: ExprCache::new(),
+            reusable,
             eager_mode: false,
             heartbeat: 0,
             deadline: if export_file.config.declaration_timeout_secs > 0 {

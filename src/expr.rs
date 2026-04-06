@@ -1258,16 +1258,12 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
             let dc = (delta as u64) << 16 | cutoff as u64;
             ak.wrapping_mul(0x9e3779b97f4a7c15).wrapping_add(bk).wrapping_mul(0x517cc1b727220a95).wrapping_add(dc)
         };
-        if self.expr_cache.shift_eq_cache.is_empty() {
-            self.expr_cache.shift_eq_cache = vec![(0u64, false); crate::util::SHIFT_EQ_CACHE_SIZE];
-        }
         let se_idx = (se_tag as usize) & (crate::util::SHIFT_EQ_CACHE_SIZE - 1);
-        let (cached_tag, cached_result) = self.expr_cache.shift_eq_cache[se_idx];
-        if cached_tag == se_tag {
+        if let Some(cached_result) = self.reusable.shift_eq_cache.get(crate::util::SHIFT_EQ_CACHE_SIZE, se_tag, se_idx) {
             return cached_result;
         }
         let result = self.shift_eq_aux_inner(a, b, delta, cutoff);
-        self.expr_cache.shift_eq_cache[se_idx] = (se_tag, result);
+        self.reusable.shift_eq_cache.insert(crate::util::SHIFT_EQ_CACHE_SIZE, se_tag, se_idx, result);
         result
     }
 
@@ -1368,12 +1364,8 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
               .wrapping_mul(0x6c62272e07bb0142)
               .wrapping_add(shifts_b)
         };
-        if self.expr_cache.shift_eq_pending_cache.is_empty() {
-            self.expr_cache.shift_eq_pending_cache = vec![(0u64, false); crate::util::SHIFT_EQ_PENDING_CACHE_SIZE];
-        }
         let sep_idx = (sep_tag as usize) & (crate::util::SHIFT_EQ_PENDING_CACHE_SIZE - 1);
-        let (cached_tag, cached_result) = self.expr_cache.shift_eq_pending_cache[sep_idx];
-        if cached_tag == sep_tag {
+        if let Some(cached_result) = self.reusable.shift_eq_pending_cache.get(crate::util::SHIFT_EQ_PENDING_CACHE_SIZE, sep_tag, sep_idx) {
             self.trace.shift_eq_pending_cache_hits += 1;
             return cached_result;
         }
@@ -1385,20 +1377,20 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         if let Shift { inner, amount, cutoff: sc, .. } = a_expr {
             if let Some((na1, nas1, na2, nas2)) = Self::bishift_absorb(a1, as1, a2, as2, amount, sc) {
                 let result = self.shift_eq_pending(inner, b, na1, nas1, na2, nas2, b1, bs1, b2, bs2);
-                self.expr_cache.shift_eq_pending_cache[sep_idx] = (sep_tag, result);
+                self.reusable.shift_eq_pending_cache.insert(crate::util::SHIFT_EQ_PENDING_CACHE_SIZE, sep_tag, sep_idx, result);
                 return result;
             }
             // Can't absorb; conservative false
-            self.expr_cache.shift_eq_pending_cache[sep_idx] = (sep_tag, false);
+            self.reusable.shift_eq_pending_cache.insert(crate::util::SHIFT_EQ_PENDING_CACHE_SIZE, sep_tag, sep_idx, false);
             return false;
         }
         if let Shift { inner, amount, cutoff: sc, .. } = b_expr {
             if let Some((nb1, nbs1, nb2, nbs2)) = Self::bishift_absorb(b1, bs1, b2, bs2, amount, sc) {
                 let result = self.shift_eq_pending(a, inner, a1, as1, a2, as2, nb1, nbs1, nb2, nbs2);
-                self.expr_cache.shift_eq_pending_cache[sep_idx] = (sep_tag, result);
+                self.reusable.shift_eq_pending_cache.insert(crate::util::SHIFT_EQ_PENDING_CACHE_SIZE, sep_tag, sep_idx, result);
                 return result;
             }
-            self.expr_cache.shift_eq_pending_cache[sep_idx] = (sep_tag, false);
+            self.reusable.shift_eq_pending_cache.insert(crate::util::SHIFT_EQ_PENDING_CACHE_SIZE, sep_tag, sep_idx, false);
             return false;
         }
 
@@ -1442,7 +1434,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
             (StringLit { ptr: p1, .. }, StringLit { ptr: p2, .. }) => p1 == p2,
             _ => false,
         };
-        self.expr_cache.shift_eq_pending_cache[sep_idx] = (sep_tag, result);
+        self.reusable.shift_eq_pending_cache.insert(crate::util::SHIFT_EQ_PENDING_CACHE_SIZE, sep_tag, sep_idx, result);
         result
     }
 

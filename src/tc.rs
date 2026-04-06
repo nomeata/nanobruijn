@@ -87,34 +87,39 @@ impl<'p> ExportFile<'p> {
         if self.config.use_nanoda_tc {
             self.check_declar_nanoda(d)
         } else {
-            self.check_declar_shift(d)
+            self.check_declar_shift(d, crate::util::ReusableCaches::new()).0
         }
     }
 
-    /// Check using our shift-based TC.
-    fn check_declar_shift(&self, d: &Declar<'p>) -> crate::util::TcTrace {
+    /// Check using our shift-based TC, reusing pre-allocated caches.
+    fn check_declar_shift(&self, d: &Declar<'p>, reusable: crate::util::ReusableCaches) -> (crate::util::TcTrace, crate::util::ReusableCaches) {
         use Declar::*;
         match d {
-            Axiom { .. } => self.with_tc_and_declar(*d.info(), |tc| tc.check_declar_info(d).unwrap()).1,
-            Inductive(..) => { self.check_inductive_declar(d); crate::util::TcTrace::default() },
-            Quot { .. } => { self.with_ctx(|ctx| crate::quot::check_quot(ctx, d)); crate::util::TcTrace::default() },
-            Definition { val, .. } | Theorem { val, .. } | Opaque { val, .. } =>
-                self.with_tc_and_declar(*d.info(), |tc| {
+            Axiom { .. } => {
+                let (r, reusable) = self.with_tc_and_declar_reusing(*d.info(), reusable, |tc| tc.check_declar_info(d).unwrap());
+                (r.1, reusable)
+            }
+            Inductive(..) => { self.check_inductive_declar(d); (crate::util::TcTrace::default(), reusable) },
+            Quot { .. } => { self.with_ctx(|ctx| crate::quot::check_quot(ctx, d)); (crate::util::TcTrace::default(), reusable) },
+            Definition { val, .. } | Theorem { val, .. } | Opaque { val, .. } => {
+                let (r, reusable) = self.with_tc_and_declar_reusing(*d.info(), reusable, |tc| {
                     tc.check_declar_info(d).unwrap();
                     let inferred_type = tc.infer(*val, crate::tc::InferFlag::Check);
                     tc.assert_def_eq(inferred_type, d.info().ty);
-                }).1,
+                });
+                (r.1, reusable)
+            }
             Constructor(ctor_data) => {
-                let trace = self.with_tc_and_declar(*d.info(), |tc| tc.check_declar_info(d).unwrap()).1;
+                let (r, reusable) = self.with_tc_and_declar_reusing(*d.info(), reusable, |tc| tc.check_declar_info(d).unwrap());
                 assert!(self.declars.get(&ctor_data.inductive_name).is_some());
-                trace
+                (r.1, reusable)
             }
             Recursor(recursor_data) => {
-                let trace = self.with_tc_and_declar(*d.info(), |tc| tc.check_declar_info(d).unwrap()).1;
+                let (r, reusable) = self.with_tc_and_declar_reusing(*d.info(), reusable, |tc| tc.check_declar_info(d).unwrap());
                 for ind_name in recursor_data.all_inductives.iter() {
                     assert!(self.declars.get(ind_name).is_some())
                 }
-                trace
+                (r.1, reusable)
             }
         }
     }
@@ -157,6 +162,7 @@ impl<'p> ExportFile<'p> {
         let skip_decl = self.config.skip_declarations;
         let timeout_secs = self.config.declaration_timeout_secs;
         let mut skipped_count = 0usize;
+        let mut reusable = crate::util::ReusableCaches::new();
         for (i, declar) in self.declars.values().enumerate() {
             if max_decl > 0 && i >= max_decl {
                 eprintln!("[stopping at {} declarations as configured]", max_decl);
@@ -171,22 +177,27 @@ impl<'p> ExportFile<'p> {
                 last_report = decl_start;
             }
             let trace;
-            if timeout_secs > 0 {
+            if self.config.use_nanoda_tc {
+                trace = self.check_declar_nanoda(declar);
+            } else if timeout_secs > 0 {
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    self.check_declar(declar)
+                    self.check_declar_shift(declar, reusable)
                 }));
                 match result {
                     Err(_) => {
                         self.with_ctx(|ctx| {
                             eprintln!("  PANIC #{}: {:?} (skipping)", i, ctx.debug_print(declar.info().name));
                         });
+                        reusable = crate::util::ReusableCaches::new();
                         skipped_count += 1;
                         continue;
                     }
-                    Ok(t) => trace = t,
+                    Ok((t, r)) => { trace = t; reusable = r; }
                 }
             } else {
-                trace = self.check_declar(declar);
+                let (t, r) = self.check_declar_shift(declar, reusable);
+                trace = t;
+                reusable = r;
             }
             let decl_time = decl_start.elapsed().as_millis();
             if decl_time > 0 {
@@ -630,13 +641,9 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                 let new_depth = self.depth() - amount as usize;
                 self.ctx.trace.infer_shift_peel += 1;
                 self.ctx.trace.shift_peel_frames_total += amount as u64;
-                let t0 = std::time::Instant::now();
                 let saved = self.tc_cache.split_off(new_depth);
-                self.ctx.trace.shift_peel_nanos += t0.elapsed().as_nanos() as u64;
                 let inner_type = self.infer(inner, flag);
-                let t1 = std::time::Instant::now();
                 self.tc_cache.extend(saved);
-                self.ctx.trace.shift_peel_nanos += t1.elapsed().as_nanos() as u64;
                 return self.ctx.mk_shift(inner_type, amount);
             } else {
                 let forced = self.ctx.push_shift(inner, amount, cutoff);
@@ -1011,13 +1018,9 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             let new_depth = self.depth() - total_shift as usize;
             self.ctx.trace.whnf_shift_peel += 1;
             self.ctx.trace.shift_peel_frames_total += total_shift as u64;
-            let t0 = std::time::Instant::now();
             let saved = self.tc_cache.split_off(new_depth);
-            self.ctx.trace.shift_peel_nanos += t0.elapsed().as_nanos() as u64;
             let r = self.whnf(e);
-            let t1 = std::time::Instant::now();
             self.tc_cache.extend(saved);
-            self.ctx.trace.shift_peel_nanos += t1.elapsed().as_nanos() as u64;
             return self.ctx.mk_shift(r, total_shift);
         }
         // Stacked whnf cache: bucket 0 for closed, bucket (depth - fvar_lb) for open.
@@ -1200,13 +1203,9 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                 return self.ctx.push_shift(r, total_shift, 0);
             }
             let new_depth = self.depth() - total_shift as usize;
-            let t0 = std::time::Instant::now();
             let saved = self.tc_cache.split_off(new_depth);
-            self.ctx.trace.shift_peel_nanos += t0.elapsed().as_nanos() as u64;
             let r = self.whnf_no_unfolding_aux(e, cheap_proj);
-            let t1 = std::time::Instant::now();
             self.tc_cache.extend(saved);
-            self.ctx.trace.shift_peel_nanos += t1.elapsed().as_nanos() as u64;
             return self.ctx.push_shift(r, total_shift, 0);
         }
         // Iterative version: tail-recursive calls become loop iterations.
