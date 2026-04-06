@@ -1358,11 +1358,15 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                         cur = next;
                         continue;
                     } else {
-                        break self.ctx.foldl_apps(e_fun, args.into_iter());
+                        let r = self.ctx.foldl_apps(e_fun, args.into_iter());
+                        // Identity cache: safe even for cheap_proj (no reduction applied)
+                        cache_entries.push(cur);
+                        break r;
                     },
                 Sort { level, .. } => {
                     debug_assert!(args.is_empty());
                     let level = self.ctx.simplify(level);
+                    cache_entries.push(cur);
                     break self.ctx.mk_sort(level);
                 }
                 Lambda { .. } if !args.is_empty() => {
@@ -1380,7 +1384,9 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                 }
                 Lambda { .. } => {
                     debug_assert!(args.is_empty());
-                    break self.ctx.foldl_apps(e_fun, args.into_iter());
+                    let r = self.ctx.foldl_apps(e_fun, args.into_iter());
+                    cache_entries.push(cur);
+                    break r;
                 }
                 Let { binder_type, val, body, .. } => {
                     self.ctx.trace.whnf_let_reductions += 1;
@@ -1414,7 +1420,10 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                         cur = reduced;
                         continue;
                     } else {
-                        break self.ctx.foldl_apps(e_fun, args.into_iter());
+                        let r = self.ctx.foldl_apps(e_fun, args.into_iter());
+                        // Identity cache: safe even for cheap_proj (no reduction applied)
+                        cache_entries.push(cur);
+                        break r;
                     },
                 Var { dbj_idx, .. } => {
                     if let Some(val) = self.lookup_var_value(dbj_idx) {
@@ -1424,14 +1433,22 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                         cur = next;
                         continue;
                     }
-                    break self.ctx.foldl_apps(e_fun, args.into_iter());
+                    let r = self.ctx.foldl_apps(e_fun, args.into_iter());
+                    // Identity cache: safe even for cheap_proj (no reduction applied)
+                    cache_entries.push(cur);
+                    break r;
                 }
                 Pi { .. } => {
                     debug_assert!(args.is_empty());
+                    cache_entries.push(cur);
                     break e_fun;
                 }
                 App { .. } => panic!(),
-                Local { .. } | NatLit { .. } | StringLit { .. } => break self.ctx.foldl_apps(e_fun, args.into_iter()),
+                Local { .. } | NatLit { .. } | StringLit { .. } => {
+                    let r = self.ctx.foldl_apps(e_fun, args.into_iter());
+                    cache_entries.push(cur);
+                    break r;
+                }
                 Shift { inner, amount, cutoff, .. } => {
                     let forced = self.ctx.push_shift(inner, amount, cutoff);
                     let next = self.ctx.foldl_apps(forced, args.into_iter());
@@ -1458,9 +1475,9 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                     match bucket.get_mut(&entry_canon) {
                         Some((ref mut primary, ref mut overflow)) => {
                             // Same pointer — already stored in primary or overflow
-                            if primary.0 == entry { continue; }
+                            if primary.0 == entry { self.ctx.trace.wnu_cache_update_skip += 1; continue; }
                             if let Some(ov) = overflow {
-                                if ov.0 == entry { continue; }
+                                if ov.0 == entry { self.ctx.trace.wnu_cache_update_skip += 1; continue; }
                             }
                             // No shift_eq family check — use depth-based replacement
                             // to avoid overhead in the hot store path.
@@ -1471,16 +1488,21 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                                 }
                                 *overflow = Some(*primary);
                                 *primary = new_slot;
+                                self.ctx.trace.wnu_cache_update_lower += 1;
                             } else if overflow.map_or(true, |ov| store_depth < ov.2) {
                                 // Higher depth than primary but lower than overflow
                                 if overflow.is_none() {
                                     self.ctx.trace.wnu_cache_overflow_stores += 1;
                                 }
                                 *overflow = Some(new_slot);
+                                self.ctx.trace.wnu_cache_update_higher += 1;
+                            } else {
+                                self.ctx.trace.wnu_cache_update_skip += 1;
                             }
                         }
                         None => {
                             bucket.insert(entry_canon, (new_slot, None));
+                            self.ctx.trace.wnu_cache_new_inserts += 1;
                         }
                     }
                 }

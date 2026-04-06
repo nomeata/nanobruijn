@@ -429,6 +429,11 @@ pub struct TcTrace {
     pub alloc_mk_proj: u64,
     pub alloc_mk_other: u64,
     pub alloc_mk_app_cache_hit: u64,
+    // wnu cache store breakdown
+    pub wnu_cache_new_inserts: u64,
+    pub wnu_cache_update_lower: u64,
+    pub wnu_cache_update_higher: u64,
+    pub wnu_cache_update_skip: u64,
 }
 
 impl std::fmt::Display for TcTrace {
@@ -460,6 +465,7 @@ impl std::fmt::Display for TcTrace {
         if self.infer_cache_verify_fail > 0 {
             write!(f, " | ivf={}/{}/{}/{} ibelow_shift={} isign_fix={} iov_store={} iov_hit={}", self.infer_cache_vf_check_flag, self.infer_cache_vf_same, self.infer_cache_vf_above, self.infer_cache_vf_below, self.infer_vf_below_is_shift, self.infer_cache_vf_sign_would_fix, self.infer_cache_overflow_stores, self.infer_cache_overflow_hits)?;
         }
+        write!(f, " | wnu_st={}/{}/{}/{}", self.wnu_cache_new_inserts, self.wnu_cache_update_lower, self.wnu_cache_update_higher, self.wnu_cache_update_skip)?;
         write!(f, " | mka={}/{} mkp={} mkl={} mklt={} mkv={} mks={} mkpr={} mko={}",
             self.alloc_mk_app, self.alloc_mk_app_cache_hit,
             self.alloc_mk_pi, self.alloc_mk_lambda, self.alloc_mk_let,

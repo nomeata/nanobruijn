@@ -982,6 +982,35 @@ def_eq/whnf/inst counts (17,585,368 def_eq each). They're auto-generated match h
 the same computation 3 times. However, their ExprPtrs differ (different Const names), so simple
 ptr-based dedup doesn't apply. Would need name-blind hashing.
 
+### Identity caching in whnf_no_unfolding (implemented, ~neutral overall)
+
+Deep-dive on DoubleQuot/AdjoinRoot cluster (7-8x def_eq): root cause was 480K wnu cache misses
+for expressions already in whnf but never cached (identity mappings e→e). Nanoda caches these
+implicitly via ptr-based caching (97% hit rate); our wnu cache only had 7% hit rate because
+non-reduced expressions were never stored.
+
+**Fix**: At ALL break paths in `whnf_no_unfolding_aux` (Const no-reduction, Sort, Lambda no-args,
+Var no-value, Pi, Local/NatLit/StringLit), push `cur` to `cache_entries` UNCONDITIONALLY.
+Continue paths (actual reductions) remain gated by `!cheap_proj`. This is safe because
+identity entries (e→e) never change the result regardless of cheap_proj mode.
+
+Per-declaration results:
+| Declaration | Before | After | Speedup | whnf hit rate |
+|-------------|--------|-------|---------|---------------|
+| AdjoinRoot.mk_self (#65796) | 145ms | 130ms | 10% | 7% → 64% |
+| PresheafOfModules.freeObj._proof_2 (#211138) | 2426ms | 2292ms | 5.5% | 13% → 41% |
+| repr_CotangentSpaceMap | 988ms | 993ms | ~0% | ~same |
+
+**Overall effect: neutral** (±0.2% across full Mathlib). Reason: whnf is not the overall
+bottleneck; identity caching makes each whnf call faster but doesn't reduce the NUMBER of
+def_eq calls, which is the true amplifier. The 7x def_eq amplification is structural:
+ptr-eq fails → def_eq_app recurses into N+1 sub-comparisons → each also fails ptr-eq →
+cascade ~3 levels deep → ~7x extra calls. This is fundamental to the Shift representation
+and cannot be fixed by better whnf caching alone.
+
+Also added wnu cache store diagnostic counters (wnu_st=new/lower/higher/skip) for future
+analysis of cache utilization patterns.
+
 **Conclusion**: The 1.71x gap is primarily constant-factor overhead from the Shift infrastructure
 (per-expression cost of managing Shift nodes, fvar lists, shift_eq). The algorithmic component
 (1.0-1.6x more operations) comes from wnu cache misses due to pointer identity divergence.
