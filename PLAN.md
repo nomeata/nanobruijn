@@ -827,20 +827,21 @@ entries. `ReusableCaches` struct threads through the serial declaration loop.
 
 Results:
 - Init 54K: 47.3s → 37.5s (**20.7% speedup**, ratio vs nanoda: 1.85x → 1.46x)
+- Full Mathlib 630K: 1675s → 1581s (**5.6% speedup**, ratio vs nanoda: 1.71x → 1.62x)
 
 ## Full Nanoda Comparison (630K Mathlib declarations)
 
-**Total time**: Our TC 1675s, Nanoda 978s, **ratio 1.71x** (consistently 1.65-1.74x throughout).
+**Total time**: Our TC 1581s, Nanoda 978s, **ratio 1.62x** (improved from 1.71x after GenCache optimization).
 
-Timing at checkpoints:
+Timing at checkpoints (after GenCache optimization):
 | Declarations | Our TC | Nanoda | Ratio |
 |-------------|--------|--------|-------|
-| 100K | 174s | 104s | 1.68x |
-| 200K | 440s | 267s | 1.65x |
-| 300K | 790s | 455s | 1.74x |
-| 400K | 1137s | 663s | 1.71x |
-| 500K | 1422s | 822s | 1.73x |
-| 600K | 1617s | 942s | 1.72x |
+| 100K | 168s | 115s | 1.46x |
+| 200K | 430s | 267s | 1.61x |
+| 300K | 777s | 455s | 1.71x |
+| 400K | 1108s | 663s | 1.67x |
+| 500K | 1360s | 822s | 1.65x |
+| 600K | 1530s | 942s | 1.62x |
 
 ### Gap breakdown by ratio band
 
