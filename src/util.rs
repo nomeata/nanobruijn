@@ -186,8 +186,8 @@ pub struct ExprCache<'t> {
     pub(crate) abstr_cache: FxHashMap<(ExprPtr<'t>, u16), ExprPtr<'t>>,
     /// Caches (e, amount, cutoff) |-> output for shifting.
     pub(crate) shift_cache: FxHashMap<(ExprPtr<'t>, u16, u16), ExprPtr<'t>>,
-    /// Caches (e, amount) |-> output for downward shifting (amount subtracted from free vars).
-    pub(crate) shift_down_cache: FxHashMap<(ExprPtr<'t>, u16), ExprPtr<'t>>,
+    /// Caches (e, amount, cutoff) |-> output for downward shifting (amount subtracted from free vars >= cutoff).
+    pub(crate) shift_down_cache: FxHashMap<(ExprPtr<'t>, u16, u16), ExprPtr<'t>>,
     /// Cache for abstr_aux_levels (nanoda TC): (expr, start_pos, num_open_binders) -> expr
     pub(crate) abstr_cache_levels: FxHashMap<(ExprPtr<'t>, u16, u16), ExprPtr<'t>>,
     /// Cache for sem_eq positive results: ordered (a, b) pairs known to be sem_eq.
@@ -1353,18 +1353,25 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
     /// Precondition: fvar_lb(e) >= amount (no variable goes negative).
     /// Only supports cutoff=0 — all free vars are shifted down.
     pub fn push_shift_down(&mut self, e: ExprPtr<'t>, amount: u16) -> ExprPtr<'t> {
+        self.push_shift_down_cutoff(e, amount, 0)
+    }
+
+    /// Shift down free variable indices >= cutoff by `amount`. Cached persistently
+    /// across inst_beta calls. Used by inst_aux to avoid re-traversing subtrees
+    /// that only need shift_down (no substitution).
+    pub fn push_shift_down_cutoff(&mut self, e: ExprPtr<'t>, amount: u16, cutoff: u16) -> ExprPtr<'t> {
         if amount == 0 {
             return e;
         }
         let expr = self.read_expr(e);
-        if expr.num_loose_bvars() == 0 {
+        if expr.num_loose_bvars() <= cutoff {
             return e;
         }
-        let cache_key = (e, amount);
+        let cache_key = (e, amount, cutoff);
         if let Some(&result) = self.expr_cache.shift_down_cache.get(&cache_key) {
             return result;
         }
-        let result = stacker::maybe_grow(64 * 1024, 2 * 1024 * 1024, || self.push_shift_down_inner(e, amount, 0));
+        let result = stacker::maybe_grow(64 * 1024, 2 * 1024 * 1024, || self.push_shift_down_inner(e, amount, cutoff));
         self.expr_cache.shift_down_cache.insert(cache_key, result);
         result
     }
@@ -1376,21 +1383,23 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         }
         match expr {
             Expr::Shift { inner, amount: prev, cutoff: prev_cutoff, .. } => {
-                if prev_cutoff == cutoff || (cutoff > 0 && self.fvar_lb(expr.get_fvar_list()) >= cutoff) {
-                    // The Shift adds prev to free vars. After shift_down by amount:
-                    // net effect = prev - amount (if prev >= amount), or need to recurse into inner.
-                    let effective_cutoff = if prev_cutoff == cutoff { cutoff } else { 0 };
+                if prev_cutoff == cutoff {
+                    // Cutoffs match: Shift(inner, prev, c) shift_down(amount, c)
+                    // = Shift(inner, prev - amount, c) if prev >= amount, else force + recurse.
                     if prev >= amount {
-                        self.mk_shift_cutoff(inner, prev - amount, effective_cutoff)
+                        self.mk_shift_cutoff(inner, prev - amount, cutoff)
                     } else {
                         // prev < amount: force the Shift, then shift down the remainder
                         let forced = self.push_shift(inner, prev, prev_cutoff);
-                        self.push_shift_down_inner(forced, amount, cutoff)
+                        self.push_shift_down_cutoff(forced, amount, cutoff)
                     }
                 } else {
-                    // Different cutoffs — force inner, then shift down
+                    // Different cutoffs — force inner Shift, then shift down.
+                    // Cannot use mk_shift_cutoff shortcut when cutoffs differ because
+                    // vars below prev_cutoff are unshifted by the inner Shift and need
+                    // different treatment than vars above prev_cutoff.
                     let forced = self.push_shift(inner, prev, prev_cutoff);
-                    self.push_shift_down_inner(forced, amount, cutoff)
+                    self.push_shift_down_cutoff(forced, amount, cutoff)
                 }
             }
             Expr::Var { dbj_idx, .. } => {
@@ -1402,28 +1411,28 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
                 }
             }
             Expr::App { fun, arg, .. } => {
-                let fun = self.push_shift_down_inner(fun, amount, cutoff);
-                let arg = self.push_shift_down_inner(arg, amount, cutoff);
+                let fun = self.push_shift_down_cutoff(fun, amount, cutoff);
+                let arg = self.push_shift_down_cutoff(arg, amount, cutoff);
                 self.mk_app(fun, arg)
             }
             Expr::Pi { binder_name, binder_style, binder_type, body, .. } => {
-                let binder_type = self.push_shift_down_inner(binder_type, amount, cutoff);
-                let body = self.push_shift_down_inner(body, amount, cutoff + 1);
+                let binder_type = self.push_shift_down_cutoff(binder_type, amount, cutoff);
+                let body = self.push_shift_down_cutoff(body, amount, cutoff + 1);
                 self.mk_pi(binder_name, binder_style, binder_type, body)
             }
             Expr::Lambda { binder_name, binder_style, binder_type, body, .. } => {
-                let binder_type = self.push_shift_down_inner(binder_type, amount, cutoff);
-                let body = self.push_shift_down_inner(body, amount, cutoff + 1);
+                let binder_type = self.push_shift_down_cutoff(binder_type, amount, cutoff);
+                let body = self.push_shift_down_cutoff(body, amount, cutoff + 1);
                 self.mk_lambda(binder_name, binder_style, binder_type, body)
             }
             Expr::Let { binder_name, binder_type, val, body, nondep, .. } => {
-                let binder_type = self.push_shift_down_inner(binder_type, amount, cutoff);
-                let val = self.push_shift_down_inner(val, amount, cutoff);
-                let body = self.push_shift_down_inner(body, amount, cutoff + 1);
+                let binder_type = self.push_shift_down_cutoff(binder_type, amount, cutoff);
+                let val = self.push_shift_down_cutoff(val, amount, cutoff);
+                let body = self.push_shift_down_cutoff(body, amount, cutoff + 1);
                 self.mk_let(binder_name, binder_type, val, body, nondep)
             }
             Expr::Proj { ty_name, idx, structure, .. } => {
-                let structure = self.push_shift_down_inner(structure, amount, cutoff);
+                let structure = self.push_shift_down_cutoff(structure, amount, cutoff);
                 self.mk_proj(ty_name, idx, structure)
             }
             Expr::Sort { .. } | Expr::Const { .. } | Expr::Local { .. } | Expr::StringLit { .. } | Expr::NatLit { .. } => {

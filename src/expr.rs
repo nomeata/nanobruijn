@@ -355,6 +355,21 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
             return r;
         }
 
+        // Shift-down-only optimization: when all free bvars are past the substitution
+        // range, no substitution occurs — only shift_down. Use persistently-cached
+        // push_shift_down_cutoff to avoid re-traversing shared subtrees across inst_beta calls.
+        // Only for sh_amt == 0 path; the sh_amt > 0 case has complex shift composition.
+        // Guard: nlbv > offset + n_substs is a necessary condition (free since nlbv already computed).
+        if shift_down && sh_amt == 0 && n_substs >= 4 && nlbv > offset + n_substs {
+            let fvl = self.read_expr(e).get_fvar_list();
+            let lb = self.fvar_lb(fvl);
+            if lb >= offset + n_substs {
+                let r = self.push_shift_down_cutoff(e, n_substs, offset);
+                self.expr_cache.inst_cache.insert(cache_key, r);
+                return r;
+            }
+        }
+
         // If there's a pending shift, we need to look through Shift nodes on e as well
         let calcd = if sh_amt > 0 {
             match self.read_expr(e) {

@@ -871,20 +871,63 @@ General case: **14.5% slower at 100K declarations** due to HashMap insertion ove
 Reverted. The fundamental issue is that each above-depth hit is for a different
 expression, so caching the shifted result doesn't help.
 
-### Architectural fix: switch to Locals (de Bruijn levels) for free variables
+### Analysis: where is the extra work?
 
-The definitive fix is adopting nanoda's approach: represent free variables as
-Local(DbjLevel(n)) instead of Var(k). This eliminates shift_down entirely:
-- inst replaces Var(0) with substitution value, leaves other Vars unchanged
-- inst cache key is 2D (e, offset) instead of 4D (e, offset|sh_amt|sh_cut)
-- Subexpressions not containing the bound variable keep their pointer identity
-- All caches (whnf, infer, wnu, defeq) get nanoda-like hit rates
+The 1.69x ratio breaks down into:
+- **84% in the 1-3x band** (uniform overhead) — constant-factor cost of shift infrastructure
+- **16% from outliers** (3x+) — algorithmic blowup from push_shift on long App spines
 
-Cost: Additional inst call per binder opening (to replace Var(0) with Local),
-plus abstract call when closing (Local back to Var). But each inst is cheaper
-(no shift_down), and the cache hit improvement dwarfs the opening cost.
+Top outliers vs nanoda:
+| # | Declaration | Ours | Nanoda | Ratio | Key bloat |
+|---|-------------|------|--------|-------|-----------|
+| 298261 | norm_eval_le_injectiveSeminorm | 11.6s | 463ms | 25x | mk_app 329x, mk_var 5Mx |
+| 357120 | isBasis_preimage_isAffineOpen | 2.3s | 56ms | 41x | mk_app 945x, mk_var 420Kx |
+| 228736 | retractionKer | 2.7s | 241ms | 11x | mk_var 401M vs 227 |
+| 345976 | diagramComp | 17.8s | 26.1s | **0.68x** | We're FASTER (mk_app DM cache) |
 
-This is a major refactor touching most of tc.rs but would close the 1.71x gap.
+Root cause for outliers: above-depth whnf cache hits (sd) trigger push_shift(result, delta, 0).
+Each push_shift call traverses the entire App spine of the result (O(spine_length)):
+- #357120: sd=15K hits, spine ~2K → 32M push_shift calls → 200M mk_app, 112M mk_var
+- #298261: sd=636K hits → 3.7M push_shift calls → 1.1B mk_app, 674M mk_var
+
+push_shift cache hit rate is 99.9%+, but the 0.1% misses on long spines generate the bulk of
+allocations. Attempted fully-lazy push_shift (O(1) per App) → increased calls from 32M to
+118M (one per spine level via view_expr), with no reduction in mk_app/mk_var. Reverted.
+
+Key insight: def_eq/whnf/inst COUNTS are within 1.0-1.3x of nanoda — the algorithm does
+the same work. The bloat is entirely from node creation/deduplication in push_shift.
+
+### Shift-down-only optimization in inst_aux (implemented)
+
+When inst_aux detects that ALL free bvars in a subexpression are past the substitution
+range (fvar_lb >= offset + n_substs), no substitution occurs — only shift_down by n_substs.
+Delegates to persistently-cached `push_shift_down_cutoff(e, n_substs, offset)` which caches
+across inst_beta calls. Guard: only triggered when `n_substs >= 4` and `nlbv > offset + n_substs`
+(the nlbv check is free since it's already computed in inst_aux's early-exit).
+
+Also fixed a pre-existing bug in `push_shift_down_inner`: recursive calls went through
+`push_shift_down_inner` directly (bypassing cache), causing exponential re-traversal on
+shared DAG subexpressions. Fixed to go through `push_shift_down_cutoff` (cache-aware).
+
+Also fixed `push_shift_down_inner` handling of Shift nodes with mismatched cutoffs:
+previously used an incorrect shortcut when `fvar_lb >= cutoff` that applied the wrong
+shift amount to vars below prev_cutoff. Now always forces inner Shift + recurses when
+cutoffs differ.
+
+Results (full Mathlib, 630K declarations):
+| Metric | Baseline | With shift-down opt | Change |
+|--------|----------|---------------------|--------|
+| Total time | 1656s | 1669s | +0.8% |
+| #298261 (norm_eval_le_injectiveSeminorm) | 11,588ms | 830ms | **14x faster** |
+| #357120 (isBasis_preimage_isAffineOpen) | 2,302ms | 85ms | **27x faster** |
+| Errors/panics/timeouts | 0 | 0 | Same |
+
+Key metric change for #298261: mk_var dropped from 674M to 154K (4400x reduction),
+mk_app from 1.1B to 4.1M (275x reduction). The persistent shift_down_cache avoids
+re-traversing shared subtrees across inst_beta calls.
+
+n_substs >= 4 threshold avoids overhead on common single-substitution inst_beta calls
+where the optimization saves negligible work. Without the threshold: 7.5% overall regression.
 
 ## References
 
