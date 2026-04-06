@@ -1608,6 +1608,35 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         if let Some(easy) = self.def_eq_quick_check(x_n, y_n) {
             return easy
         }
+
+        // Second speculative app congruence on whnf-reduced forms (x_n, y_n)
+        if (x_n != x || y_n != y) && matches!((self.ctx.read_expr(x_n), self.ctx.read_expr(y_n)), (App { .. }, App { .. })) {
+            self.ctx.trace.spec_app2_tried += 1;
+            let spec_result = {
+                let (mut fx, mut fy) = (x_n, y_n);
+                let mut ok = true;
+                loop {
+                    match self.ctx.view_expr_pair(fx, fy) {
+                        (App { fun: f1, arg: a1, .. }, App { fun: f2, arg: a2, .. }) => {
+                            if !self.cheap_eq(a1, a2) { ok = false; break; }
+                            fx = f1; fy = f2;
+                        }
+                        _ => break,
+                    }
+                }
+                if ok && self.cheap_eq(fx, fy) { Some(true) } else { None }
+            };
+            if let Some(true) = spec_result {
+                self.ctx.trace.spec_app2_hit += 1;
+                self.eq_cache_insert(x, y);
+                self.eq_cache_insert(x_n, y_n);
+                self.defeq_open_store_pos(x, y);
+                self.tc_cache.eq_cache_uf.union(x, y);
+                self.tc_cache.eq_cache_uf.union(x_n, y_n);
+                return true;
+            }
+        }
+
         self.ctx.trace.def_eq_deep_calls += 1;
 
         let result = if self.proof_irrel_eq(x_n, y_n) {

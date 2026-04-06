@@ -1197,6 +1197,22 @@ proven equal in prior calls. The eq_cache and UF structure accumulate these fact
 speculative check succeeds cheaply. The 6.3% hit rate is small, but each hit avoids an
 expensive whnf + delta unfolding path.
 
+Also applied after the first whnf_no_unfolding_cheap_proj + second quick_check: a second
+speculative check (spec_app2) on the whnf-reduced forms x_n, y_n. Since whnf_cheap_proj
+may resolve some components, cached sub-equalities become available for cheap_eq. Results:
+- 70K Mathlib: 26K hits / 422K attempts (6.2% hit rate), -0.8% timing improvement
+- Init: 2.4K hits / 214K attempts (1.1% hit rate), ~neutral
+- Guarded by `x_n != x || y_n != y` to skip when whnf_cheap_proj was a no-op
+
+**Deep path breakdown** (Init, 1.4M deep calls):
+- proof_irrel: 4.6K (0.3%)
+- lazy_delta found: 337K (24%)
+- Exhausted: 1.06M (75.6%)
+  - const/local/proj: 8.3K
+  - second whnf_no_unfolding changed: 536K (50.8% of exhausted)
+  - def_eq_app: 512K tried, 500K succeeded (97.6%)
+  - eta/struct: 704
+
 ### Failed approaches (for reference)
 
 **Lazy beta reduction** (reverted): Instead of eagerly substituting in whnf beta, push args
