@@ -155,7 +155,8 @@ impl<'p> ExportFile<'p> {
     }
 
     /// Check all declarations in this export file using a single thread.
-    pub(crate) fn check_all_declars_serial(&self) {
+    /// Returns the number of declarations that panicked (type-check errors).
+    pub(crate) fn check_all_declars_serial(&self) -> usize {
         let total = self.declars.len();
         let start = std::time::Instant::now();
         let mut last_report = start;
@@ -204,6 +205,7 @@ impl<'p> ExportFile<'p> {
         if skipped_count > 0 {
             eprintln!("[WARNING: {} declarations panicked and were skipped]", skipped_count);
         }
+        skipped_count
     }
 
     /// Check all declarations in this export file, spawning `num_threads` as
@@ -238,9 +240,11 @@ impl<'p> ExportFile<'p> {
 
     /// Check all of the declarations in this export file on the specified number
     /// of threads (checking will be serial on the main thread is num_threads <= 1).
-    pub fn check_all_declars(&self) {
+    /// Returns the number of declarations that panicked (type-check errors).
+    pub fn check_all_declars(&self) -> usize {
         if self.config.num_threads > 1 {
-            self.check_all_declars_par(self.config.num_threads)
+            self.check_all_declars_par(self.config.num_threads);
+            0 // par mode doesn't track panics yet
         } else {
             self.check_all_declars_serial()
         }

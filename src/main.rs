@@ -36,10 +36,14 @@ fn use_config(config_path: &Path) -> Result<Option<String>, Box<dyn Error>> {
     let mut pp_destination = cfg.get_pp_destination()?;
     let (export_file, skipped_axioms) = cfg.to_export_file()?;
     // Check the environment
-    export_file.check_all_declars();
+    let panic_count = export_file.check_all_declars();
     // Pretty print as necessary
     let pp_errs = export_file.pp_selected_declars(pp_destination.as_mut());
-    if export_file.config.print_success_message {
+    if panic_count > 0 {
+        Err(Box::from(format!(
+            "{} declaration(s) failed type checking (panicked)", panic_count
+        )))
+    } else if export_file.config.print_success_message {
         if pp_errs.is_empty() {
             if skipped_axioms.is_empty() {
                 Ok(Some(format!("Checked {} declarations with no errors", export_file.declars.len())))
