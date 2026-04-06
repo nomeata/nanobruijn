@@ -1503,6 +1503,43 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         }
     }
 
+    /// Speculative app congruence: try to prove App(f1,a1) == App(f2,a2)
+    /// using only O(1) checks (sem_eq + eq_cache + UF), without whnf.
+    /// Recursively peels matching App layers. Returns Some(true) on full match.
+    fn spec_app_congruence(&mut self, x: ExprPtr<'t>, y: ExprPtr<'t>) -> Option<bool> {
+        self.ctx.trace.spec_app_tried += 1;
+        // Peel App layers, checking args via cheap_eq.
+        // Use view_expr to see through Shift wrappers on the spine.
+        let (mut fx, mut fy) = (x, y);
+        loop {
+            match self.ctx.view_expr_pair(fx, fy) {
+                (App { fun: f1, arg: a1, .. }, App { fun: f2, arg: a2, .. }) => {
+                    if !self.cheap_eq(a1, a2) {
+                        return None;
+                    }
+                    fx = f1;
+                    fy = f2;
+                }
+                _ => break,
+            }
+        }
+        // Check the head
+        if !self.cheap_eq(fx, fy) {
+            return None;
+        }
+        self.ctx.trace.spec_app_hit += 1;
+        Some(true)
+    }
+
+    /// O(1) equality check: sem_eq + eq_cache + UF + defeq_open.
+    /// Never calls def_eq recursively.
+    fn cheap_eq(&mut self, x: ExprPtr<'t>, y: ExprPtr<'t>) -> bool {
+        self.ctx.sem_eq(x, y)
+            || self.eq_cache_contains(x, y)
+            || self.tc_cache.eq_cache_uf.check_uf_eq(x, y)
+            || self.defeq_open_lookup(true, x, y)
+    }
+
     fn def_eq_app(&mut self, x: ExprPtr<'t>, y: ExprPtr<'t>) -> bool {
         let (f1, args1) = self.ctx.unfold_apps(x);
         if args1.is_empty() {
@@ -1544,6 +1581,19 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             return easy
         }
         self.ctx.trace.def_eq_inner_calls += 1;
+
+        // Speculative app congruence: if both sides are applications, try comparing
+        // their spines via cheap O(1) checks (sem_eq + caches) before doing whnf.
+        // Avoids expensive whnf/delta steps for cases resolvable by structural congruence.
+        if matches!((self.ctx.read_expr(x), self.ctx.read_expr(y)), (App { .. }, App { .. })) {
+            if let Some(true) = self.spec_app_congruence(x, y) {
+                // Cache the result for future lookups
+                self.eq_cache_insert(x, y);
+                self.defeq_open_store_pos(x, y);
+                self.tc_cache.eq_cache_uf.union(x, y);
+                return true;
+            }
+        }
 
         let x_n = self.whnf_no_unfolding_cheap_proj(x);
         let y_n = self.whnf_no_unfolding_cheap_proj(y);

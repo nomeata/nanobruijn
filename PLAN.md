@@ -1169,6 +1169,49 @@ within recursive calls, so the true structural work ratio is likely much higher)
 (1.0-1.6x more operations) comes from wnu cache misses due to pointer identity divergence.
 No clear algorithmic fix available without fundamental design change (e.g., de Bruijn levels).
 
+### Speculative app congruence in def_eq (implemented, -16.7% on 70K Mathlib)
+
+Before doing expensive whnf/delta work in `def_eq_inner`, speculatively try structural
+App congruence using only O(1) equality checks. The idea: if two App expressions have
+structurally equal function heads and arguments (as determined by existing caches), we can
+prove them equal without any whnf reduction.
+
+**Implementation** (`tc.rs`):
+- `spec_app_congruence(x, y)`: peels App layers pairwise, checking each arg pair with `cheap_eq`.
+  When the function heads match, returns `Some(true)`. If any check fails, returns `None`
+  (not `Some(false)` — we don't know they're unequal, just that the cheap check couldn't prove equality).
+- `cheap_eq(x, y)`: O(1) check combining `sem_eq`, `eq_cache_contains`, UF check, and `defeq_open_lookup`.
+  Never calls def_eq recursively — avoids the regression from using `def_eq_quick_check` which
+  triggered recursive def_eq calls.
+- On success, caches the result in eq_cache, defeq_open, and UF to prevent repeated work.
+- Placed in `def_eq_inner` after the first `quick_check` fails, before `whnf_no_unfolding_cheap_proj`.
+
+**Results**:
+- 70K Mathlib segment: 66.3s vs 79.6s baseline = **-16.7%**
+- ModuleCat._proof_4: 1150ms vs 1131ms = nearly neutral (+1.7%)
+- Init: passes (54086 declarations, no errors)
+- Hit rate: 1.33M hits / 21.1M attempts (6.3%)
+
+**Why it works**: Many def_eq calls compare App expressions whose components have already been
+proven equal in prior calls. The eq_cache and UF structure accumulate these facts, so the
+speculative check succeeds cheaply. The 6.3% hit rate is small, but each hit avoids an
+expensive whnf + delta unfolding path.
+
+### Failed approaches (for reference)
+
+**Lazy beta reduction** (reverted): Instead of eagerly substituting in whnf beta, push args
+as let-bound locals and whnf at higher depth. Caused 4.2x regression on ModuleCat because
+operating at depth D+N destroys whnf/wnu cache effectiveness — wnu VFs went from 2K to 1.4M.
+**Key insight**: in a de Bruijn system, any optimization that changes the depth at which
+expressions are evaluated causes catastrophic cache miss rates.
+
+**Persistent shift-down for small n_substs** (reverted): Lowered `push_shift_down_cutoff`
+threshold from `n_substs >= 4` to `n_substs >= 1`. Caused 5.6% regression on 70K segment.
+Root cause: extra HashMap overhead and eager node creation breaking pointer identity.
+99.999% of pure shift-down subtrees have n_substs < 4, so the persistent cache misses
+almost all of them at the current threshold, but lowering the threshold costs more than
+it saves.
+
 ## References
 
 - [Lean Kernel Arena](https://arena.lean-lang.org/) — benchmarks and test cases

@@ -505,6 +505,8 @@ pub struct TcTrace {
     pub inst_aux_shifted_identity: u64,  // identity check saved alloc in shift path
     pub inst_aux_shift_skip_clean: u64,  // shift-skip optimization: sh_amt == n_substs (no wrapper)
     pub inst_aux_shift_skip_wrap: u64,   // shift-skip optimization: sh_amt > n_substs (creates Shift wrapper)
+    pub spec_app_tried: u64,             // speculative app congruence attempts
+    pub spec_app_hit: u64,               // speculative app congruence successes
     pub shift_eq_aux_calls: u64,         // total shift_eq_aux recursive calls
     pub shift_eq_struct_calls: u64,      // total shift_eq_struct recursive calls
     pub shift_eq_pending_calls: u64,     // total shift_eq_pending calls
@@ -597,6 +599,9 @@ impl std::fmt::Display for TcTrace {
             self.inst_aux_shift_skip_clean, self.inst_aux_shift_skip_wrap,
             self.shift_eq_aux_calls, self.shift_eq_struct_calls, self.shift_eq_pending_calls,
             self.shift_eq_ptr_eq_hits, self.shift_eq_pending_cache_hits)?;
+        if self.spec_app_tried > 0 {
+            write!(f, " | spec={}/{}", self.spec_app_hit, self.spec_app_tried)?;
+        }
         if self.zeta_reductions > 0 || self.whnf_let_reductions > 0 || self.wnu_calls > 0 {
             write!(f, " | zeta={} wlet={} wbeta={} dag={} wnu={}/{}/{} wnu_miss={}/{}/{} wnuov={}/{} peel={}/{}/{}/{}f", self.zeta_reductions, self.whnf_let_reductions, self.whnf_beta_reductions, self.dag_size, self.wnu_calls, self.wnu_cache_hits, self.wnu_shift_peel, self.wnu_cache_no_bucket, self.wnu_cache_no_entry, self.wnu_cache_verify_fail, self.wnu_cache_overflow_stores, self.wnu_cache_overflow_hits, self.infer_shift_peel, self.whnf_shift_peel, self.wnu_shift_peel, self.shift_peel_frames_total)?;
         }
