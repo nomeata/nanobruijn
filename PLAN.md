@@ -813,6 +813,21 @@ Overall 350K declarations: 1315s → 987s (25% faster).
 54K Init: 101s → 72s (29% faster).
 mk_var calls for parent: 1.4B → 255K (5500x reduction).
 
+### Generation-counted direct-mapped caches (eliminating memset overhead)
+
+`shift_eq_aux` and `shift_eq_pending` use direct-mapped caches (1M and 256K entries
+respectively). Previously lazily allocated per declaration with `vec![(0, false); N]`,
+causing a **24MB memset on every first shift_eq_aux call**. With 54K declarations on Init,
+this was **13.6% of total runtime** (confirmed via `perf`).
+
+Fix: `GenCache` struct with a generation counter. Pre-allocated once, reused across
+declarations. Each slot stores `(tag: u64, generation: u32, result: bool)` = 16 bytes
+(same as before due to alignment). Bumping the generation in O(1) invalidates all stale
+entries. `ReusableCaches` struct threads through the serial declaration loop.
+
+Results:
+- Init 54K: 47.3s → 37.5s (**20.7% speedup**, ratio vs nanoda: 1.85x → 1.46x)
+
 ## Full Nanoda Comparison (630K Mathlib declarations)
 
 **Total time**: Our TC 1675s, Nanoda 978s, **ratio 1.71x** (consistently 1.65-1.74x throughout).
