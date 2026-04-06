@@ -262,7 +262,7 @@ Result is a boolean (no delta to apply). On init: ~39K shift-invariant hits out 
 |-----------|--------------------------|------------------|
 | Init (54k decls, 310MB) | 26s | 27s (1.04x) |
 | app-lam N=4000 | 8.3s | 10ms (830x faster) |
-| Mathlib (630k decls, 4.9GB) | **978s (16.3min)** | **1675s (27.9min), 1.71x, 0 timeouts** |
+| Mathlib (630k decls, 4.9GB) | **978s (16.3min)** | **1656s (27.6min), 1.69x, 0 timeouts** |
 | Mathlib 100k-110k segment | 14s | 34s (2.4x) |
 | Mathlib 300k-310k segment | 12s | 76s (6.3x) |
 | ofPointTensor_SpecTensorTo (#134719) | 214ms | 67s (313x) |
@@ -1001,15 +1001,53 @@ Per-declaration results:
 | PresheafOfModules.freeObj._proof_2 (#211138) | 2426ms | 2292ms | 5.5% | 13% → 41% |
 | repr_CotangentSpaceMap | 988ms | 993ms | ~0% | ~same |
 
-**Overall effect: neutral** (±0.2% across full Mathlib). Reason: whnf is not the overall
-bottleneck; identity caching makes each whnf call faster but doesn't reduce the NUMBER of
-def_eq calls, which is the true amplifier. The 7x def_eq amplification is structural:
+**Overall effect: +0.8% faster** (1656s vs 1669s baseline, 0 errors/timeouts). Consistently
+positive across all milestones (100K: +1.3%, 200K: +0.1%, 400K: +0.6%, 629K: +0.8%).
+The improvement is real but modest — whnf is not the overall bottleneck; identity caching
+makes each whnf call faster but doesn't reduce the NUMBER of def_eq calls, which is the
+true amplifier. The 7x def_eq amplification is structural:
 ptr-eq fails → def_eq_app recurses into N+1 sub-comparisons → each also fails ptr-eq →
 cascade ~3 levels deep → ~7x extra calls. This is fundamental to the Shift representation
 and cannot be fixed by better whnf caching alone.
 
 Also added wnu cache store diagnostic counters (wnu_st=new/lower/higher/skip) for future
 analysis of cache utilization patterns.
+
+### Deep analysis: why def_eq calls are structurally fixed
+
+Identity caching for PresheafOfModules reduced whnf by 26% (2.54M→1.87M) and improved wnu
+hit rate from 13% to 41%, but def_eq/inst/inst_aux counts are UNCHANGED (1,174,730 def_eq
+in both). This proves **def_eq count is determined by the proof structure, not whnf performance**.
+
+Breakdown comparison (PresheafOfModules #211138):
+| Metric | Ours | Nanoda | Ratio | Analysis |
+|--------|------|--------|-------|----------|
+| def_eq | 1,174K | 371K | 3.17x | cascade from ptr-eq failure |
+| def_eq_inner | 535K | 0 | ∞ | nanoda resolves ALL by ptr-eq+eq_cache |
+| def_eq_deep | 533K | 0 | ∞ | ~zero resolved by whnf+second quick_check |
+| sem_eq quick exits | 188K (16%) | 362K ptr-eq (98%) | | |
+| wnu no_entry miss | 7.12M | ~0 | ∞ | genuinely new canonical hashes |
+
+Key finding: **nanoda's def_eq_inner is called ZERO times** for this declaration. All 371K
+def_eq calls resolve at ptr-eq (362K) or eq_cache (9K). In our TC, 535K calls pass sem_eq and
+require full structural comparison. These are mixed expressions (partially shifted) where sem_eq
+correctly reports "not shift-variant" — they need whnf + structural comparison to resolve.
+
+The 7.12M wnu no_entry misses are for expressions with **genuinely new canonical hashes** —
+novel fvar patterns created by push_shift's App/Pi reconstruction. These cannot be cached
+because no shift-equivalent version has been computed before. The combinatorial explosion
+of canonical hashes from Shift wrapper combinations is the root cause.
+
+**Global def_eq statistics** (full Mathlib, 630K declarations):
+| | Our TC | Nanoda | Ratio |
+|---|--------|--------|-------|
+| Total def_eq | 88.8B | 26.9B | 3.3x |
+| Quick exits | 29.0B (33%) | 973M (3.6%) | 30x |
+| Structural work | 59.8B (67%) | 26.0B (96%) | 2.3x |
+
+Our sem_eq catches 29B calls (32%), compensating somewhat for the 3.3x total increase.
+But 59.8B still need structural work vs nanoda's 26.0B (which includes ptr-eq successes
+within recursive calls, so the true structural work ratio is likely much higher).
 
 **Conclusion**: The 1.71x gap is primarily constant-factor overhead from the Shift infrastructure
 (per-expression cost of managing Shift nodes, fvar lists, shift_eq). The algorithmic component
