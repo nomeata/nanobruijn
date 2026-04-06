@@ -5,8 +5,9 @@ index representation with shift-homomorphic caching.
 
 ## Provenance
 
-Forked from [nanoda_lib](https://github.com/ammkrn/nanoda_lib) by ammkrn, a
-clean-room Rust implementation of the Lean 4 kernel. The original uses
+Forked from [nanoda_lib](https://github.com/ammkrn/nanoda_lib) by ammkrn
+(at commit [`68d5ca9`](https://github.com/ammkrn/nanoda_lib/commit/68d5ca9db226849b41a6fff59d796ff19d0a8840)),
+an independent Rust implementation of the Lean 4 kernel. The original uses
 locally-nameless binding representation (free variables as names, bound variables
 as de Bruijn indices), matching the official Lean kernel.
 
@@ -18,7 +19,7 @@ the rest of the type-checking logic largely intact.
 This is a research vehicle for evaluating specific design decisions in Lean 4
 kernel implementation, benchmarked against the original nanoda on real-world
 proof artifacts (Mathlib). It is part of the
-[lean-kernel-arena](https://github.com/leanprover-community/lean-kernel-arena)
+[lean-kernel-arena](https://github.com/leanprover/lean-kernel-arena)
 project.
 
 **This is not intended for production use.**
@@ -39,7 +40,7 @@ difference in binding depth.
 
 ### Shift nodes (lazy shifting)
 
-Rather than eagerly shifting every subexpression, nanodb wraps retrieved values
+Rather than eagerly shifting every subexpression, nanobruijn wraps retrieved values
 in a `Shift(n, expr)` node that records the pending adjustment. Shifts compose:
 `Shift(a, Shift(b, e))` becomes `Shift(a+b, e)`. Shifts are pushed inward
 lazily during whnf normalization.
