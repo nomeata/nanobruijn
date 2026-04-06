@@ -1,6 +1,6 @@
-# nanodb
+# nanobruijn
 
-**nano-deBruijn** -- an experimental Lean 4 type checker exploring pure de Bruijn
+**nanobruijn** -- an experimental Lean 4 type checker exploring pure de Bruijn
 index representation with shift-homomorphic caching.
 
 ## Provenance
@@ -10,7 +10,7 @@ clean-room Rust implementation of the Lean 4 kernel. The original uses
 locally-nameless binding representation (free variables as names, bound variables
 as de Bruijn indices), matching the official Lean kernel.
 
-nanodb replaces the binding representation and caching strategy while keeping
+nanobruijn replaces the binding representation and caching strategy while keeping
 the rest of the type-checking logic largely intact.
 
 ## Purpose
@@ -32,7 +32,7 @@ variables are de Bruijn indices, but when entering a binder (e.g. in
 `whnf(forall)` or `infer(lambda)`), the bound variable is replaced by a fresh
 free variable (a "local"). This requires a full substitution on binder entry.
 
-nanodb instead keeps everything as de Bruijn indices throughout. Entering a
+nanobruijn instead keeps everything as de Bruijn indices throughout. Entering a
 binder is free (no substitution), but looking up a bound variable in the
 environment requires adjusting (shifting) the retrieved value to account for the
 difference in binding depth.
@@ -53,7 +53,7 @@ locally-nameless approach cannot achieve.
 
 ## Current status
 
-nanodb successfully type-checks all of Mathlib with 0 errors and 0 timeouts.
+nanobruijn successfully type-checks all of Mathlib with 0 errors and 0 timeouts.
 It is approximately 1.7x slower than the original nanoda. See `PLAN.md` for
 detailed benchmark data and analysis of the performance gap.
 
@@ -61,7 +61,7 @@ detailed benchmark data and analysis of the performance gap.
 
 ```
 cargo build --release
-./target/release/nanodb path/to/config.json
+./target/release/nanobruijn path/to/config.json
 ```
 
 The config JSON file specifies the export file path and checker options.

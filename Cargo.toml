@@ -1,10 +1,10 @@
 
 [package]
-name = "nanodb"
+name = "nanobruijn"
 version = "0.1.0"
 edition = "2021"
 license = "Apache-2.0"
-repository = "https://github.com/leanprover-community/nanodb"
+repository = "https://github.com/leanprover-community/nanobruijn"
 description = "Experimental Lean 4 type checker using pure de Bruijn indices"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
@@ -33,6 +33,6 @@ serde = { version = "1.0.228", features = ["derive"] }
 stacker = "0.1"
 
 [[bin]]
-name = "nanodb"
+name = "nanobruijn"
 path = "src/main.rs"
 bench = false
