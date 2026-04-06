@@ -922,9 +922,19 @@ Results:
 
 ## Full Nanoda Comparison (630K Mathlib declarations)
 
-**Total time**: Our TC 1581s, Nanoda 978s, **ratio 1.62x** (improved from 1.71x after GenCache optimization).
+**Total time**: Our TC 1317s, Nanoda 978s, **ratio 1.35x** (improved from 1.62x after spec_app optimization).
 
-Timing at checkpoints (after GenCache optimization):
+Timing at checkpoints (after spec_app + spec_app2 + quick_check skip):
+| Declarations | Our TC | Nanoda | Ratio | vs prev |
+|-------------|--------|--------|-------|---------|
+| 100K | 140s | 115s | 1.22x | -16.7% |
+| 200K | 356s | 267s | 1.33x | -17.2% |
+| 300K | 632s | 455s | 1.39x | -18.6% |
+| 400K | 880s | 663s | 1.33x | -20.6% |
+| 500K | 1112s | 822s | 1.35x | -18.2% |
+| 600K | 1270s | 942s | 1.35x | -17.0% |
+
+Previous (after GenCache, before spec_app):
 | Declarations | Our TC | Nanoda | Ratio |
 |-------------|--------|--------|-------|
 | 100K | 168s | 115s | 1.46x |
@@ -1164,10 +1174,11 @@ Our sem_eq catches 29B calls (32%), compensating somewhat for the 3.3x total inc
 But 59.8B still need structural work vs nanoda's 26.0B (which includes ptr-eq successes
 within recursive calls, so the true structural work ratio is likely much higher).
 
-**Conclusion**: The 1.71x gap is primarily constant-factor overhead from the Shift infrastructure
-(per-expression cost of managing Shift nodes, fvar lists, shift_eq). The algorithmic component
-(1.0-1.6x more operations) comes from wnu cache misses due to pointer identity divergence.
-No clear algorithmic fix available without fundamental design change (e.g., de Bruijn levels).
+**Conclusion**: After spec_app optimization, the gap narrowed from 1.62x to 1.35x. The remaining
+1.35x gap is primarily constant-factor overhead from the Shift infrastructure (per-expression
+cost of managing Shift nodes, fvar lists, shift_eq). The algorithmic component (1.0-1.6x more
+operations) comes from wnu cache misses due to pointer identity divergence. No clear further
+algorithmic fix available without fundamental design change (e.g., de Bruijn levels).
 
 ### Speculative app congruence in def_eq (implemented, -16.7% on 70K Mathlib)
 
