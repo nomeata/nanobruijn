@@ -4,7 +4,7 @@ use crate::expr::Expr;
 use crate::level::Level;
 use crate::util::{
     nat_div, nat_mod, nat_sub, nat_gcd, nat_land, nat_lor,
-    nat_xor, nat_shr, nat_shl, new_fx_hash_map, ExportFile, ExprPtr, FxHashMap, LevelPtr,
+    nat_xor, nat_shr, nat_shl, CacheKey, ExportFile, ExprPtr, LevelPtr,
     LevelsPtr, NamePtr, TcCache, TcCtx, StringPtr, WhnfSlot
 };
 use std::error::Error;
@@ -78,14 +78,7 @@ pub struct TypeChecker<'x, 't, 'p> {
     /// to make sure that all of the universe paramters actually used in a declaration `d` are
     /// properly represented in the declaration's uparams info.
     pub(crate) declar_info: Option<DeclarInfo<'t>>,
-    /// Local typing context for de Bruijn variables.
-    /// `local_ctx[0]` is the type of `Var(0)` (most recently bound variable).
-    /// Each entry is `(type, optional_value)`:
-    /// - `None` for lambda/pi binders
-    /// - `Some(val)` for let-bindings (enables lazy zeta reduction)
-    /// Types/values are stored as they appear in the binder (valid at the depth before the binder).
-    /// When looking up `Var(k)`, we shift `local_ctx[k]` up by `k+1`.
-    pub(crate) local_ctx: Vec<(ExprPtr<'t>, Option<ExprPtr<'t>>)>,
+    // Local context + per-depth caches are now bundled in tc_cache.frames.
 }
 
 impl<'p> ExportFile<'p> {
@@ -253,79 +246,44 @@ impl<'p> ExportFile<'p> {
 
 impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
     pub fn new(dag: &'x mut TcCtx<'t, 'p>, env: &'x Env<'x, 't>, declar_info: Option<DeclarInfo<'t>>) -> Self {
-        Self { ctx: dag, env, tc_cache: TcCache::new(), declar_info, local_ctx: Vec::new(),  }
+        Self { ctx: dag, env, tc_cache: TcCache::new(), declar_info }
     }
+
+    /// Current binding depth.
+    fn depth(&self) -> usize { self.tc_cache.depth() }
 
     /// Look up the type of Var(k) in the local context, shifting it to be valid at
     /// the current depth.
     fn lookup_var(&mut self, dbj_idx: u16) -> ExprPtr<'t> {
-        let depth = self.local_ctx.len();
-        let (ty, _) = self.local_ctx[depth - 1 - dbj_idx as usize];
-        // ty was valid at depth (depth - 1 - dbj_idx), i.e., before the
-        // binder that introduced Var(dbj_idx). To make it valid at current depth,
-        // we shift up by dbj_idx + 1.
+        let ty = self.tc_cache.local_type(dbj_idx);
         self.ctx.shift_expr(ty, dbj_idx + 1, 0)
     }
 
     /// Look up the value of a let-bound Var(k), shifted to be valid at current depth.
     /// Returns None for lambda/pi binders.
     fn lookup_var_value(&mut self, dbj_idx: u16) -> Option<ExprPtr<'t>> {
-        let depth = self.local_ctx.len();
-        let (_, val_opt) = self.local_ctx[depth - 1 - dbj_idx as usize];
-        val_opt.map(|val| self.ctx.shift_expr(val, dbj_idx + 1, 0))
+        let val = self.tc_cache.local_value(dbj_idx)?;
+        Some(self.ctx.shift_expr(val, dbj_idx + 1, 0))
     }
 
-    /// Check whether context positions referencing bvars 0..bvar_ub-1 at current
-    /// depth are all non-let. Used to guard shift_eq in whnf cache: if any position
-    /// is a let-binding, zeta reduction makes whnf non-shift-equivariant.
     /// Push a lambda/pi binder onto the local context.
     fn push_local(&mut self, ty: ExprPtr<'t>) {
-        self.local_ctx.push((ty, None));
-        self.tc_cache.infer_cache.push(new_fx_hash_map());
-        self.tc_cache.infer_cache_overflow.push(new_fx_hash_map());
-        self.tc_cache.whnf_cache.push(new_fx_hash_map());
-        self.tc_cache.whnf_cache_overflow.push(new_fx_hash_map());
-        self.tc_cache.whnf_no_unfolding_cache.push(new_fx_hash_map());
-        self.tc_cache.defeq_pos_open.push(new_fx_hash_map());
-        self.tc_cache.defeq_neg_open.push(new_fx_hash_map());
+        self.tc_cache.push_local(ty);
     }
 
     /// Push a let-binding onto the local context (type + value).
     fn push_local_let(&mut self, ty: ExprPtr<'t>, val: ExprPtr<'t>) {
-        self.local_ctx.push((ty, Some(val)));
-        self.tc_cache.infer_cache.push(new_fx_hash_map());
-        self.tc_cache.infer_cache_overflow.push(new_fx_hash_map());
-        self.tc_cache.whnf_cache.push(new_fx_hash_map());
-        self.tc_cache.whnf_cache_overflow.push(new_fx_hash_map());
-        self.tc_cache.whnf_no_unfolding_cache.push(new_fx_hash_map());
-        self.tc_cache.defeq_pos_open.push(new_fx_hash_map());
-        self.tc_cache.defeq_neg_open.push(new_fx_hash_map());
+        self.tc_cache.push_local_let(ty, val);
     }
 
-    /// Pop a binder type from the local context (exiting a binder).
+    /// Pop a binder from the local context (exiting a binder).
     fn pop_local(&mut self) {
-        self.local_ctx.pop().expect("pop_local: empty context");
-        self.tc_cache.infer_cache.pop();
-        self.tc_cache.infer_cache_overflow.pop();
-        self.tc_cache.whnf_cache.pop();
-        self.tc_cache.whnf_cache_overflow.pop();
-        self.tc_cache.whnf_no_unfolding_cache.pop();
-        self.tc_cache.defeq_pos_open.pop();
-        self.tc_cache.defeq_neg_open.pop();
+        self.tc_cache.pop_local();
     }
 
     /// Restore local context to a previous depth.
     fn restore_depth(&mut self, depth: usize) {
-        if self.local_ctx.len() > depth {
-            self.local_ctx.truncate(depth);
-            self.tc_cache.infer_cache.truncate(depth + 1); // +1 for base bucket
-            self.tc_cache.infer_cache_overflow.truncate(depth + 1);
-            self.tc_cache.whnf_cache.truncate(depth + 1);
-            self.tc_cache.whnf_cache_overflow.truncate(depth + 1);
-            self.tc_cache.whnf_no_unfolding_cache.truncate(depth + 1);
-            self.tc_cache.defeq_pos_open.truncate(depth);
-            self.tc_cache.defeq_neg_open.truncate(depth);
-        }
+        self.tc_cache.restore_depth(depth);
     }
 
     /// Conduct the preliminary checks done on all declarations; a declaration
@@ -439,7 +397,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         match self.ctx.view_expr(whnfd) {
             Sort { level, .. } => level,
             _ => {
-                panic!("infer_sort_of: expected Sort, got {:?} from e={:?}, infer={:?}, depth={}", self.ctx.debug_print(whnfd), self.ctx.debug_print(e), self.ctx.debug_print(ty), self.local_ctx.len());
+                panic!("infer_sort_of: expected Sort, got {:?} from e={:?}, infer={:?}, depth={}", self.ctx.debug_print(whnfd), self.ctx.debug_print(e), self.ctx.debug_print(ty), self.depth());
             }
         }
     }
@@ -669,24 +627,10 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         // Only works for cutoff=0 (top-level shifts). For cutoff>0, force first.
         if let Expr::Shift { inner, amount, cutoff, .. } = self.ctx.read_expr(e) {
             if cutoff == 0 {
-                let new_depth = self.local_ctx.len() - amount as usize;
-                let saved_locals = self.local_ctx.split_off(new_depth);
-                let saved_cache = self.tc_cache.infer_cache.split_off(new_depth + 1); // +1 for base bucket
-                let saved_cache_ov = self.tc_cache.infer_cache_overflow.split_off(new_depth + 1);
-                let saved_whnf = self.tc_cache.whnf_cache.split_off(new_depth + 1);
-                let saved_whnf_ov = self.tc_cache.whnf_cache_overflow.split_off(new_depth + 1);
-                let saved_whnf_nu = self.tc_cache.whnf_no_unfolding_cache.split_off(new_depth + 1);
-                let saved_pos = self.tc_cache.defeq_pos_open.split_off(new_depth);
-                let saved_neg = self.tc_cache.defeq_neg_open.split_off(new_depth);
+                let new_depth = self.depth() - amount as usize;
+                let saved = self.tc_cache.split_off(new_depth);
                 let inner_type = self.infer(inner, flag);
-                self.local_ctx.extend(saved_locals);
-                self.tc_cache.infer_cache.extend(saved_cache);
-                self.tc_cache.infer_cache_overflow.extend(saved_cache_ov);
-                self.tc_cache.whnf_cache.extend(saved_whnf);
-                self.tc_cache.whnf_cache_overflow.extend(saved_whnf_ov);
-                self.tc_cache.whnf_no_unfolding_cache.extend(saved_whnf_nu);
-                self.tc_cache.defeq_pos_open.extend(saved_pos);
-                self.tc_cache.defeq_neg_open.extend(saved_neg);
+                self.tc_cache.extend(saved);
                 return self.ctx.mk_shift(inner_type, amount);
             } else {
                 let forced = self.ctx.push_shift(inner, amount, cutoff);
@@ -694,7 +638,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             }
         }
         // Shift-invariant infer cache: bucket 0 for closed, bucket (depth - fvar_lb) for open.
-        let depth = self.local_ctx.len() as u16;
+        let depth = self.depth() as u16;
         let bucket_idx = if self.ctx.num_loose_bvars(e) == 0 {
             0
         } else {
@@ -705,10 +649,8 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         let canon = self.ctx.canonical_hash(e);
         let is_check = flag == InferFlag::Check;
         // Infer cache lookup: primary + overflow, same pattern as whnf cache.
-        let primary_infer = self.tc_cache.infer_cache.get(bucket_idx)
-            .and_then(|b| b.get(&canon)).copied();
-        let overflow_infer = self.tc_cache.infer_cache_overflow.get(bucket_idx)
-            .and_then(|b| b.get(&canon)).copied();
+        let primary_infer = self.tc_cache.infer_cache_get(bucket_idx, &canon).copied();
+        let overflow_infer = self.tc_cache.infer_cache_overflow_get(bucket_idx, &canon).copied();
         if let Some((stored_input, stored_result, stored_depth, checked)) = primary_infer {
             self.ctx.trace.infer_cache_hash_hit += 1;
             if !checked && is_check {
@@ -728,10 +670,8 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                 // On above-depth hit: do NOT replace — keep the low-depth canonical entry,
                 // which infer_cache_store deliberately preserves for cross-depth reuse.
                 if stored_depth == depth && stored_input != e {
-                    if let Some(bucket) = self.tc_cache.infer_cache.get_mut(bucket_idx) {
-                        if let Some(slot) = bucket.get_mut(&canon) {
-                            *slot = (e, r, depth, is_check || checked);
-                        }
+                    if let Some(slot) = self.tc_cache.infer_cache_get_mut(bucket_idx, &canon) {
+                        *slot = (e, r, depth, is_check || checked);
                     }
                 }
                 return r;
@@ -815,12 +755,8 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
     }
 
     /// Store an infer result in the primary + overflow cache.
-    fn infer_cache_store(&mut self, bucket_idx: usize, canon: (u64, u64), e: ExprPtr<'t>, r: ExprPtr<'t>, depth: u16, is_check: bool) {
-        let primary = match self.tc_cache.infer_cache.get_mut(bucket_idx) {
-            Some(b) => b,
-            None => return,
-        };
-        if let Some(slot) = primary.get_mut(&canon) {
+    fn infer_cache_store(&mut self, bucket_idx: usize, canon: CacheKey, e: ExprPtr<'t>, r: ExprPtr<'t>, depth: u16, is_check: bool) {
+        if let Some(slot) = self.tc_cache.infer_cache_get_mut(bucket_idx, &canon) {
             if slot.0 == e { return; }
             // Check if same shift-family
             let sd = slot.2;
@@ -839,13 +775,9 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             }
             // Different family — store in overflow
             self.ctx.trace.infer_cache_overflow_stores += 1;
-            let overflow = match self.tc_cache.infer_cache_overflow.get_mut(bucket_idx) {
-                Some(b) => b,
-                None => return,
-            };
-            overflow.insert(canon, (e, r, depth, is_check));
+            self.tc_cache.infer_cache_overflow_insert(bucket_idx, canon, (e, r, depth, is_check));
         } else {
-            primary.insert(canon, (e, r, depth, is_check));
+            self.tc_cache.infer_cache_insert(bucket_idx, canon, (e, r, depth, is_check));
         }
     }
 
@@ -948,7 +880,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
 
     fn infer_pi(&mut self, mut e: ExprPtr<'t>, flag: InferFlag) -> ExprPtr<'t> {
         let mut universes = Vec::new();
-        let depth0 = self.local_ctx.len();
+        let depth0 = self.depth();
         while let Pi { binder_type, body, .. } = self.ctx.view_expr(e) {
             let dom_univ = self.infer_sort_of(binder_type, flag);
             universes.push(dom_univ);
@@ -962,7 +894,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             infd = self.ctx.imax(universe, infd);
             self.pop_local();
         }
-        assert_eq!(depth0, self.local_ctx.len());
+        assert_eq!(depth0, self.depth());
         self.ctx.mk_sort(infd)
     }
 
@@ -1066,35 +998,21 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             }
         }
         if total_shift > 0 {
-            if self.local_ctx.is_empty() {
+            if self.depth() == 0 {
                 let r = self.whnf(e);
                 return self.ctx.mk_shift(r, total_shift);
             }
-            let new_depth = self.local_ctx.len() - total_shift as usize;
-            let saved_locals = self.local_ctx.split_off(new_depth);
-            let saved_infer = self.tc_cache.infer_cache.split_off(new_depth + 1);
-            let saved_infer_ov = self.tc_cache.infer_cache_overflow.split_off(new_depth + 1);
-            let saved_whnf = self.tc_cache.whnf_cache.split_off(new_depth + 1);
-            let saved_whnf_ov = self.tc_cache.whnf_cache_overflow.split_off(new_depth + 1);
-            let saved_whnf_nu = self.tc_cache.whnf_no_unfolding_cache.split_off(new_depth + 1);
-            let saved_pos = self.tc_cache.defeq_pos_open.split_off(new_depth);
-            let saved_neg = self.tc_cache.defeq_neg_open.split_off(new_depth);
+            let new_depth = self.depth() - total_shift as usize;
+            let saved = self.tc_cache.split_off(new_depth);
             let r = self.whnf(e);
-            self.local_ctx.extend(saved_locals);
-            self.tc_cache.infer_cache.extend(saved_infer);
-            self.tc_cache.infer_cache_overflow.extend(saved_infer_ov);
-            self.tc_cache.whnf_cache.extend(saved_whnf);
-            self.tc_cache.whnf_cache_overflow.extend(saved_whnf_ov);
-            self.tc_cache.whnf_no_unfolding_cache.extend(saved_whnf_nu);
-            self.tc_cache.defeq_pos_open.extend(saved_pos);
-            self.tc_cache.defeq_neg_open.extend(saved_neg);
+            self.tc_cache.extend(saved);
             return self.ctx.mk_shift(r, total_shift);
         }
         // Stacked whnf cache: bucket 0 for closed, bucket (depth - fvar_lb) for open.
         // Using fvar_lb-based bucketing ensures shift-related expressions at different
         // depths land in the same bucket, enabling cross-depth shift_eq reuse.
         let canon = self.ctx.canonical_hash(e);
-        let depth = self.local_ctx.len() as u16;
+        let depth = self.depth() as u16;
         let e_nlbv = self.ctx.num_loose_bvars(e);
         let whnf_bucket_idx = if e_nlbv == 0 {
             0
@@ -1105,11 +1023,9 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         // Look up in whnf cache (primary + overflow).
         // Copy slot data to release borrow before calling methods on self.
         let primary_slot: Option<WhnfSlot<'t>> =
-            self.tc_cache.whnf_cache.get(whnf_bucket_idx)
-                .and_then(|b| b.get(&canon)).copied();
+            self.tc_cache.whnf_cache_get(whnf_bucket_idx, &canon).copied();
         let overflow_slot: Option<WhnfSlot<'t>> =
-            self.tc_cache.whnf_cache_overflow.get(whnf_bucket_idx)
-                .and_then(|b| b.get(&canon)).copied();
+            self.tc_cache.whnf_cache_overflow_get(whnf_bucket_idx, &canon).copied();
         if let Some((stored_input, stored_result, stored_depth)) = primary_slot {
             if let Some(result) = self.try_whnf_cache_hit(e, stored_input, stored_result, stored_depth, depth) {
                 self.ctx.trace.whnf_cache_hits += 1;
@@ -1117,10 +1033,8 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                 // On above-depth hit: do NOT replace — keep the low-depth canonical entry,
                 // which whnf_cache_store deliberately preserves for cross-depth reuse.
                 if stored_depth == depth && stored_input != e {
-                    if let Some(bucket) = self.tc_cache.whnf_cache.get_mut(whnf_bucket_idx) {
-                        if let Some(slot) = bucket.get_mut(&canon) {
-                            *slot = (e, result, depth);
-                        }
+                    if let Some(slot) = self.tc_cache.whnf_cache_get_mut(whnf_bucket_idx, &canon) {
+                        *slot = (e, result, depth);
                     }
                 }
                 return result;
@@ -1150,7 +1064,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                 }
             }
             self.ctx.trace.whnf_cache_verify_fail += 1;
-        } else if self.tc_cache.whnf_cache.get(whnf_bucket_idx).is_some() {
+        } else if self.tc_cache.whnf_cache_bucket_exists(whnf_bucket_idx) {
             self.ctx.trace.whnf_cache_no_entry += 1;
         } else {
             self.ctx.trace.whnf_cache_no_bucket += 1;
@@ -1216,13 +1130,9 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
     }
 
     /// Store a whnf result in the primary + overflow cache.
-    fn whnf_cache_store(&mut self, bucket_idx: usize, canon: (u64, u64), e: ExprPtr<'t>, result: ExprPtr<'t>, depth: u16) {
+    fn whnf_cache_store(&mut self, bucket_idx: usize, canon: CacheKey, e: ExprPtr<'t>, result: ExprPtr<'t>, depth: u16) {
         let new_slot: WhnfSlot<'t> = (e, result, depth);
-        let primary = match self.tc_cache.whnf_cache.get_mut(bucket_idx) {
-            Some(b) => b,
-            None => return,
-        };
-        if let Some(slot) = primary.get_mut(&canon) {
+        if let Some(slot) = self.tc_cache.whnf_cache_get_mut(bucket_idx, &canon) {
             // Same pointer — already stored
             if slot.0 == e { return; }
             // Check if same shift-family using shift_eq (with pointer-eq fast path)
@@ -1241,13 +1151,9 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             }
             // Different family — store in overflow (no shift_eq, just overwrite)
             self.ctx.trace.whnf_cache_overflow_stores += 1;
-            let overflow = match self.tc_cache.whnf_cache_overflow.get_mut(bucket_idx) {
-                Some(b) => b,
-                None => return,
-            };
-            overflow.insert(canon, new_slot);
+            self.tc_cache.whnf_cache_overflow_insert(bucket_idx, canon, new_slot);
         } else {
-            primary.insert(canon, new_slot);
+            self.tc_cache.whnf_cache_insert(bucket_idx, canon, new_slot);
         }
     }
 
@@ -1276,28 +1182,14 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         }
         if total_shift > 0 {
             self.ctx.trace.wnu_shift_peel += 1;
-            if self.local_ctx.is_empty() {
+            if self.depth() == 0 {
                 let r = self.whnf_no_unfolding_aux(e, cheap_proj);
                 return self.ctx.push_shift(r, total_shift, 0);
             }
-            let new_depth = self.local_ctx.len() - total_shift as usize;
-            let saved_locals = self.local_ctx.split_off(new_depth);
-            let saved_infer = self.tc_cache.infer_cache.split_off(new_depth + 1);
-            let saved_infer_ov = self.tc_cache.infer_cache_overflow.split_off(new_depth + 1);
-            let saved_whnf = self.tc_cache.whnf_cache.split_off(new_depth + 1);
-            let saved_whnf_ov = self.tc_cache.whnf_cache_overflow.split_off(new_depth + 1);
-            let saved_whnf_nu = self.tc_cache.whnf_no_unfolding_cache.split_off(new_depth + 1);
-            let saved_pos = self.tc_cache.defeq_pos_open.split_off(new_depth);
-            let saved_neg = self.tc_cache.defeq_neg_open.split_off(new_depth);
+            let new_depth = self.depth() - total_shift as usize;
+            let saved = self.tc_cache.split_off(new_depth);
             let r = self.whnf_no_unfolding_aux(e, cheap_proj);
-            self.local_ctx.extend(saved_locals);
-            self.tc_cache.infer_cache.extend(saved_infer);
-            self.tc_cache.infer_cache_overflow.extend(saved_infer_ov);
-            self.tc_cache.whnf_cache.extend(saved_whnf);
-            self.tc_cache.whnf_cache_overflow.extend(saved_whnf_ov);
-            self.tc_cache.whnf_no_unfolding_cache.extend(saved_whnf_nu);
-            self.tc_cache.defeq_pos_open.extend(saved_pos);
-            self.tc_cache.defeq_neg_open.extend(saved_neg);
+            self.tc_cache.extend(saved);
             return self.ctx.push_shift(r, total_shift, 0);
         }
         // Iterative version: tail-recursive calls become loop iterations.
@@ -1308,50 +1200,52 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             // Stacked whnf_no_unfolding cache: bucket 0 for closed, bucket (depth - fvar_lb) for open.
             let cur_canon = self.ctx.canonical_hash(cur);
             let cur_nlbv = self.ctx.num_loose_bvars(cur);
-            let cur_depth = self.local_ctx.len() as u16;
+            let cur_depth = self.depth() as u16;
             let wnu_bucket_idx = if cur_nlbv == 0 {
                 0
             } else {
                 let cur_lb = self.ctx.fvar_lb(self.ctx.read_expr(cur).get_fvar_list());
                 (cur_depth - cur_lb) as usize
             };
-            if let Some(bucket) = self.tc_cache.whnf_no_unfolding_cache.get(wnu_bucket_idx) {
-                if let Some(&(primary, overflow)) = bucket.get(&cur_canon) {
-                    // Try primary slot
-                    let (stored_input, stored_result, stored_depth) = primary;
-                    if stored_depth == cur_depth && (stored_input == cur || self.ctx.sem_eq(stored_input, cur)) {
+            if let Some(&(primary, overflow)) = self.tc_cache.wnu_cache_get(wnu_bucket_idx, &cur_canon) {
+                // Try primary slot
+                let (stored_input, stored_result, stored_depth) = primary;
+                if stored_depth == cur_depth && (stored_input == cur || self.ctx.sem_eq(stored_input, cur)) {
+                    self.ctx.trace.wnu_cache_hits += 1;
+                    break stored_result;
+                }
+                if cur_depth > stored_depth {
+                    let delta = cur_depth - stored_depth;
+                    if self.ctx.shift_eq(stored_input, cur, delta) {
                         self.ctx.trace.wnu_cache_hits += 1;
-                        break stored_result;
+                        break self.ctx.push_shift(stored_result, delta, 0);
                     }
-                    if cur_depth > stored_depth {
-                        let delta = cur_depth - stored_depth;
-                        if self.ctx.shift_eq(stored_input, cur, delta) {
-                            self.ctx.trace.wnu_cache_hits += 1;
-                            break self.ctx.push_shift(stored_result, delta, 0);
-                        }
+                }
+                // Try overflow slot
+                if let Some((stored_input2, stored_result2, stored_depth2)) = overflow {
+                    if stored_depth2 == cur_depth && (stored_input2 == cur || self.ctx.sem_eq(stored_input2, cur)) {
+                        self.ctx.trace.wnu_cache_hits += 1;
+                        self.ctx.trace.wnu_cache_overflow_hits += 1;
+                        break stored_result2;
                     }
-                    // Try overflow slot
-                    if let Some((stored_input2, stored_result2, stored_depth2)) = overflow {
-                        if stored_depth2 == cur_depth && (stored_input2 == cur || self.ctx.sem_eq(stored_input2, cur)) {
+                    if cur_depth > stored_depth2 {
+                        let delta = cur_depth - stored_depth2;
+                        if self.ctx.shift_eq(stored_input2, cur, delta) {
                             self.ctx.trace.wnu_cache_hits += 1;
                             self.ctx.trace.wnu_cache_overflow_hits += 1;
-                            break stored_result2;
-                        }
-                        if cur_depth > stored_depth2 {
-                            let delta = cur_depth - stored_depth2;
-                            if self.ctx.shift_eq(stored_input2, cur, delta) {
-                                self.ctx.trace.wnu_cache_hits += 1;
-                                self.ctx.trace.wnu_cache_overflow_hits += 1;
-                                break self.ctx.push_shift(stored_result2, delta, 0);
-                            }
+                            break self.ctx.push_shift(stored_result2, delta, 0);
                         }
                     }
-                    self.ctx.trace.wnu_cache_verify_fail += 1;
-                } else {
-                    self.ctx.trace.wnu_cache_no_entry += 1;
                 }
+                self.ctx.trace.wnu_cache_verify_fail += 1;
             } else {
-                self.ctx.trace.wnu_cache_no_bucket += 1;
+                // No entry at this bucket (or bucket doesn't exist).
+                // Distinguish no_entry vs no_bucket for diagnostics.
+                if wnu_bucket_idx == 0 || self.tc_cache.frames.get(wnu_bucket_idx - 1).is_some() {
+                    self.ctx.trace.wnu_cache_no_entry += 1;
+                } else {
+                    self.ctx.trace.wnu_cache_no_bucket += 1;
+                }
             }
             let (e_fun, args) = self.ctx.unfold_apps(cur);
             match self.ctx.read_expr(e_fun) {
@@ -1464,7 +1358,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         };
         // Cache intermediate inputs (non-cheap_proj only).
         if !cheap_proj {
-            let store_depth = self.local_ctx.len() as u16;
+            let store_depth = self.depth() as u16;
             for entry in cache_entries {
                 let entry_canon = self.ctx.canonical_hash(entry);
                 let entry_nlbv = self.ctx.num_loose_bvars(entry);
@@ -1474,41 +1368,36 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                     let entry_lb = self.ctx.fvar_lb(self.ctx.read_expr(entry).get_fvar_list());
                     (store_depth - entry_lb) as usize
                 };
-                if let Some(bucket) = self.tc_cache.whnf_no_unfolding_cache.get_mut(entry_bucket_idx) {
-                    let new_slot: WhnfSlot<'t> = (entry, result, store_depth);
-                    match bucket.get_mut(&entry_canon) {
-                        Some((ref mut primary, ref mut overflow)) => {
-                            // Same pointer — already stored in primary or overflow
-                            if primary.0 == entry { self.ctx.trace.wnu_cache_update_skip += 1; continue; }
-                            if let Some(ov) = overflow {
-                                if ov.0 == entry { self.ctx.trace.wnu_cache_update_skip += 1; continue; }
-                            }
-                            // No shift_eq family check — use depth-based replacement
-                            // to avoid overhead in the hot store path.
-                            if store_depth <= primary.2 {
-                                // Lower depth: replace primary, demote old to overflow
-                                if overflow.is_none() {
-                                    self.ctx.trace.wnu_cache_overflow_stores += 1;
-                                }
-                                *overflow = Some(*primary);
-                                *primary = new_slot;
-                                self.ctx.trace.wnu_cache_update_lower += 1;
-                            } else if overflow.map_or(true, |ov| store_depth < ov.2) {
-                                // Higher depth than primary but lower than overflow
-                                if overflow.is_none() {
-                                    self.ctx.trace.wnu_cache_overflow_stores += 1;
-                                }
-                                *overflow = Some(new_slot);
-                                self.ctx.trace.wnu_cache_update_higher += 1;
-                            } else {
-                                self.ctx.trace.wnu_cache_update_skip += 1;
-                            }
-                        }
-                        None => {
-                            bucket.insert(entry_canon, (new_slot, None));
-                            self.ctx.trace.wnu_cache_new_inserts += 1;
-                        }
+                let new_slot: WhnfSlot<'t> = (entry, result, store_depth);
+                if let Some((ref mut primary, ref mut overflow)) = self.tc_cache.wnu_cache_get_mut(entry_bucket_idx, &entry_canon) {
+                    // Same pointer — already stored in primary or overflow
+                    if primary.0 == entry { self.ctx.trace.wnu_cache_update_skip += 1; continue; }
+                    if let Some(ov) = overflow {
+                        if ov.0 == entry { self.ctx.trace.wnu_cache_update_skip += 1; continue; }
                     }
+                    // No shift_eq family check — use depth-based replacement
+                    // to avoid overhead in the hot store path.
+                    if store_depth <= primary.2 {
+                        // Lower depth: replace primary, demote old to overflow
+                        if overflow.is_none() {
+                            self.ctx.trace.wnu_cache_overflow_stores += 1;
+                        }
+                        *overflow = Some(*primary);
+                        *primary = new_slot;
+                        self.ctx.trace.wnu_cache_update_lower += 1;
+                    } else if overflow.map_or(true, |ov| store_depth < ov.2) {
+                        // Higher depth than primary but lower than overflow
+                        if overflow.is_none() {
+                            self.ctx.trace.wnu_cache_overflow_stores += 1;
+                        }
+                        *overflow = Some(new_slot);
+                        self.ctx.trace.wnu_cache_update_higher += 1;
+                    } else {
+                        self.ctx.trace.wnu_cache_update_skip += 1;
+                    }
+                } else {
+                    self.tc_cache.wnu_cache_insert(entry_bucket_idx, entry_canon, (new_slot, None));
+                    self.ctx.trace.wnu_cache_new_inserts += 1;
                 }
             }
         }
@@ -1539,7 +1428,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
     }
 
     fn def_eq_binder_aux(&mut self, mut x: ExprPtr<'t>, mut y: ExprPtr<'t>) -> Option<bool> {
-        let depth0 = self.local_ctx.len();
+        let depth0 = self.depth();
         while let (
             Pi { binder_type: t1, body: body1, .. },
             Pi { binder_type: t2, body: body2, .. },
@@ -1932,7 +1821,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
     /// Compute bucket index for shift-invariant def_eq cache.
     /// Returns None if both expressions are closed (use global cache instead).
     fn defeq_bucket_idx(&self, x: ExprPtr<'t>, y: ExprPtr<'t>) -> Option<usize> {
-        let depth = self.local_ctx.len() as u16;
+        let depth = self.depth() as u16;
         let x_nlbv = self.ctx.num_loose_bvars(x);
         let y_nlbv = self.ctx.num_loose_bvars(y);
         if x_nlbv == 0 && y_nlbv == 0 {
@@ -1988,11 +1877,9 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         y: ExprPtr<'t>,
     ) -> bool {
         let Some(bucket_idx) = self.defeq_bucket_idx(x, y) else { return false };
-        let cache = if is_pos { &self.tc_cache.defeq_pos_open } else { &self.tc_cache.defeq_neg_open };
-        let Some(bucket) = cache.get(bucket_idx) else { return false };
         let (key, swapped) = self.defeq_canon_key(x, y);
-        let Some(&(stored_a, stored_b, stored_depth)) = bucket.get(&key) else { return false };
-        let depth = self.local_ctx.len() as u16;
+        let Some(&(stored_a, stored_b, stored_depth)) = self.tc_cache.defeq_open_get(is_pos, bucket_idx, &key) else { return false };
+        let depth = self.depth() as u16;
         let (qx, qy) = if swapped { (y, x) } else { (x, y) };
         // Exact depth match with semantic equality
         if stored_depth == depth && self.ctx.sem_eq(stored_a, qx) && self.ctx.sem_eq(stored_b, qy) {
@@ -2022,37 +1909,29 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
 
     /// Store in a shift-invariant def_eq cache (positive or negative).
     fn defeq_open_store_pos(&mut self, x: ExprPtr<'t>, y: ExprPtr<'t>) {
-        Self::defeq_open_store_impl(self.ctx, &mut self.tc_cache.defeq_pos_open, &self.local_ctx, x, y);
+        self.defeq_open_store_impl(true, x, y);
     }
 
     fn defeq_open_store_neg(&mut self, x: ExprPtr<'t>, y: ExprPtr<'t>) {
-        Self::defeq_open_store_impl(self.ctx, &mut self.tc_cache.defeq_neg_open, &self.local_ctx, x, y);
+        self.defeq_open_store_impl(false, x, y);
     }
 
-    fn defeq_open_store_impl(
-        ctx: &mut TcCtx<'t, 'p>,
-        cache: &mut Vec<FxHashMap<((u64, u64), (u64, u64)), (ExprPtr<'t>, ExprPtr<'t>, u16)>>,
-        local_ctx: &[(ExprPtr<'t>, Option<ExprPtr<'t>>)],
-        x: ExprPtr<'t>,
-        y: ExprPtr<'t>,
-    ) {
-        let depth = local_ctx.len() as u16;
-        let x_nlbv = ctx.num_loose_bvars(x);
-        let y_nlbv = ctx.num_loose_bvars(y);
+    fn defeq_open_store_impl(&mut self, is_pos: bool, x: ExprPtr<'t>, y: ExprPtr<'t>) {
+        let depth = self.depth() as u16;
+        let x_nlbv = self.ctx.num_loose_bvars(x);
+        let y_nlbv = self.ctx.num_loose_bvars(y);
         if x_nlbv == 0 && y_nlbv == 0 { return; }
         if depth == 0 { return; }
-        let x_lb = if x_nlbv > 0 { ctx.fvar_lb(ctx.read_expr(x).get_fvar_list()) } else { u16::MAX };
-        let y_lb = if y_nlbv > 0 { ctx.fvar_lb(ctx.read_expr(y).get_fvar_list()) } else { u16::MAX };
+        let x_lb = if x_nlbv > 0 { self.ctx.fvar_lb(self.ctx.read_expr(x).get_fvar_list()) } else { u16::MAX };
+        let y_lb = if y_nlbv > 0 { self.ctx.fvar_lb(self.ctx.read_expr(y).get_fvar_list()) } else { u16::MAX };
         let min_lb = x_lb.min(y_lb);
         let bucket_idx = (depth - 1 - min_lb) as usize;
-        let cx = ctx.canonical_hash(x);
-        let cy = ctx.canonical_hash(y);
+        let cx = self.ctx.canonical_hash(x);
+        let cy = self.ctx.canonical_hash(y);
         let (key, swapped) = if cx <= cy { ((cx, cy), false) } else { ((cy, cx), true) };
         let (sx, sy) = if swapped { (y, x) } else { (x, y) };
-        if let Some(bucket) = cache.get_mut(bucket_idx) {
-            if bucket.get(&key).map_or(true, |&(_, _, sd)| depth < sd) {
-                bucket.insert(key, (sx, sy, depth));
-            }
+        if self.tc_cache.defeq_open_get(is_pos, bucket_idx, &key).map_or(true, |&(_, _, sd)| depth < sd) {
+            self.tc_cache.defeq_open_insert(is_pos, bucket_idx, key, (sx, sy, depth));
         }
     }
 
