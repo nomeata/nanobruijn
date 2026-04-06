@@ -225,12 +225,20 @@ impl<'p> ExportFile<'p> {
                     thread::Builder::new()
                         .name(format!("thread_{}", i))
                         .stack_size(crate::STACK_SIZE)
-                        .spawn_scoped(sco, || loop {
-                            let idx = task_num.fetch_add(1, Relaxed);
-                            if let Some((_, declar)) = self.declars.get_index(idx) {
-                                let _ = self.check_declar(declar);
-                            } else {
-                                break
+                        .spawn_scoped(sco, || {
+                            let mut reusable = crate::util::ReusableCaches::new();
+                            loop {
+                                let idx = task_num.fetch_add(1, Relaxed);
+                                if let Some((_, declar)) = self.declars.get_index(idx) {
+                                    if self.config.use_nanoda_tc {
+                                        let _ = self.check_declar_nanoda(declar);
+                                    } else {
+                                        let (_, r) = self.check_declar_shift(declar, reusable);
+                                        reusable = r;
+                                    }
+                                } else {
+                                    break
+                                }
                             }
                         })
                         .unwrap(),
