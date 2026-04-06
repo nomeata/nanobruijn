@@ -548,14 +548,14 @@ nested-let cascade. Together these handle all Init declarations.
   cross-depth hit benefit for Init. Profile and consider caching fvar_lb.
 
 - **Optimize local context adjustments under shift**: When `infer` or `whnf` operates
-  under a `shift`, the local context is temporarily adjusted (popping entries). The data
-  structures aren't well-suited for this. Key improvements:
+  under a `shift`, the local context is temporarily adjusted (popping entries via split_off).
+  DONE: Bundled local context + 7 per-depth caches into `DepthFrame` so split_off/extend
+  operates on 1 Vec instead of 8. Each frame uses `LazyMap` (8 bytes null, heap-allocates
+  on first insert). Remaining improvements:
   - Skip local context adjustment entirely when there's a cache hit (the result is already
     shifted, no need to reconstruct the context).
-  - Investigate better data structures for temporary local context/cache truncation (e.g.,
-    persistent data structures, versioned contexts).
-  - Consider whether caches and local context should live in the same data structure for
-    efficient co-truncation.
+  - Replace Vec<DepthFrame> split_off with a persistent/immutable data structure for O(1)
+    "pop k" + O(1) "restore k" without copying frames.
 
 - **Investigate always-let-in-context alternatives**: Current eager infer_let works but
   doesn't avoid O(N²) cascade for deep lets in infer. Options:
