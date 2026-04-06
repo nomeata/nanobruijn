@@ -553,6 +553,16 @@ nested-let cascade. Together these handle all Init declarations.
   These cascade: more def_eq → more whnf → more inst_beta → more expressions → lower cache
   hit rates → more def_eq. Breaking this cycle at any point helps.
 
+  **Root cause analysis** (ModuleCat._proof_4): nanoda resolves ALL 34,803 def_eq calls
+  at quick_check (dei=0/0) via pointer equality. Our TC has 41,464 def_eq_inner calls
+  (70% quick_check miss rate). These are NOT caused by eq_cache VFs (eliminating 96% of
+  VFs had zero effect on dei). They are genuinely novel expression pairs: different code
+  paths produce different DAG nodes for semantically equal expressions. In nanoda, fvars
+  ensure the same logical expression always has the same pointer. In our system, Shift
+  wrappers create different pointers at different depths, and different normalization paths
+  create different pointers even at the same depth. The cascade: 1.7x def_eq × 2.5x whnf
+  per def_eq = 4.2x whnf. inst_aux is 8.1x (=1.7x × 2x shift overhead per beta).
+
   **inst_aux analysis** (#63709, 221M calls vs nanoda 3.2M = 68x):
   - Shift node traversals: 2.4M (1.1%) — NOT the bottleneck
   - Cutoff mismatches: 2.0M (86% of Shift traversals)
@@ -572,6 +582,11 @@ nested-let cascade. Together these handle all Init declarations.
   - Size-bounded eager shift (resolve small vals, defer large ones)
   - Avoid creating Shift wrappers for subst vals consumed by whnf
   - Improve def_eq/infer cache hit rates to reduce operation count at the source
+  - Lowering push_shift_down_cutoff threshold from n_substs>=4 to n_substs>=1:
+    ATTEMPTED: Regressed ModuleCat by +31ms. Creates +69K DAG nodes, +91K mk_app
+    allocations. The per-call inst_cache is more efficient for n_substs=1 because it
+    avoids allocating new expression nodes. The persistent shift_down_cache only pays
+    off for n_substs>=4 where the cross-call sharing benefit outweighs allocation cost.
 
   **eq_cache overflow** (DONE): The eq_cache and failure_cache use canonical-hash keys
   with sem_eq verification. When two different expression pairs have the same canonical hash
@@ -601,9 +616,17 @@ nested-let cascade. Together these handle all Init declarations.
     pointer-identical expressions, not structurally-equivalent-at-different-depths.
   - **Full-hash for closed expressions**: No effect — most eq_cache entries are open (nlbv > 0).
 
-  The VFs are an inherent cost of shift-invariant caching. Reducing them requires either
-  (a) non-shift-invariant keys with a mechanism to recover cross-depth hits, or
-  (b) reducing the number of distinct shift-depths at which the same expression is queried.
+  **VFs are not causally significant**: Depth-specific eq_cache keys (mixing depth into
+  canonical hash) reduced VFs by 96% on ModuleCat (3674 → 146) but had ZERO effect on
+  def_eq count, dei, or any other metric besides eq_cache hit count. This proves VFs are
+  a symptom (wasted sem_eq work) not a cause of the def_eq cascade. The 41K def_eq inner
+  calls on ModuleCat are genuinely novel expression pairs that have never been compared
+  before (not cache misses due to VFs).
+
+  Cross-depth hits: 182K/1.66M (11%) across 70K segment — confirmed valuable.
+
+  The VFs are an inherent cost of shift-invariant caching. They waste ~2-5% of sem_eq
+  computation but do not cause algorithmic slowdowns.
 
 - **Investigate fvar_lb computation overhead**: fvar_lb-based bucketing regressed Init
   from 29s to 33s. The fvar_lb computation on every cache access may outweigh the
