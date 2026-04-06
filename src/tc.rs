@@ -628,9 +628,15 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         if let Expr::Shift { inner, amount, cutoff, .. } = self.ctx.read_expr(e) {
             if cutoff == 0 {
                 let new_depth = self.depth() - amount as usize;
+                self.ctx.trace.infer_shift_peel += 1;
+                self.ctx.trace.shift_peel_frames_total += amount as u64;
+                let t0 = std::time::Instant::now();
                 let saved = self.tc_cache.split_off(new_depth);
+                self.ctx.trace.shift_peel_nanos += t0.elapsed().as_nanos() as u64;
                 let inner_type = self.infer(inner, flag);
+                let t1 = std::time::Instant::now();
                 self.tc_cache.extend(saved);
+                self.ctx.trace.shift_peel_nanos += t1.elapsed().as_nanos() as u64;
                 return self.ctx.mk_shift(inner_type, amount);
             } else {
                 let forced = self.ctx.push_shift(inner, amount, cutoff);
@@ -1003,9 +1009,15 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                 return self.ctx.mk_shift(r, total_shift);
             }
             let new_depth = self.depth() - total_shift as usize;
+            self.ctx.trace.whnf_shift_peel += 1;
+            self.ctx.trace.shift_peel_frames_total += total_shift as u64;
+            let t0 = std::time::Instant::now();
             let saved = self.tc_cache.split_off(new_depth);
+            self.ctx.trace.shift_peel_nanos += t0.elapsed().as_nanos() as u64;
             let r = self.whnf(e);
+            let t1 = std::time::Instant::now();
             self.tc_cache.extend(saved);
+            self.ctx.trace.shift_peel_nanos += t1.elapsed().as_nanos() as u64;
             return self.ctx.mk_shift(r, total_shift);
         }
         // Stacked whnf cache: bucket 0 for closed, bucket (depth - fvar_lb) for open.
@@ -1182,14 +1194,19 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         }
         if total_shift > 0 {
             self.ctx.trace.wnu_shift_peel += 1;
+            self.ctx.trace.shift_peel_frames_total += total_shift as u64;
             if self.depth() == 0 {
                 let r = self.whnf_no_unfolding_aux(e, cheap_proj);
                 return self.ctx.push_shift(r, total_shift, 0);
             }
             let new_depth = self.depth() - total_shift as usize;
+            let t0 = std::time::Instant::now();
             let saved = self.tc_cache.split_off(new_depth);
+            self.ctx.trace.shift_peel_nanos += t0.elapsed().as_nanos() as u64;
             let r = self.whnf_no_unfolding_aux(e, cheap_proj);
+            let t1 = std::time::Instant::now();
             self.tc_cache.extend(saved);
+            self.ctx.trace.shift_peel_nanos += t1.elapsed().as_nanos() as u64;
             return self.ctx.push_shift(r, total_shift, 0);
         }
         // Iterative version: tail-recursive calls become loop iterations.

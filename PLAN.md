@@ -551,11 +551,19 @@ nested-let cascade. Together these handle all Init declarations.
   under a `shift`, the local context is temporarily adjusted (popping entries via split_off).
   DONE: Bundled local context + 7 per-depth caches into `DepthFrame` so split_off/extend
   operates on 1 Vec instead of 8. Each frame uses `LazyMap` (8 bytes null, heap-allocates
-  on first insert). Remaining improvements:
+  on first insert, 72 bytes per frame total).
+
+  **Measured split_off/extend cost** (630K-decl Mathlib subset, ~48s total):
+  - 77,378 total peels (26,674 infer + 21,980 whnf + 28,724 wnu)
+  - 466,240 total frames moved (avg 6.0 frames/peel, ~432 bytes/op)
+  - **3,394 microseconds total = 0.007% of runtime**
+  - Conclusion: Vec memcpy is negligible at current scale. Persistent data structures
+    (im_rc::Vector/RRB tree, Rc cons lists) not warranted — they'd add overhead from
+    pointer chasing and worse cache locality for n<200 elements.
+
+  Remaining improvement:
   - Skip local context adjustment entirely when there's a cache hit (the result is already
     shifted, no need to reconstruct the context).
-  - Replace Vec<DepthFrame> split_off with a persistent/immutable data structure for O(1)
-    "pop k" + O(1) "restore k" without copying frames.
 
 - **Investigate always-let-in-context alternatives**: Current eager infer_let works but
   doesn't avoid O(N²) cascade for deep lets in infer. Options:

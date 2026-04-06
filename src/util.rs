@@ -447,6 +447,10 @@ pub struct TcTrace {
     pub wnu_calls: u64,
     pub wnu_cache_hits: u64,
     pub wnu_shift_peel: u64,
+    pub infer_shift_peel: u64,
+    pub whnf_shift_peel: u64,
+    pub shift_peel_frames_total: u64,
+    pub shift_peel_nanos: u64,
     // whnf cache miss breakdown
     pub whnf_cache_no_bucket: u64,
     pub whnf_cache_no_entry: u64,
@@ -521,7 +525,7 @@ impl std::fmt::Display for TcTrace {
             self.shift_eq_aux_calls, self.shift_eq_struct_calls, self.shift_eq_pending_calls,
             self.shift_eq_ptr_eq_hits, self.shift_eq_pending_cache_hits)?;
         if self.zeta_reductions > 0 || self.whnf_let_reductions > 0 || self.wnu_calls > 0 {
-            write!(f, " | zeta={} wlet={} wbeta={} dag={} wnu={}/{}/{} wnu_miss={}/{}/{} wnuov={}/{}", self.zeta_reductions, self.whnf_let_reductions, self.whnf_beta_reductions, self.dag_size, self.wnu_calls, self.wnu_cache_hits, self.wnu_shift_peel, self.wnu_cache_no_bucket, self.wnu_cache_no_entry, self.wnu_cache_verify_fail, self.wnu_cache_overflow_stores, self.wnu_cache_overflow_hits)?;
+            write!(f, " | zeta={} wlet={} wbeta={} dag={} wnu={}/{}/{} wnu_miss={}/{}/{} wnuov={}/{} peel={}/{}/{}/{}f/{}us", self.zeta_reductions, self.whnf_let_reductions, self.whnf_beta_reductions, self.dag_size, self.wnu_calls, self.wnu_cache_hits, self.wnu_shift_peel, self.wnu_cache_no_bucket, self.wnu_cache_no_entry, self.wnu_cache_verify_fail, self.wnu_cache_overflow_stores, self.wnu_cache_overflow_hits, self.infer_shift_peel, self.whnf_shift_peel, self.wnu_shift_peel, self.shift_peel_frames_total, self.shift_peel_nanos / 1000)?;
         }
         if self.whnf_cache_verify_fail > 0 {
             write!(f, " | wmiss={}/{}/{} vf={}/{}/{} below_shift={}/{} sign_fix={} evict={} ov_store={} ov_hit={}", self.whnf_cache_no_bucket, self.whnf_cache_no_entry, self.whnf_cache_verify_fail, self.whnf_cache_vf_same, self.whnf_cache_vf_above, self.whnf_cache_vf_below, self.whnf_vf_below_is_shift, self.whnf_below_depth_hits, self.whnf_cache_vf_sign_would_fix, self.whnf_cache_vf_evictions, self.whnf_cache_overflow_stores, self.whnf_cache_overflow_hits)?;
