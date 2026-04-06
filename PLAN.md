@@ -1213,6 +1213,19 @@ may resolve some components, cached sub-equalities become available for cheap_eq
   - def_eq_app: 512K tried, 500K succeeded (97.6%)
   - eta/struct: 704
 
+Also skip second `def_eq_quick_check(x_n, y_n)` when `whnf_no_unfolding_cheap_proj` was a
+no-op (`x_n == x && y_n == y`), since first quick_check already failed on same expressions.
+
+**Profile hotspots** (Init, perf):
+- mk_app: 15.2% (DAG dedup hash+lookup on every App construction)
+- inst_aux: 8.6% (substitution traversal)
+- alloc_expr: 7.9% (indexmap lookup for DAG dedup)
+- whnf_no_unfolding_aux: 3.6%
+- unfold_apps: 1.9%, shift_eq_aux: 1.4%
+- All constant-factor overhead from Shift infrastructure
+
+mk_app DM cache doubling (1M→2M entries): +33% regression from L2/L3 cache pressure.
+
 ### Failed approaches (for reference)
 
 **Lazy beta reduction** (reverted): Instead of eagerly substituting in whnf beta, push args
