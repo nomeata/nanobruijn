@@ -501,7 +501,9 @@ impl<'p> ExportFile<'p> {
     where
         F: FnOnce(&mut TypeChecker<'_, '_, 'p>) -> A, {
         reusable.reset();
-        let mut dag = LeanDag::new(&self.config);
+        // Pre-size the per-declaration dag to avoid rehash overhead.
+        // 16K covers most declarations; larger ones still grow dynamically.
+        let mut dag = LeanDag::with_capacity(&self.config, 16384);
         let mut ctx = TcCtx::new(self, &mut dag, reusable);
         let env = self.new_env(EnvLimit::ByName(d.name));
         let mut tc = TypeChecker::new(&mut ctx, &env, Some(d));
@@ -858,6 +860,14 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         } else {
             Ptr::from(DagMarker::TcCtx, self.dag.exprs.insert_full(e).0)
         }
+    }
+
+    /// Like alloc_expr but skips the export_file lookup. Used when the expression
+    /// contains TcCtx pointers (the export_file can't contain such expressions).
+    #[inline(always)]
+    fn alloc_expr_tc(&mut self, e: Expr<'t>) -> ExprPtr<'t> {
+        self.trace.alloc_expr_calls += 1;
+        Ptr::from(DagMarker::TcCtx, self.dag.exprs.insert_full(e).0)
     }
 
     /// Store a string (a `CowStr`), getting back a pointer to the allocated item. If the item was
@@ -1240,17 +1250,31 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
     }
 
     pub fn mk_app(&mut self, fun: ExprPtr<'t>, arg: ExprPtr<'t>) -> ExprPtr<'t> {
-        // Direct-mapped cache (only allocated for heavy declarations)
+        // 2-way set-associative cache (only allocated for heavy declarations)
         let tag = fun.get_hash().wrapping_mul(0x9e3779b97f4a7c15) ^ arg.get_hash();
         let dm_len = self.expr_cache.mk_app_dm_cache.len();
         if dm_len > 0 {
-            let slot = (tag as usize) & (dm_len - 1);
-            let (cached_tag, cached_result) = self.expr_cache.mk_app_dm_cache[slot];
-            if cached_tag == tag {
-                if let Expr::App { fun: cf, arg: ca, .. } = self.read_expr(cached_result) {
+            let set = (tag as usize) & ((dm_len >> 1) - 1);
+            let slot0 = set << 1;
+            let slot1 = slot0 | 1;
+            let (tag0, result0) = self.expr_cache.mk_app_dm_cache[slot0];
+            if tag0 == tag {
+                if let Expr::App { fun: cf, arg: ca, .. } = self.read_expr(result0) {
                     if cf == fun && ca == arg {
                         self.trace.alloc_mk_app_cache_hit += 1;
-                        return cached_result;
+                        return result0;
+                    }
+                }
+            }
+            let (tag1, result1) = self.expr_cache.mk_app_dm_cache[slot1];
+            if tag1 == tag {
+                if let Expr::App { fun: cf, arg: ca, .. } = self.read_expr(result1) {
+                    if cf == fun && ca == arg {
+                        self.trace.alloc_mk_app_cache_hit += 1;
+                        // Promote to slot0 (MRU)
+                        self.expr_cache.mk_app_dm_cache[slot0] = (tag1, result1);
+                        self.expr_cache.mk_app_dm_cache[slot1] = (tag0, result0);
+                        return result1;
                     }
                 }
             }
@@ -1263,19 +1287,27 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         let has_fvars = fun_e.has_fvars() || arg_e.has_fvars();
         let struct_hash = hash64!(crate::expr::APP_HASH, fun_e.get_struct_hash(), arg_e.get_struct_hash());
         let fvar_list = self.fvar_union(fun_e.get_fvar_list(), arg_e.get_fvar_list());
-        let result = self.alloc_expr(Expr::App { fun, arg, num_loose_bvars, has_fvars, hash, struct_hash, fvar_list });
+        let app_expr = Expr::App { fun, arg, num_loose_bvars, has_fvars, hash, struct_hash, fvar_list };
+        let result = if fun.dag_marker() == DagMarker::TcCtx || arg.dag_marker() == DagMarker::TcCtx {
+            self.alloc_expr_tc(app_expr)
+        } else {
+            self.alloc_expr(app_expr)
+        };
         // Lazily allocate DM cache after enough misses to justify 16MB
         if dm_len == 0 {
             self.expr_cache.mk_app_miss_count += 1;
             if self.expr_cache.mk_app_miss_count >= MK_APP_DM_THRESHOLD {
                 let dummy: ExprPtr<'t> = Ptr::from(DagMarker::ExportFile, 0);
                 self.expr_cache.mk_app_dm_cache.resize(MK_APP_CACHE_SIZE, (0, dummy));
-                let slot = (tag as usize) & (MK_APP_CACHE_SIZE - 1);
-                self.expr_cache.mk_app_dm_cache[slot] = (tag, result);
+                let set = (tag as usize) & ((MK_APP_CACHE_SIZE >> 1) - 1);
+                self.expr_cache.mk_app_dm_cache[set << 1] = (tag, result);
             }
         } else {
-            let slot = (tag as usize) & (MK_APP_CACHE_SIZE - 1);
-            self.expr_cache.mk_app_dm_cache[slot] = (tag, result);
+            let set = (tag as usize) & ((MK_APP_CACHE_SIZE >> 1) - 1);
+            let slot0 = set << 1;
+            // Evict slot1, move slot0 → slot1, put new in slot0
+            self.expr_cache.mk_app_dm_cache[slot0 | 1] = self.expr_cache.mk_app_dm_cache[slot0];
+            self.expr_cache.mk_app_dm_cache[slot0] = (tag, result);
         }
         result
     }
@@ -1300,7 +1332,12 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         let struct_hash = hash64!(crate::expr::LAMBDA_HASH, binder_name, binder_style, ty_e.get_struct_hash(), body_e.get_struct_hash());
         let body_free_fvl = self.fvar_unbind(body_e.get_fvar_list());
         let fvar_list = self.fvar_union(ty_e.get_fvar_list(), body_free_fvl);
-        let result = self.alloc_expr(Expr::Lambda { binder_name, binder_style, binder_type, body, num_loose_bvars, has_fvars, hash, struct_hash, fvar_list });
+        let lambda_expr = Expr::Lambda { binder_name, binder_style, binder_type, body, num_loose_bvars, has_fvars, hash, struct_hash, fvar_list };
+        let result = if binder_type.dag_marker() == DagMarker::TcCtx || body.dag_marker() == DagMarker::TcCtx {
+            self.alloc_expr_tc(lambda_expr)
+        } else {
+            self.alloc_expr(lambda_expr)
+        };
         self.expr_cache.mk_lambda_cache.insert(key, result);
         result
     }
@@ -1325,7 +1362,12 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         let struct_hash = hash64!(crate::expr::PI_HASH, binder_name, binder_style, ty_e.get_struct_hash(), body_e.get_struct_hash());
         let body_free_fvl = self.fvar_unbind(body_e.get_fvar_list());
         let fvar_list = self.fvar_union(ty_e.get_fvar_list(), body_free_fvl);
-        let result = self.alloc_expr(Expr::Pi { binder_name, binder_style, binder_type, body, num_loose_bvars, has_fvars, hash, struct_hash, fvar_list });
+        let pi_expr = Expr::Pi { binder_name, binder_style, binder_type, body, num_loose_bvars, has_fvars, hash, struct_hash, fvar_list };
+        let result = if binder_type.dag_marker() == DagMarker::TcCtx || body.dag_marker() == DagMarker::TcCtx {
+            self.alloc_expr_tc(pi_expr)
+        } else {
+            self.alloc_expr(pi_expr)
+        };
         self.expr_cache.mk_pi_cache.insert(key, result);
         result
     }
@@ -1354,7 +1396,12 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         let body_free_fvl = self.fvar_unbind(body_e.get_fvar_list());
         let tv_fvl = self.fvar_union(ty_fvl, val_fvl);
         let fvar_list = self.fvar_union(tv_fvl, body_free_fvl);
-        self.alloc_expr(Expr::Let { binder_name, binder_type, val, body, num_loose_bvars, has_fvars, hash, nondep, struct_hash, fvar_list })
+        let let_expr = Expr::Let { binder_name, binder_type, val, body, num_loose_bvars, has_fvars, hash, nondep, struct_hash, fvar_list };
+        if binder_type.dag_marker() == DagMarker::TcCtx || val.dag_marker() == DagMarker::TcCtx || body.dag_marker() == DagMarker::TcCtx {
+            self.alloc_expr_tc(let_expr)
+        } else {
+            self.alloc_expr(let_expr)
+        }
     }
 
     pub fn mk_proj(&mut self, ty_name: NamePtr<'t>, idx: u32, structure: ExprPtr<'t>) -> ExprPtr<'t> {
@@ -1365,7 +1412,11 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         let has_fvars = s_e.has_fvars();
         let struct_hash = hash64!(crate::expr::PROJ_HASH, ty_name, idx, s_e.get_struct_hash());
         let fvar_list = s_e.get_fvar_list();
-        self.alloc_expr(Expr::Proj { ty_name, idx, structure, num_loose_bvars, has_fvars, hash, struct_hash, fvar_list })
+        if structure.dag_marker() == DagMarker::TcCtx {
+            self.alloc_expr_tc(Expr::Proj { ty_name, idx, structure, num_loose_bvars, has_fvars, hash, struct_hash, fvar_list })
+        } else {
+            self.alloc_expr(Expr::Proj { ty_name, idx, structure, num_loose_bvars, has_fvars, hash, struct_hash, fvar_list })
+        }
     }
 
     pub fn mk_string_lit(&mut self, string_ptr: StringPtr<'t>) -> Option<ExprPtr<'t>> {
@@ -1521,7 +1572,8 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         let struct_hash = inner_expr.get_struct_hash();
         let fvar_list = self.fvar_shift_cutoff(inner_fvl, amount, cutoff);
         let new_nlbv = (nlbv as i16 + amount).max(0) as u16;
-        let result = self.alloc_expr(Expr::Shift { hash, struct_hash, fvar_list, inner, amount, cutoff, num_loose_bvars: new_nlbv, has_fvars });
+        // Shift nodes never exist in the export_file dag — always use tc-only alloc.
+        let result = self.alloc_expr_tc(Expr::Shift { hash, struct_hash, fvar_list, inner, amount, cutoff, num_loose_bvars: new_nlbv, has_fvars });
         self.expr_cache.shift_dedup.insert(dedup_key, result);
         result
     }
@@ -1759,14 +1811,26 @@ impl<'a> LeanDag<'a> {
     /// So when creating a new parser, we need to begin by placing `Anon` and `Zero` in the 0th position
     /// of their backing storage, satisfying the exporter's assumption.
     pub fn new(config: &Config) -> Self {
+        Self::with_capacity(config, 0)
+    }
+
+    pub fn with_capacity(config: &Config, expr_capacity: usize) -> Self {
         let mut out = Self {
             names: new_unique_index_set(),
             levels: new_unique_index_set(),
-            exprs: new_unique_index_set(),
+            exprs: if expr_capacity > 0 {
+                IndexSet::with_capacity_and_hasher(expr_capacity, Default::default())
+            } else {
+                new_unique_index_set()
+            },
             uparams: new_fx_index_set(),
             strings: new_fx_index_set(),
             bignums: if config.nat_extension { Some(new_fx_index_set()) } else { None },
-            fvarlists: new_unique_index_set(),
+            fvarlists: if expr_capacity > 0 {
+                IndexSet::with_capacity_and_hasher(expr_capacity / 2, Default::default())
+            } else {
+                new_unique_index_set()
+            },
         };
 
         let _ = out.names.insert(Name::Anon);

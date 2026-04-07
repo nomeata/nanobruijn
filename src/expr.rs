@@ -335,7 +335,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         if sh_amt > 0 && shift_down && sh_amt == n_substs as i16 && sh_cut == offset {
             self.trace.inst_aux_shift_skip_clean += 1;
             self.trace.inst_aux_elided += 1;
-            self.expr_cache.inst_cache.insert(cache_key, e);
+            self.expr_cache.inst_cache.insert(cache_key,e);
             return e;
         }
         // More general case: shift pushes vars past substitution range but sh_amt > n_substs
@@ -352,7 +352,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
                 self.mk_shift_cutoff(e, sh_amt, sh_cut)
             };
             self.trace.inst_aux_elided += 1;
-            self.expr_cache.inst_cache.insert(cache_key, r);
+            self.expr_cache.inst_cache.insert(cache_key,r);
             return r;
         }
 
@@ -366,7 +366,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
             let lb = self.fvar_lb(fvl);
             if lb >= offset + n_substs {
                 let r = self.push_shift_down_cutoff(e, n_substs, offset);
-                self.expr_cache.inst_cache.insert(cache_key, r);
+                self.expr_cache.inst_cache.insert(cache_key,r);
                 return r;
             }
         }
@@ -383,7 +383,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
                     // Compose shifts when cutoffs match: Shift(inner, a2, c) with pending (a1, c) = (a1+a2, c)
                     if cutoff == sh_cut {
                         let r = self.inst_aux(inner, substs, offset, shift_down, sh_amt + amount, sh_cut);
-                        self.expr_cache.inst_cache.insert(cache_key, r);
+                        self.expr_cache.inst_cache.insert(cache_key,r);
                         return r;
                     }
                     // Compose when inner shift moves all vars past outer cutoff:
@@ -393,14 +393,14 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
                     if cutoff < sh_cut && amount >= (sh_cut - cutoff) as i16 {
                         self.trace.inst_aux_shift_compose += 1;
                         let r = self.inst_aux(inner, substs, offset, shift_down, sh_amt + amount, cutoff);
-                        self.expr_cache.inst_cache.insert(cache_key, r);
+                        self.expr_cache.inst_cache.insert(cache_key,r);
                         return r;
                     }
                     // Different cutoffs where composition doesn't work: push the inner shift, then apply outer
                     self.trace.inst_aux_shift_mismatch += 1;
                     let forced = self.push_shift(inner, amount, cutoff);
                     let r = self.inst_aux(forced, substs, offset, shift_down, sh_amt, sh_cut);
-                    self.expr_cache.inst_cache.insert(cache_key, r);
+                    self.expr_cache.inst_cache.insert(cache_key,r);
                     return r;
                 }
                 Var { dbj_idx, .. } => {
@@ -461,7 +461,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
                     // Instead of creating Shift wrappers for children, carry the shift
                     // as parameters and recurse directly on inner's children.
                     let r = self.inst_aux(inner, substs, offset, shift_down, amount, cutoff);
-                    self.expr_cache.inst_cache.insert(cache_key, r);
+                    self.expr_cache.inst_cache.insert(cache_key,r);
                     return r;
                 }
                 Var { dbj_idx, .. } => {
@@ -507,7 +507,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
                 }
             }
         };
-        self.expr_cache.inst_cache.insert(cache_key, calcd);
+        self.expr_cache.inst_cache.insert(cache_key,calcd);
         calcd
     }
 

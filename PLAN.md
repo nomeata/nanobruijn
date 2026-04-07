@@ -150,9 +150,18 @@ Fixed worst outliers: #298261 from 11.5s to 830ms, #357120 from 2.3s to 85ms.
 - `GenCache`: generation-counted direct-mapped caches, pre-allocated once, reused across
   declarations via O(1) generation bump. Eliminated 13.6% Init overhead from per-declaration
   memset of shift_eq caches.
-- mk_var Vec cache (O(1) lookup by index) and direct-mapped mk_app cache (1M entries,
-  lazily allocated after 10K misses). Eliminated billions of hash table lookups on
-  pathological declarations.
+- mk_var Vec cache (O(1) lookup by index) and 2-way set-associative mk_app cache (1M entries,
+  lazily allocated after 10K misses). On hit in way-1, promote to way-0 (MRU). On miss,
+  evict way-1, move way-0→way-1, insert in way-0. Eliminated billions of hash table lookups
+  on pathological declarations.
+- `alloc_expr_tc`: When any child has `DagMarker::TcCtx`, the expression cannot exist in the
+  export_file dag (PartialEq compares pointer fields, and export_file contains only ExportFile
+  pointers). Skips the export_file IndexSet lookup entirely — avoids ~100M L3-miss-inducing
+  probes per Init run. Used in mk_app, mk_lambda, mk_pi, mk_let, mk_proj (conditional on
+  children), and mk_shift_cutoff (unconditional — Shift nodes never exist in export_file).
+  **19.4% improvement on Init, ~20% on Mathlib 10K.**
+- Pre-sized per-declaration dag: `LeanDag::with_capacity(16384)` eliminates hashbrown rehash
+  overhead (was 2.3% of runtime from repeated doublings during declaration checking).
 
 ## Results
 
@@ -195,8 +204,8 @@ more whnf/infer calls → more inst calls → more mk_app/mk_var calls.
 Per-operation cost is ~2.2x nanoda's, from shift_eq calls, extra expression nodes from
 Shift infrastructure, and fvar_union/fvar_shift_cutoff on every mk_app/pi/lambda.
 
-Profile hotspots (Init): mk_app 15.2%, inst_aux 8.6%, alloc_expr 7.9%,
-whnf_no_unfolding_aux 3.6%.
+Profile hotspots (Init, post alloc_expr_tc): mk_app 15.3%, inst_aux 8.6%, alloc_expr 7.6%,
+indexmap insert_full 5.0%, whnf_no_unfolding_aux 3.6%.
 
 ## Paths not taken
 
@@ -230,10 +239,13 @@ These approaches were tried and found counterproductive or unsound:
   preserves structural identity, so lookups find the same entry forever).
 - **Depth-sensitive canonical hash** (mixing shift amount into hash): Eliminates cross-depth
   verify-fails but loses 11% of valuable cross-depth cache hits. Net regression.
+- **inst_cache DM cache (64K, generation-counted)**: Replacing per-call HashMap with a
+  direct-mapped cache. 1.8% slower — the DM cache is in L2/L3 territory (1.3MB), while the
+  per-call HashMap is small and stays in L1.
+- **Lowering shift-down-only threshold to n_substs >= 1**: 0.4% slower due to HashMap overhead.
 - **Various micro-optimizations**: Identity checks in subst_aux/push_shift (branch overhead),
-  struct_hash early rejection in shift_eq (most calls are positive matches), pre-sizing DAG
-  IndexSet (wasted allocation for small declarations), mk_app DM cache doubling (L2/L3
-  cache pressure).
+  struct_hash early rejection in shift_eq (most calls are positive matches), mk_app DM cache
+  doubling (L2/L3 cache pressure).
 - **Speculative Pi/Lambda congruence**: push_local overhead is negligible (0.007% of runtime);
   sem_eq on bodies already tried in quick_check.
 
