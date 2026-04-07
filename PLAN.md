@@ -180,19 +180,9 @@ Fixed worst outliers: #298261 from 11.5s to 830ms, #357120 from 2.3s to 85ms.
 
 | Benchmark | nanoda | nanobruijn | Ratio |
 |-----------|--------|------------|-------|
-| Init (54k decls, 310MB) | 26s | 27s | 1.04x |
+| Init (54k decls, 310MB) | 26s | 21s | 0.81x |
 | app-lam N=4000 | 8.3s | 10ms | 0.001x |
-| Mathlib (630k decls, 4.9GB) | 978s | 1317s | **1.35x** |
-
-Timing at checkpoints:
-| Declarations | nanobruijn | Nanoda | Ratio |
-|-------------|------------|--------|-------|
-| 100K | 140s | 115s | 1.22x |
-| 200K | 356s | 267s | 1.33x |
-| 300K | 632s | 455s | 1.39x |
-| 400K | 880s | 663s | 1.33x |
-| 500K | 1112s | 822s | 1.35x |
-| 600K | 1270s | 942s | 1.35x |
+| Mathlib (630k decls, 4.9GB) | 978s | 1053s | **1.08x** |
 
 ### Gap analysis
 
@@ -210,10 +200,11 @@ more whnf/infer calls → more inst calls → more mk_app/mk_var calls.
 Per-operation cost is ~2.2x nanoda's, from shift_eq calls, extra expression nodes from
 Shift infrastructure, and fvar_union/fvar_shift_cutoff on every mk_app/pi/lambda.
 
-Profile hotspots (Init, post DM cache right-sizing): mk_app 13.4%, inst_aux 9.3%,
-insert_full 7.2%, alloc_expr 3.9%, subst_aux 3.4%, whnf_no_unfolding 3.2%,
-unfold_apps 3.2%, HashMap::insert 5.6%, view_expr 2.2%, shift_eq_aux 2.1%,
-_int_free 2.1%, canonical_hash 1.7%.
+Profile hotspots (Init, post SmallVec/subst_aux opts): mk_app 13.6%, inst_aux 10.4%,
+insert_full 7.4%, whnf_no_unfolding 3.7%, HashMap::insert 3.6%, alloc_expr 3.4%,
+unfold_apps 3.3%, subst_aux 3.3%, infer_inner 2.8%, view_expr 2.6%,
+shift_eq_aux 2.4%, canonical_hash 1.6%, reserve_rehash 2.7% (total, 3 instances),
+mk_lambda 1.3%, ChainMap::get_chain 1.3%.
 
 ## Paths not taken
 
@@ -268,6 +259,10 @@ These approaches were tried and found counterproductive or unsound:
 - **shift_eq GenCache reduction** (64K entries): 2x regression on Mathlib. 256K was marginal,
   1M is required for heavy declarations.
 - **PGO (Profile-Guided Optimization)**: <1% improvement on Init. Not worth the build complexity.
+- **ExprCache reuse across declarations** (with shrink_to cap): 8% regression on Mathlib 100K.
+  Same root cause as ExprCache reuse without cap — HashMap capacity from previous declarations
+  creates L1/L2 cache pressure even after shrinking. The allocation cost of fresh ExprCache
+  per declaration is cheaper than the cache pressure from reused capacity.
 
 ## TODO
 

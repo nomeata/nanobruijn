@@ -465,7 +465,7 @@ impl ReusableDag {
 }
 
 pub const MK_APP_CACHE_SIZE: usize = 1 << 16; // 64K entries (1MB)
-pub const MK_APP_DM_THRESHOLD: u32 = 10_000; // allocate DM cache after this many misses
+pub const MK_APP_DM_THRESHOLD: u32 = 1_000; // allocate DM cache after this many misses
 
 pub struct ExportFile<'p> {
     /// The underlying storage for `Name`, `Level`, and `Expr` items (and Strings).
