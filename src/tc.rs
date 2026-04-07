@@ -1206,6 +1206,33 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                             break;
                         }
                     }
+                    // Below-depth hit: conservative O(1) adjustment only
+                    if cur_depth < stored_depth {
+                        let abs_delta = (stored_depth - cur_depth) as i16;
+                        let result_nlbv = self.ctx.num_loose_bvars(stored_result);
+                        let usable = if result_nlbv == 0 {
+                            true
+                        } else if stored_result == stored_input {
+                            true
+                        } else if let Expr::Shift { amount, cutoff: 0, .. } = self.ctx.read_expr(stored_result) {
+                            amount >= abs_delta
+                        } else {
+                            false
+                        };
+                        if usable && self.ctx.shift_eq(cur, stored_input, abs_delta) {
+                            self.ctx.trace.wnu_cache_hits += 1;
+                            if ci > 0 { self.ctx.trace.wnu_cache_overflow_hits += 1; }
+                            wnu_hit = true;
+                            if result_nlbv == 0 {
+                                cur = stored_result;
+                            } else if stored_result == stored_input {
+                                cur = cur; // identity (no-op)
+                            } else if let Expr::Shift { inner, amount, cutoff: 0, .. } = self.ctx.read_expr(stored_result) {
+                                cur = self.ctx.mk_shift(inner, amount - abs_delta);
+                            }
+                            break;
+                        }
+                    }
                 }
                 if wnu_hit { break cur; }
                 self.ctx.trace.wnu_cache_verify_fail += 1;
