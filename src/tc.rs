@@ -7,6 +7,7 @@ use crate::util::{
     nat_xor, nat_shr, nat_shl, CacheKey, ExportFile, ExprPtr, LevelPtr,
     LevelsPtr, NamePtr, TcCache, TcCtx, StringPtr, WhnfSlot
 };
+use smallvec::SmallVec;
 use std::error::Error;
 
 use num_traits::pow::Pow;
@@ -669,59 +670,26 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         };
         let canon = self.ctx.canonical_hash(e);
         let is_check = flag == InferFlag::Check;
-        // Infer cache lookup: primary + overflow, same pattern as whnf cache.
-        let primary_infer = self.tc_cache.infer_cache_get(bucket_idx, &canon).copied();
-        let overflow_infer = self.tc_cache.infer_cache_overflow_get(bucket_idx, &canon).copied();
-        if let Some((stored_input, stored_result, stored_depth, checked)) = primary_infer {
+        // Infer cache lookup: scan chain.
+        let infer_chain: SmallVec<[(ExprPtr<'t>, ExprPtr<'t>, u16, bool); 2]> = SmallVec::from_slice(
+            self.tc_cache.infer_cache_chain(bucket_idx, &canon));
+        if !infer_chain.is_empty() {
             self.ctx.trace.infer_cache_hash_hit += 1;
-            if !checked && is_check {
-                // Check flag mismatch — try overflow before giving up
-                if let Some((si2, sr2, sd2, ch2)) = overflow_infer {
-                    if let Some(r) = self.try_infer_cache_hit(e, si2, sr2, sd2, depth, ch2, is_check) {
-                        self.ctx.trace.infer_cache_hits += 1;
-                        self.ctx.trace.infer_cache_overflow_hits += 1;
-                        return r;
+            for (ci, &(stored_input, stored_result, stored_depth, checked)) in infer_chain.iter().enumerate() {
+                if let Some(r) = self.try_infer_cache_hit(e, stored_input, stored_result, stored_depth, depth, checked, is_check) {
+                    self.ctx.trace.infer_cache_hits += 1;
+                    if ci > 0 { self.ctx.trace.infer_cache_overflow_hits += 1; }
+                    // On same-depth hit: replace entry's input ptr for future ptr_eq lookups.
+                    // On above-depth hit: do NOT replace — keep the low-depth canonical entry.
+                    if stored_depth == depth && stored_input != e {
+                        if let Some(slot) = self.tc_cache.infer_cache_get_mut(bucket_idx, &canon, ci) {
+                            *slot = (e, r, depth, is_check || checked);
+                        }
                     }
+                    return r;
                 }
-                self.ctx.trace.infer_cache_verify_fail += 1;
-                self.ctx.trace.infer_cache_vf_check_flag += 1;
-            } else if let Some(r) = self.try_infer_cache_hit(e, stored_input, stored_result, stored_depth, depth, checked, is_check) {
-                self.ctx.trace.infer_cache_hits += 1;
-                // On same-depth hit: replace primary input ptr for future ptr_eq lookups.
-                // On above-depth hit: do NOT replace — keep the low-depth canonical entry,
-                // which infer_cache_store deliberately preserves for cross-depth reuse.
-                if stored_depth == depth && stored_input != e {
-                    if let Some(slot) = self.tc_cache.infer_cache_get_mut(bucket_idx, &canon) {
-                        *slot = (e, r, depth, is_check || checked);
-                    }
-                }
-                return r;
-            } else {
-                // Primary verify failed — categorize and try overflow
-                if stored_depth == depth {
-                    self.ctx.trace.infer_cache_vf_same += 1;
-                } else if depth > stored_depth {
-                    self.ctx.trace.infer_cache_vf_above += 1;
-                } else {
-                    self.ctx.trace.infer_cache_vf_below += 1;
-                    // Check if this is a true shift variant (reverse direction)
-                    let delta = stored_depth - depth;
-                    if self.ctx.shift_eq(e, stored_input, delta) {
-                        self.ctx.trace.infer_vf_below_is_shift += 1;
-                    }
-                }
-                if self.ctx.nlbv_sign(e) != self.ctx.nlbv_sign(stored_input) {
-                    self.ctx.trace.infer_cache_vf_sign_would_fix += 1;
-                }
-                if let Some((si2, sr2, sd2, ch2)) = overflow_infer {
-                    if let Some(r) = self.try_infer_cache_hit(e, si2, sr2, sd2, depth, ch2, is_check) {
-                        self.ctx.trace.infer_cache_hits += 1;
-                        self.ctx.trace.infer_cache_overflow_hits += 1;
-                        return r;
-                    }
-                }
-                self.ctx.trace.infer_cache_verify_fail += 1;
             }
+            self.ctx.trace.infer_cache_verify_fail += 1;
         }
         let r = match self.ctx.read_expr(e) {
             Local { binder_type, .. } => binder_type,
@@ -775,31 +743,33 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         None
     }
 
-    /// Store an infer result in the primary + overflow cache.
+    /// Store an infer result in the chained cache.
     fn infer_cache_store(&mut self, bucket_idx: usize, canon: CacheKey, e: ExprPtr<'t>, r: ExprPtr<'t>, depth: u16, is_check: bool) {
-        if let Some(slot) = self.tc_cache.infer_cache_get_mut(bucket_idx, &canon) {
-            if slot.0 == e { return; }
-            // Check if same shift-family
-            let sd = slot.2;
+        let chain: SmallVec<[(ExprPtr<'t>, ExprPtr<'t>, u16, bool); 2]> = SmallVec::from_slice(
+            self.tc_cache.infer_cache_chain(bucket_idx, &canon));
+        for (ci, &(si, _sr, sd, sc)) in chain.iter().enumerate() {
+            if si == e { return; }
             let is_family = if depth == sd {
-                self.ctx.sem_eq(slot.0, e)
+                self.ctx.sem_eq(si, e)
             } else if depth > sd {
-                self.ctx.shift_eq(slot.0, e, depth - sd)
+                self.ctx.shift_eq(si, e, depth - sd)
             } else {
-                self.ctx.shift_eq(e, slot.0, sd - depth)
+                self.ctx.shift_eq(e, si, sd - depth)
             };
             if is_family {
                 // Same family — prefer checked, then lower depth
-                let dominated = (is_check && !slot.3) || (is_check == slot.3 && depth < sd);
-                if dominated { *slot = (e, r, depth, is_check); }
+                let dominated = (is_check && !sc) || (is_check == sc && depth < sd);
+                if dominated {
+                    if let Some(slot) = self.tc_cache.infer_cache_get_mut(bucket_idx, &canon, ci) {
+                        *slot = (e, r, depth, is_check);
+                    }
+                }
                 return;
             }
-            // Different family — store in overflow
-            self.ctx.trace.infer_cache_overflow_stores += 1;
-            self.tc_cache.infer_cache_overflow_insert(bucket_idx, canon, (e, r, depth, is_check));
-        } else {
-            self.tc_cache.infer_cache_insert(bucket_idx, canon, (e, r, depth, is_check));
         }
+        // No matching family — append
+        if !chain.is_empty() { self.ctx.trace.infer_cache_overflow_stores += 1; }
+        self.tc_cache.infer_cache_push(bucket_idx, canon, (e, r, depth, is_check));
     }
 
     fn infer_sort(&mut self, l: LevelPtr<'t>, flag: InferFlag) -> ExprPtr<'t> {
@@ -1043,46 +1013,22 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             let e_lb = self.ctx.fvar_lb(self.ctx.read_expr(e).get_fvar_list());
             (depth - e_lb) as usize
         };
-        // Look up in whnf cache (primary + overflow).
-        // Copy slot data to release borrow before calling methods on self.
-        let primary_slot: Option<WhnfSlot<'t>> =
-            self.tc_cache.whnf_cache_get(whnf_bucket_idx, &canon).copied();
-        let overflow_slot: Option<WhnfSlot<'t>> =
-            self.tc_cache.whnf_cache_overflow_get(whnf_bucket_idx, &canon).copied();
-        if let Some((stored_input, stored_result, stored_depth)) = primary_slot {
-            if let Some(result) = self.try_whnf_cache_hit(e, stored_input, stored_result, stored_depth, depth) {
-                self.ctx.trace.whnf_cache_hits += 1;
-                // On same-depth hit: replace primary input ptr for future ptr_eq lookups.
-                // On above-depth hit: do NOT replace — keep the low-depth canonical entry,
-                // which whnf_cache_store deliberately preserves for cross-depth reuse.
-                if stored_depth == depth && stored_input != e {
-                    if let Some(slot) = self.tc_cache.whnf_cache_get_mut(whnf_bucket_idx, &canon) {
-                        *slot = (e, result, depth);
-                    }
-                }
-                return result;
-            }
-            // Primary miss — categorize and try overflow
-            if stored_depth == depth {
-                self.ctx.trace.whnf_cache_vf_same += 1;
-            } else if depth > stored_depth {
-                self.ctx.trace.whnf_cache_vf_above += 1;
-            } else {
-                self.ctx.trace.whnf_cache_vf_below += 1;
-                // Check if this is a true shift variant (reverse direction)
-                let delta = stored_depth - depth;
-                if self.ctx.shift_eq(e, stored_input, delta) {
-                    self.ctx.trace.whnf_vf_below_is_shift += 1;
-                }
-            }
-            // Check if nlbv_sign would have discriminated this collision
-            if self.ctx.nlbv_sign(e) != self.ctx.nlbv_sign(stored_input) {
-                self.ctx.trace.whnf_cache_vf_sign_would_fix += 1;
-            }
-            if let Some((stored_input2, stored_result2, stored_depth2)) = overflow_slot {
-                if let Some(result) = self.try_whnf_cache_hit(e, stored_input2, stored_result2, stored_depth2, depth) {
+        // Look up in whnf cache chain.
+        // Copy chain entries to release borrow before calling methods on self.
+        let chain: SmallVec<[WhnfSlot<'t>; 2]> = SmallVec::from_slice(
+            self.tc_cache.whnf_cache_chain(whnf_bucket_idx, &canon));
+        if !chain.is_empty() {
+            for (ci, &(stored_input, stored_result, stored_depth)) in chain.iter().enumerate() {
+                if let Some(result) = self.try_whnf_cache_hit(e, stored_input, stored_result, stored_depth, depth) {
                     self.ctx.trace.whnf_cache_hits += 1;
-                    self.ctx.trace.whnf_cache_overflow_hits += 1;
+                    if ci > 0 { self.ctx.trace.whnf_cache_overflow_hits += 1; }
+                    // On same-depth hit: replace entry's input ptr for future ptr_eq lookups.
+                    // On above-depth hit: do NOT replace — keep the low-depth canonical entry.
+                    if stored_depth == depth && stored_input != e {
+                        if let Some(slot) = self.tc_cache.whnf_cache_get_mut(whnf_bucket_idx, &canon, ci) {
+                            *slot = (e, result, depth);
+                        }
+                    }
                     return result;
                 }
             }
@@ -1152,32 +1098,33 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         None
     }
 
-    /// Store a whnf result in the primary + overflow cache.
+    /// Store a whnf result in the chained cache.
     fn whnf_cache_store(&mut self, bucket_idx: usize, canon: CacheKey, e: ExprPtr<'t>, result: ExprPtr<'t>, depth: u16) {
         let new_slot: WhnfSlot<'t> = (e, result, depth);
-        if let Some(slot) = self.tc_cache.whnf_cache_get_mut(bucket_idx, &canon) {
-            // Same pointer — already stored
-            if slot.0 == e { return; }
-            // Check if same shift-family using shift_eq (with pointer-eq fast path)
-            let sd = slot.2;
+        let chain: SmallVec<[WhnfSlot<'t>; 2]> = SmallVec::from_slice(
+            self.tc_cache.whnf_cache_chain(bucket_idx, &canon));
+        for (ci, &(si, _sr, sd)) in chain.iter().enumerate() {
+            if si == e { return; } // already stored
             let is_family = if depth == sd {
-                self.ctx.sem_eq(slot.0, e)
+                self.ctx.sem_eq(si, e)
             } else if depth > sd {
-                self.ctx.shift_eq(slot.0, e, depth - sd)
+                self.ctx.shift_eq(si, e, depth - sd)
             } else {
-                self.ctx.shift_eq(e, slot.0, sd - depth)
+                self.ctx.shift_eq(e, si, sd - depth)
             };
             if is_family {
                 // Same family — prefer the lowest depth (canonical representative)
-                if depth < sd { *slot = new_slot; }
+                if depth < sd {
+                    if let Some(slot) = self.tc_cache.whnf_cache_get_mut(bucket_idx, &canon, ci) {
+                        *slot = new_slot;
+                    }
+                }
                 return;
             }
-            // Different family — store in overflow (no shift_eq, just overwrite)
-            self.ctx.trace.whnf_cache_overflow_stores += 1;
-            self.tc_cache.whnf_cache_overflow_insert(bucket_idx, canon, new_slot);
-        } else {
-            self.tc_cache.whnf_cache_insert(bucket_idx, canon, new_slot);
         }
+        // No matching family — append new entry
+        if !chain.is_empty() { self.ctx.trace.whnf_cache_overflow_stores += 1; }
+        self.tc_cache.whnf_cache_push(bucket_idx, canon, new_slot);
     }
 
     fn whnf_no_unfolding_cheap_proj(&mut self, e: ExprPtr<'t>) -> ExprPtr<'t> {
@@ -1231,36 +1178,30 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                 let cur_lb = self.ctx.fvar_lb(self.ctx.read_expr(cur).get_fvar_list());
                 (cur_depth - cur_lb) as usize
             };
-            if let Some(&(primary, overflow)) = self.tc_cache.wnu_cache_get(wnu_bucket_idx, &cur_canon) {
-                // Try primary slot
-                let (stored_input, stored_result, stored_depth) = primary;
-                if stored_depth == cur_depth && (stored_input == cur || self.ctx.sem_eq(stored_input, cur)) {
-                    self.ctx.trace.wnu_cache_hits += 1;
-                    break stored_result;
-                }
-                if cur_depth > stored_depth {
-                    let delta = cur_depth - stored_depth;
-                    if self.ctx.shift_eq(stored_input, cur, delta) {
+            let wnu_chain: SmallVec<[WhnfSlot<'t>; 2]> = SmallVec::from_slice(
+                self.tc_cache.wnu_cache_chain(wnu_bucket_idx, &cur_canon));
+            if !wnu_chain.is_empty() {
+                let mut wnu_hit = false;
+                for (ci, &(stored_input, stored_result, stored_depth)) in wnu_chain.iter().enumerate() {
+                    if stored_depth == cur_depth && (stored_input == cur || self.ctx.sem_eq(stored_input, cur)) {
                         self.ctx.trace.wnu_cache_hits += 1;
-                        break self.ctx.push_shift(stored_result, delta, 0);
+                        if ci > 0 { self.ctx.trace.wnu_cache_overflow_hits += 1; }
+                        wnu_hit = true;
+                        cur = stored_result;
+                        break;
                     }
-                }
-                // Try overflow slot
-                if let Some((stored_input2, stored_result2, stored_depth2)) = overflow {
-                    if stored_depth2 == cur_depth && (stored_input2 == cur || self.ctx.sem_eq(stored_input2, cur)) {
-                        self.ctx.trace.wnu_cache_hits += 1;
-                        self.ctx.trace.wnu_cache_overflow_hits += 1;
-                        break stored_result2;
-                    }
-                    if cur_depth > stored_depth2 {
-                        let delta = cur_depth - stored_depth2;
-                        if self.ctx.shift_eq(stored_input2, cur, delta) {
+                    if cur_depth > stored_depth {
+                        let delta = cur_depth - stored_depth;
+                        if self.ctx.shift_eq(stored_input, cur, delta) {
                             self.ctx.trace.wnu_cache_hits += 1;
-                            self.ctx.trace.wnu_cache_overflow_hits += 1;
-                            break self.ctx.push_shift(stored_result2, delta, 0);
+                            if ci > 0 { self.ctx.trace.wnu_cache_overflow_hits += 1; }
+                            wnu_hit = true;
+                            cur = self.ctx.push_shift(stored_result, delta, 0);
+                            break;
                         }
                     }
                 }
+                if wnu_hit { break cur; }
                 self.ctx.trace.wnu_cache_verify_fail += 1;
             } else {
                 // No entry at this bucket (or bucket doesn't exist).
@@ -1393,34 +1334,34 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                     (store_depth - entry_lb) as usize
                 };
                 let new_slot: WhnfSlot<'t> = (entry, result, store_depth);
-                if let Some((ref mut primary, ref mut overflow)) = self.tc_cache.wnu_cache_get_mut(entry_bucket_idx, &entry_canon) {
-                    // Same pointer — already stored in primary or overflow
-                    if primary.0 == entry { self.ctx.trace.wnu_cache_update_skip += 1; continue; }
-                    if let Some(ov) = overflow {
-                        if ov.0 == entry { self.ctx.trace.wnu_cache_update_skip += 1; continue; }
-                    }
-                    // No shift_eq family check — use depth-based replacement
-                    // to avoid overhead in the hot store path.
-                    if store_depth <= primary.2 {
-                        // Lower depth: replace primary, demote old to overflow
-                        if overflow.is_none() {
-                            self.ctx.trace.wnu_cache_overflow_stores += 1;
-                        }
-                        *overflow = Some(*primary);
-                        *primary = new_slot;
-                        self.ctx.trace.wnu_cache_update_lower += 1;
-                    } else if overflow.map_or(true, |ov| store_depth < ov.2) {
-                        // Higher depth than primary but lower than overflow
-                        if overflow.is_none() {
-                            self.ctx.trace.wnu_cache_overflow_stores += 1;
-                        }
-                        *overflow = Some(new_slot);
-                        self.ctx.trace.wnu_cache_update_higher += 1;
-                    } else {
+                let wnu_chain: SmallVec<[WhnfSlot<'t>; 2]> = SmallVec::from_slice(
+                    self.tc_cache.wnu_cache_chain(entry_bucket_idx, &entry_canon));
+                if !wnu_chain.is_empty() {
+                    // Check if already stored
+                    if wnu_chain.iter().any(|s| s.0 == entry) {
                         self.ctx.trace.wnu_cache_update_skip += 1;
+                        continue;
+                    }
+                    // Try to replace an entry at higher depth
+                    let mut replaced = false;
+                    for (ci, &(_, _, sd)) in wnu_chain.iter().enumerate() {
+                        if store_depth < sd {
+                            if let Some(slot) = self.tc_cache.wnu_cache_get_mut(entry_bucket_idx, &entry_canon, ci) {
+                                *slot = new_slot;
+                            }
+                            replaced = true;
+                            self.ctx.trace.wnu_cache_update_lower += 1;
+                            break;
+                        }
+                    }
+                    if !replaced {
+                        // Append new entry
+                        self.ctx.trace.wnu_cache_overflow_stores += 1;
+                        self.tc_cache.wnu_cache_push(entry_bucket_idx, entry_canon, new_slot);
+                        self.ctx.trace.wnu_cache_update_higher += 1;
                     }
                 } else {
-                    self.tc_cache.wnu_cache_insert(entry_bucket_idx, entry_canon, (new_slot, None));
+                    self.tc_cache.wnu_cache_push(entry_bucket_idx, entry_canon, new_slot);
                     self.ctx.trace.wnu_cache_new_inserts += 1;
                 }
             }
@@ -1905,14 +1846,11 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
     fn failure_cache_contains(&mut self, x: ExprPtr<'t>, y: ExprPtr<'t>) -> bool {
         let (key, swapped) = self.defeq_canon_key(x, y);
         let (qx, qy) = if swapped { (y, x) } else { (x, y) };
-        if let Some(&(stored_a, stored_b)) = self.tc_cache.failure_cache.get(&key) {
-            if self.ctx.sem_eq(stored_a, qx) && self.ctx.sem_eq(stored_b, qy) {
-                return true;
-            }
-            // Check overflow
-            if let Some(&(stored_a2, stored_b2)) = self.tc_cache.failure_cache_overflow.get(&key) {
-                if self.ctx.sem_eq(stored_a2, qx) && self.ctx.sem_eq(stored_b2, qy) {
-                    self.ctx.trace.fail_cache_overflow_hits += 1;
+        let chain = self.tc_cache.failure_cache.get_chain(&key);
+        if !chain.is_empty() {
+            for (ci, &(stored_a, stored_b)) in chain.iter().enumerate() {
+                if self.ctx.sem_eq(stored_a, qx) && self.ctx.sem_eq(stored_b, qy) {
+                    if ci > 0 { self.ctx.trace.fail_cache_overflow_hits += 1; }
                     return true;
                 }
             }
@@ -1927,15 +1865,10 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
     fn failure_cache_insert(&mut self, x: ExprPtr<'t>, y: ExprPtr<'t>) {
         let (key, swapped) = self.defeq_canon_key(x, y);
         let (a, b) = if swapped { (y, x) } else { (x, y) };
-        // 2-slot insert: if primary has a different entry, store in overflow
-        if let Some(&(stored_a, stored_b)) = self.tc_cache.failure_cache.get(&key) {
-            if stored_a != a || stored_b != b {
-                self.ctx.trace.fail_cache_overflow_stores += 1;
-                self.tc_cache.failure_cache_overflow.insert(key, (a, b));
-            }
-        } else {
-            self.tc_cache.failure_cache.insert(key, (a, b));
-        }
+        let chain = self.tc_cache.failure_cache.get_chain(&key);
+        if chain.iter().any(|&(sa, sb)| sa == a && sb == b) { return; }
+        if !chain.is_empty() { self.ctx.trace.fail_cache_overflow_stores += 1; }
+        self.tc_cache.failure_cache.push(key, (a, b));
         self.defeq_open_store_neg(x, y);
     }
 
@@ -1963,48 +1896,38 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
     fn eq_cache_contains(&mut self, x: ExprPtr<'t>, y: ExprPtr<'t>) -> bool {
         let (key, swapped) = self.defeq_canon_key(x, y);
         let (qx, qy) = if swapped { (y, x) } else { (x, y) };
-        // Check primary cache
-        if let Some(&(stored_a, stored_b)) = self.tc_cache.eq_cache.get(&key) {
+        let chain = self.tc_cache.eq_cache.get_chain(&key);
+        if chain.is_empty() { return false; }
+        for (ci, &(stored_a, stored_b)) in chain.iter().enumerate() {
             if self.ctx.sem_eq(stored_a, qx) && self.ctx.sem_eq(stored_b, qy) {
                 self.ctx.trace.eq_cache_hits += 1;
+                if ci > 0 { self.ctx.trace.eq_cache_overflow_hits += 1; }
                 if stored_a != qx || stored_b != qy {
                     self.ctx.trace.eq_cache_cross_depth_hits += 1;
                 }
                 return true;
             }
-            // Primary didn't match, check overflow
-            if let Some(&(stored_a2, stored_b2)) = self.tc_cache.eq_cache_overflow.get(&key) {
-                if self.ctx.sem_eq(stored_a2, qx) && self.ctx.sem_eq(stored_b2, qy) {
-                    self.ctx.trace.eq_cache_hits += 1;
-                    self.ctx.trace.eq_cache_overflow_hits += 1;
-                    if stored_a2 != qx || stored_b2 != qy {
-                        self.ctx.trace.eq_cache_cross_depth_hits += 1;
-                    }
-                    return true;
-                }
-            }
-            self.ctx.trace.eq_cache_verify_fail += 1;
         }
+        self.ctx.trace.eq_cache_verify_fail += 1;
         false
     }
 
     /// Canonical-hash-keyed eq_cache insert for closed expressions.
-    /// Uses 2-slot design: primary map stores one entry per key, overflow stores a second
-    /// colliding entry. This prevents eviction of useful entries due to hash collisions.
+    /// Appends to chain if key already has entries with different pointers.
     fn eq_cache_insert(&mut self, x: ExprPtr<'t>, y: ExprPtr<'t>) {
         let (key, swapped) = self.defeq_canon_key(x, y);
         let (a, b) = if swapped { (y, x) } else { (x, y) };
-        // Check if primary already has an entry for this key
-        if let Some(&(stored_a, stored_b)) = self.tc_cache.eq_cache.get(&key) {
-            // Same pointers → no need to insert
+        let chain = self.tc_cache.eq_cache.get_chain(&key);
+        for &(stored_a, stored_b) in chain.iter() {
             if stored_a == a && stored_b == b {
-                return;
+                return; // Already stored
             }
-            // Different entry in primary — store new entry in overflow
-            self.ctx.trace.eq_cache_overflow_stores += 1;
-            self.tc_cache.eq_cache_overflow.insert(key, (a, b));
+        }
+        if chain.is_empty() {
+            self.tc_cache.eq_cache.insert_first(key, (a, b));
         } else {
-            self.tc_cache.eq_cache.insert(key, (a, b));
+            self.ctx.trace.eq_cache_overflow_stores += 1;
+            self.tc_cache.eq_cache.push(key, (a, b));
         }
     }
 

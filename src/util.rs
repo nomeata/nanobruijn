@@ -12,6 +12,7 @@ use num_traits::{ Pow, identities::Zero };
 use num_integer::Integer;
 use rustc_hash::FxHasher;
 use std::borrow::Cow;
+use smallvec::SmallVec;
 use std::collections::{HashMap, HashSet};
 use std::error::Error;
 use std::fs::OpenOptions;
@@ -120,6 +121,83 @@ impl<K: Eq + std::hash::Hash, V> LazyMap<K, V> {
     }
 }
 
+/// A hash map where each key maps to a chain of values (SmallVec<[V; 1]>).
+/// On insert, values are appended (chained) rather than overwriting.
+/// On lookup, the caller scans the chain to find a matching entry.
+///
+/// This replaces the previous primary+overflow 2-HashMap design with a single
+/// map. The common case (1 entry per key) is stored inline in SmallVec; collisions
+/// simply extend the chain.
+///
+// TODO: Consider implementing this with linear probing / open addressing inside
+// a single flat HashMap (custom hasher where Hash = canonical hash, Eq = sem_eq).
+// This would avoid the SmallVec indirection. Requires a lookup-before-insert
+// pattern to implement chaining on top of a standard HashMap.
+pub(crate) struct ChainMap<K, V>(FxHashMap<K, SmallVec<[V; 1]>>);
+
+impl<K, V> ChainMap<K, V> {
+    pub(crate) fn new() -> Self { ChainMap(new_fx_hash_map()) }
+    pub(crate) fn clear(&mut self) { self.0.clear(); }
+}
+
+impl<K: Eq + std::hash::Hash, V> ChainMap<K, V> {
+    /// Get the chain of values for a key.
+    pub(crate) fn get_chain(&self, key: &K) -> &[V] {
+        match self.0.get(key) {
+            Some(chain) => chain.as_slice(),
+            None => &[],
+        }
+    }
+
+    /// Get a mutable reference to a specific chain entry by index.
+    pub(crate) fn get_mut(&mut self, key: &K, idx: usize) -> Option<&mut V> {
+        self.0.get_mut(key)?.get_mut(idx)
+    }
+
+    /// Append a value to the chain for this key.
+    pub(crate) fn push(&mut self, key: K, value: V) {
+        self.0.entry(key).or_insert_with(SmallVec::new).push(value);
+    }
+
+    /// Insert or replace the first entry in the chain. Used for single-entry semantics.
+    pub(crate) fn insert_first(&mut self, key: K, value: V) {
+        let chain = self.0.entry(key).or_insert_with(SmallVec::new);
+        if chain.is_empty() {
+            chain.push(value);
+        } else {
+            chain[0] = value;
+        }
+    }
+}
+
+/// Lazily-allocated ChainMap: 8 bytes when empty.
+pub(crate) struct LazyChainMap<K, V>(Option<Box<ChainMap<K, V>>>);
+
+impl<K, V> LazyChainMap<K, V> {
+    pub(crate) fn new() -> Self { LazyChainMap(None) }
+}
+
+impl<K: Eq + std::hash::Hash, V> LazyChainMap<K, V> {
+    pub(crate) fn get_chain(&self, key: &K) -> &[V] {
+        match &self.0 {
+            Some(map) => map.get_chain(key),
+            None => &[],
+        }
+    }
+
+    pub(crate) fn get_mut(&mut self, key: &K, idx: usize) -> Option<&mut V> {
+        self.0.as_mut()?.get_mut(key, idx)
+    }
+
+    pub(crate) fn push(&mut self, key: K, value: V) {
+        self.0.get_or_insert_with(|| Box::new(ChainMap::new())).push(key, value);
+    }
+
+    pub(crate) fn insert_first(&mut self, key: K, value: V) {
+        self.0.get_or_insert_with(|| Box::new(ChainMap::new())).insert_first(key, value);
+    }
+}
+
 /// Cache key types used in depth frames.
 pub(crate) type CacheKey = (u64, u64);
 pub(crate) type DefeqCacheKey = ((u64, u64), (u64, u64));
@@ -129,16 +207,12 @@ pub(crate) type DefeqCacheKey = ((u64, u64), (u64, u64));
 pub(crate) struct DepthFrame<'t> {
     /// The local binding: (type, optional value for let-bindings).
     pub(crate) local: (ExprPtr<'t>, Option<ExprPtr<'t>>),
-    /// Per-depth whnf cache (primary).
-    pub(crate) whnf_cache: LazyMap<CacheKey, WhnfSlot<'t>>,
-    /// Per-depth whnf cache (overflow for hash collisions).
-    pub(crate) whnf_cache_overflow: LazyMap<CacheKey, WhnfSlot<'t>>,
-    /// Per-depth whnf_no_unfolding cache (inline 2-slot).
-    pub(crate) whnf_no_unfolding_cache: LazyMap<CacheKey, Wnu2Slot<'t>>,
-    /// Per-depth infer cache (primary).
-    pub(crate) infer_cache: LazyMap<CacheKey, (ExprPtr<'t>, ExprPtr<'t>, u16, bool)>,
-    /// Per-depth infer cache (overflow for hash collisions).
-    pub(crate) infer_cache_overflow: LazyMap<CacheKey, (ExprPtr<'t>, ExprPtr<'t>, u16, bool)>,
+    /// Per-depth whnf cache (chained for hash collision handling).
+    pub(crate) whnf_cache: LazyChainMap<CacheKey, WhnfSlot<'t>>,
+    /// Per-depth whnf_no_unfolding cache (chained).
+    pub(crate) whnf_no_unfolding_cache: LazyChainMap<CacheKey, WhnfSlot<'t>>,
+    /// Per-depth infer cache (chained).
+    pub(crate) infer_cache: LazyChainMap<CacheKey, (ExprPtr<'t>, ExprPtr<'t>, u16, bool)>,
     /// Per-depth positive def_eq cache for open expressions.
     pub(crate) defeq_pos_open: LazyMap<DefeqCacheKey, (ExprPtr<'t>, ExprPtr<'t>, u16)>,
     /// Per-depth negative def_eq cache for open expressions.
@@ -149,11 +223,9 @@ impl<'t> DepthFrame<'t> {
     pub(crate) fn new(ty: ExprPtr<'t>, val: Option<ExprPtr<'t>>) -> Self {
         DepthFrame {
             local: (ty, val),
-            whnf_cache: LazyMap::new(),
-            whnf_cache_overflow: LazyMap::new(),
-            whnf_no_unfolding_cache: LazyMap::new(),
-            infer_cache: LazyMap::new(),
-            infer_cache_overflow: LazyMap::new(),
+            whnf_cache: LazyChainMap::new(),
+            whnf_no_unfolding_cache: LazyChainMap::new(),
+            infer_cache: LazyChainMap::new(),
             defeq_pos_open: LazyMap::new(),
             defeq_neg_open: LazyMap::new(),
         }
@@ -1797,31 +1869,20 @@ pub struct NameCache<'p> {
 /// A single whnf cache slot: (input, result, depth).
 pub(crate) type WhnfSlot<'t> = (ExprPtr<'t>, ExprPtr<'t>, u16);
 
-/// Inline 2-slot cache entry for wnu cache: primary slot + optional overflow.
-/// The overflow avoids a separate HashMap while handling shift-family collisions.
-pub(crate) type Wnu2Slot<'t> = (WhnfSlot<'t>, Option<WhnfSlot<'t>>);
 
 pub(crate) struct TcCache<'t> {
     // === Base buckets (bucket 0): closed expressions, never evicted ===
-    /// WHNF cache for closed expressions (primary).
-    pub(crate) whnf_cache_base: FxHashMap<CacheKey, WhnfSlot<'t>>,
-    /// WHNF cache for closed expressions (overflow).
-    pub(crate) whnf_cache_overflow_base: FxHashMap<CacheKey, WhnfSlot<'t>>,
-    /// whnf_no_unfolding cache for closed expressions (inline 2-slot).
-    pub(crate) wnu_cache_base: FxHashMap<CacheKey, Wnu2Slot<'t>>,
-    /// Infer cache for closed expressions (primary).
-    pub(crate) infer_cache_base: FxHashMap<CacheKey, (ExprPtr<'t>, ExprPtr<'t>, u16, bool)>,
-    /// Infer cache for closed expressions (overflow).
-    pub(crate) infer_cache_overflow_base: FxHashMap<CacheKey, (ExprPtr<'t>, ExprPtr<'t>, u16, bool)>,
+    /// WHNF cache for closed expressions.
+    pub(crate) whnf_cache_base: ChainMap<CacheKey, WhnfSlot<'t>>,
+    /// whnf_no_unfolding cache for closed expressions.
+    pub(crate) wnu_cache_base: ChainMap<CacheKey, WhnfSlot<'t>>,
+    /// Infer cache for closed expressions.
+    pub(crate) infer_cache_base: ChainMap<CacheKey, (ExprPtr<'t>, ExprPtr<'t>, u16, bool)>,
     // === Flat caches (not depth-stacked) ===
     /// Positive def_eq cache for closed expressions.
-    pub(crate) eq_cache: FxHashMap<DefeqCacheKey, (ExprPtr<'t>, ExprPtr<'t>)>,
-    /// Positive def_eq cache overflow (second entry per key, avoids eviction on hash collision).
-    pub(crate) eq_cache_overflow: FxHashMap<DefeqCacheKey, (ExprPtr<'t>, ExprPtr<'t>)>,
+    pub(crate) eq_cache: ChainMap<DefeqCacheKey, (ExprPtr<'t>, ExprPtr<'t>)>,
     /// Negative def_eq cache for closed expressions.
-    pub(crate) failure_cache: FxHashMap<DefeqCacheKey, (ExprPtr<'t>, ExprPtr<'t>)>,
-    /// Negative def_eq cache overflow.
-    pub(crate) failure_cache_overflow: FxHashMap<DefeqCacheKey, (ExprPtr<'t>, ExprPtr<'t>)>,
+    pub(crate) failure_cache: ChainMap<DefeqCacheKey, (ExprPtr<'t>, ExprPtr<'t>)>,
     /// Strong reduction cache (library/inspection feature).
     pub(crate) strong_cache: UniqueHashMap<(ExprPtr<'t>, bool, bool), ExprPtr<'t>>,
     /// Pointer-based UnionFind for transitive def_eq caching.
@@ -1836,15 +1897,11 @@ pub(crate) struct TcCache<'t> {
 impl<'t> TcCache<'t> {
     pub(crate) fn new() -> Self {
         Self {
-            whnf_cache_base: new_fx_hash_map(),
-            whnf_cache_overflow_base: new_fx_hash_map(),
-            wnu_cache_base: new_fx_hash_map(),
-            infer_cache_base: new_fx_hash_map(),
-            infer_cache_overflow_base: new_fx_hash_map(),
-            eq_cache: new_fx_hash_map(),
-            eq_cache_overflow: new_fx_hash_map(),
-            failure_cache: new_fx_hash_map(),
-            failure_cache_overflow: new_fx_hash_map(),
+            whnf_cache_base: ChainMap::new(),
+            wnu_cache_base: ChainMap::new(),
+            infer_cache_base: ChainMap::new(),
+            eq_cache: ChainMap::new(),
+            failure_cache: ChainMap::new(),
             strong_cache: new_unique_hash_map(),
             eq_cache_uf: UnionFind::new(),
             frames: Vec::new(),
@@ -1853,14 +1910,10 @@ impl<'t> TcCache<'t> {
 
     pub(crate) fn clear(&mut self) {
         self.whnf_cache_base.clear();
-        self.whnf_cache_overflow_base.clear();
         self.wnu_cache_base.clear();
         self.infer_cache_base.clear();
-        self.infer_cache_overflow_base.clear();
         self.eq_cache.clear();
-        self.eq_cache_overflow.clear();
         self.failure_cache.clear();
-        self.failure_cache_overflow.clear();
         self.strong_cache.clear();
         self.eq_cache_uf.clear();
         self.frames.clear();
@@ -1915,29 +1968,24 @@ impl<'t> TcCache<'t> {
     // For whnf/infer/wnu caches: bucket 0 = base, bucket k>0 = frames[k-1].
     // For defeq caches: bucket k = frames[k] (no base bucket).
 
-    pub(crate) fn whnf_cache_get(&self, bucket_idx: usize, key: &CacheKey) -> Option<&WhnfSlot<'t>> {
-        if bucket_idx == 0 { self.whnf_cache_base.get(key) }
-        else { self.frames.get(bucket_idx - 1)?.whnf_cache.get(key) }
+    pub(crate) fn whnf_cache_chain(&self, bucket_idx: usize, key: &CacheKey) -> &[WhnfSlot<'t>] {
+        if bucket_idx == 0 { self.whnf_cache_base.get_chain(key) }
+        else { self.frames.get(bucket_idx - 1).map_or(&[], |f| f.whnf_cache.get_chain(key)) }
     }
 
-    pub(crate) fn whnf_cache_get_mut(&mut self, bucket_idx: usize, key: &CacheKey) -> Option<&mut WhnfSlot<'t>> {
-        if bucket_idx == 0 { self.whnf_cache_base.get_mut(key) }
-        else { self.frames.get_mut(bucket_idx - 1)?.whnf_cache.get_mut(key) }
+    pub(crate) fn whnf_cache_get_mut(&mut self, bucket_idx: usize, key: &CacheKey, idx: usize) -> Option<&mut WhnfSlot<'t>> {
+        if bucket_idx == 0 { self.whnf_cache_base.get_mut(key, idx) }
+        else { self.frames.get_mut(bucket_idx - 1)?.whnf_cache.get_mut(key, idx) }
     }
 
-    pub(crate) fn whnf_cache_insert(&mut self, bucket_idx: usize, key: CacheKey, val: WhnfSlot<'t>) {
-        if bucket_idx == 0 { self.whnf_cache_base.insert(key, val); }
-        else if let Some(f) = self.frames.get_mut(bucket_idx - 1) { f.whnf_cache.insert(key, val); }
+    pub(crate) fn whnf_cache_push(&mut self, bucket_idx: usize, key: CacheKey, val: WhnfSlot<'t>) {
+        if bucket_idx == 0 { self.whnf_cache_base.push(key, val); }
+        else if let Some(f) = self.frames.get_mut(bucket_idx - 1) { f.whnf_cache.push(key, val); }
     }
 
-    pub(crate) fn whnf_cache_overflow_get(&self, bucket_idx: usize, key: &CacheKey) -> Option<&WhnfSlot<'t>> {
-        if bucket_idx == 0 { self.whnf_cache_overflow_base.get(key) }
-        else { self.frames.get(bucket_idx - 1)?.whnf_cache_overflow.get(key) }
-    }
-
-    pub(crate) fn whnf_cache_overflow_insert(&mut self, bucket_idx: usize, key: CacheKey, val: WhnfSlot<'t>) {
-        if bucket_idx == 0 { self.whnf_cache_overflow_base.insert(key, val); }
-        else if let Some(f) = self.frames.get_mut(bucket_idx - 1) { f.whnf_cache_overflow.insert(key, val); }
+    pub(crate) fn whnf_cache_insert_first(&mut self, bucket_idx: usize, key: CacheKey, val: WhnfSlot<'t>) {
+        if bucket_idx == 0 { self.whnf_cache_base.insert_first(key, val); }
+        else if let Some(f) = self.frames.get_mut(bucket_idx - 1) { f.whnf_cache.insert_first(key, val); }
     }
 
     /// Check if a whnf cache bucket exists (allocated or base).
@@ -1946,44 +1994,34 @@ impl<'t> TcCache<'t> {
         else { self.frames.get(bucket_idx - 1).is_some() }
     }
 
-    pub(crate) fn wnu_cache_get(&self, bucket_idx: usize, key: &CacheKey) -> Option<&Wnu2Slot<'t>> {
-        if bucket_idx == 0 { self.wnu_cache_base.get(key) }
-        else { self.frames.get(bucket_idx - 1)?.whnf_no_unfolding_cache.get(key) }
+    pub(crate) fn wnu_cache_chain(&self, bucket_idx: usize, key: &CacheKey) -> &[WhnfSlot<'t>] {
+        if bucket_idx == 0 { self.wnu_cache_base.get_chain(key) }
+        else { self.frames.get(bucket_idx - 1).map_or(&[], |f| f.whnf_no_unfolding_cache.get_chain(key)) }
     }
 
-    pub(crate) fn wnu_cache_get_mut(&mut self, bucket_idx: usize, key: &CacheKey) -> Option<&mut Wnu2Slot<'t>> {
-        if bucket_idx == 0 { self.wnu_cache_base.get_mut(key) }
-        else { self.frames.get_mut(bucket_idx - 1)?.whnf_no_unfolding_cache.get_mut(key) }
+    pub(crate) fn wnu_cache_get_mut(&mut self, bucket_idx: usize, key: &CacheKey, idx: usize) -> Option<&mut WhnfSlot<'t>> {
+        if bucket_idx == 0 { self.wnu_cache_base.get_mut(key, idx) }
+        else { self.frames.get_mut(bucket_idx - 1)?.whnf_no_unfolding_cache.get_mut(key, idx) }
     }
 
-    pub(crate) fn wnu_cache_insert(&mut self, bucket_idx: usize, key: CacheKey, val: Wnu2Slot<'t>) {
-        if bucket_idx == 0 { self.wnu_cache_base.insert(key, val); }
-        else if let Some(f) = self.frames.get_mut(bucket_idx - 1) { f.whnf_no_unfolding_cache.insert(key, val); }
+    pub(crate) fn wnu_cache_push(&mut self, bucket_idx: usize, key: CacheKey, val: WhnfSlot<'t>) {
+        if bucket_idx == 0 { self.wnu_cache_base.push(key, val); }
+        else if let Some(f) = self.frames.get_mut(bucket_idx - 1) { f.whnf_no_unfolding_cache.push(key, val); }
     }
 
-    pub(crate) fn infer_cache_get(&self, bucket_idx: usize, key: &CacheKey) -> Option<&(ExprPtr<'t>, ExprPtr<'t>, u16, bool)> {
-        if bucket_idx == 0 { self.infer_cache_base.get(key) }
-        else { self.frames.get(bucket_idx - 1)?.infer_cache.get(key) }
+    pub(crate) fn infer_cache_chain(&self, bucket_idx: usize, key: &CacheKey) -> &[(ExprPtr<'t>, ExprPtr<'t>, u16, bool)] {
+        if bucket_idx == 0 { self.infer_cache_base.get_chain(key) }
+        else { self.frames.get(bucket_idx - 1).map_or(&[], |f| f.infer_cache.get_chain(key)) }
     }
 
-    pub(crate) fn infer_cache_get_mut(&mut self, bucket_idx: usize, key: &CacheKey) -> Option<&mut (ExprPtr<'t>, ExprPtr<'t>, u16, bool)> {
-        if bucket_idx == 0 { self.infer_cache_base.get_mut(key) }
-        else { self.frames.get_mut(bucket_idx - 1)?.infer_cache.get_mut(key) }
+    pub(crate) fn infer_cache_get_mut(&mut self, bucket_idx: usize, key: &CacheKey, idx: usize) -> Option<&mut (ExprPtr<'t>, ExprPtr<'t>, u16, bool)> {
+        if bucket_idx == 0 { self.infer_cache_base.get_mut(key, idx) }
+        else { self.frames.get_mut(bucket_idx - 1)?.infer_cache.get_mut(key, idx) }
     }
 
-    pub(crate) fn infer_cache_insert(&mut self, bucket_idx: usize, key: CacheKey, val: (ExprPtr<'t>, ExprPtr<'t>, u16, bool)) {
-        if bucket_idx == 0 { self.infer_cache_base.insert(key, val); }
-        else if let Some(f) = self.frames.get_mut(bucket_idx - 1) { f.infer_cache.insert(key, val); }
-    }
-
-    pub(crate) fn infer_cache_overflow_get(&self, bucket_idx: usize, key: &CacheKey) -> Option<&(ExprPtr<'t>, ExprPtr<'t>, u16, bool)> {
-        if bucket_idx == 0 { self.infer_cache_overflow_base.get(key) }
-        else { self.frames.get(bucket_idx - 1)?.infer_cache_overflow.get(key) }
-    }
-
-    pub(crate) fn infer_cache_overflow_insert(&mut self, bucket_idx: usize, key: CacheKey, val: (ExprPtr<'t>, ExprPtr<'t>, u16, bool)) {
-        if bucket_idx == 0 { self.infer_cache_overflow_base.insert(key, val); }
-        else if let Some(f) = self.frames.get_mut(bucket_idx - 1) { f.infer_cache_overflow.insert(key, val); }
+    pub(crate) fn infer_cache_push(&mut self, bucket_idx: usize, key: CacheKey, val: (ExprPtr<'t>, ExprPtr<'t>, u16, bool)) {
+        if bucket_idx == 0 { self.infer_cache_base.push(key, val); }
+        else if let Some(f) = self.frames.get_mut(bucket_idx - 1) { f.infer_cache.push(key, val); }
     }
 
     pub(crate) fn defeq_open_get(&self, is_pos: bool, bucket_idx: usize, key: &DefeqCacheKey) -> Option<&(ExprPtr<'t>, ExprPtr<'t>, u16)> {
