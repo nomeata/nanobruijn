@@ -724,18 +724,18 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             return None; // caller counts vf_same
         }
         if depth > stored_depth {
-            let delta = depth - stored_depth;
+            let delta = (depth - stored_depth) as i16;
             if self.ctx.shift_eq(stored_input, e, delta) {
                 return Some(self.ctx.mk_shift(stored_result, delta));
             }
             return None; // caller counts vf_above
         }
         // depth < stored_depth: reverse shift_eq + push_shift_down
-        let delta = stored_depth - depth;
+        let delta = (stored_depth - depth) as i16;
         if self.ctx.shift_eq(e, stored_input, delta) {
             let result_fvar_lb = self.ctx.fvar_lb(self.ctx.read_expr(stored_result).get_fvar_list());
-            if self.ctx.num_loose_bvars(stored_result) == 0 || result_fvar_lb >= delta {
-                return Some(self.ctx.push_shift_down(stored_result, delta));
+            if self.ctx.num_loose_bvars(stored_result) == 0 || result_fvar_lb >= delta as u16 {
+                return Some(self.ctx.push_shift_down(stored_result, delta as u16));
             }
         }
         None
@@ -749,9 +749,9 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             let is_family = if depth == sd {
                 self.ctx.sem_eq(si, e)
             } else if depth > sd {
-                self.ctx.shift_eq(si, e, depth - sd)
+                self.ctx.shift_eq(si, e, (depth - sd) as i16)
             } else {
-                self.ctx.shift_eq(e, si, sd - depth)
+                self.ctx.shift_eq(e, si, (sd - depth) as i16)
             };
             if is_family {
                 // Same family — prefer checked, then lower depth
@@ -974,15 +974,16 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         // Peel off cutoff=0 Shift nodes (iteratively). For cutoff>0, force first.
         // Must also shrink local_ctx because whnf can indirectly call infer
         // (via reduce_rec → to_ctor_when_k) which depends on local_ctx.
-        let mut total_shift: u16 = 0;
+        let mut total_shift: i16 = 0;
         let mut e = e;
         while let Shift { inner, amount, cutoff, .. } = self.ctx.read_expr(e) {
-            if cutoff == 0 {
+            if cutoff == 0 && amount > 0 {
                 total_shift += amount;
                 e = inner;
-            } else {
-                // Shallow-force the cutoff>0 shift, then continue peeling
+            } else if cutoff > 0 {
                 e = self.ctx.push_shift(inner, amount, cutoff);
+            } else {
+                break; // negative shift with cutoff=0: can't peel (would need higher depth)
             }
         }
         if total_shift > 0 {
@@ -1055,35 +1056,40 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         if stored_depth == depth && (stored_input == e || self.ctx.sem_eq(stored_input, e)) {
             return Some(stored_result);
         }
+        // Above-depth hit: positive shift wraps result
         if depth > stored_depth {
-            let delta = depth - stored_depth;
+            let delta = (depth - stored_depth) as i16;
             if self.ctx.shift_eq(stored_input, e, delta) {
+                if self.ctx.num_loose_bvars(stored_result) == 0 {
+                    return Some(stored_result);
+                }
                 return Some(self.ctx.push_shift(stored_result, delta, 0));
             }
         }
         // Below-depth (depth < stored_depth): only attempt O(1) result adjustment.
-        // Full push_shift_down creates new expressions that break cache identity downstream,
-        // causing catastrophic cascading recomputation. Only use cheap adjustments.
+        // Negative shifts don't compose correctly with binder traversal:
+        // shifted variables reference wrong locals after push_local in def_eq_binder_aux.
+        // Only use cheap adjustments (closed, Shift absorption, no-op).
         if depth < stored_depth {
             let delta = stored_depth - depth;
             let adjustable = if self.ctx.num_loose_bvars(stored_result) == 0 {
                 true // closed result is depth-independent
             } else if let Expr::Shift { amount, cutoff: 0, .. } = self.ctx.read_expr(stored_result) {
-                amount >= delta // can subtract delta from shift amount
+                amount >= delta as i16 // can subtract delta from shift amount
             } else if stored_result == stored_input {
                 true // whnf was a no-op
             } else {
                 false
             };
-            if adjustable && self.ctx.shift_eq(e, stored_input, delta) {
+            if adjustable && self.ctx.shift_eq(e, stored_input, delta as i16) {
                 self.ctx.trace.whnf_below_depth_hits += 1;
                 if self.ctx.num_loose_bvars(stored_result) == 0 {
                     return Some(stored_result);
                 } else if let Expr::Shift { inner, amount, cutoff: 0, .. } = self.ctx.read_expr(stored_result) {
-                    if amount == delta {
+                    if amount == delta as i16 {
                         return Some(inner);
                     } else {
-                        return Some(self.ctx.mk_shift(inner, amount - delta));
+                        return Some(self.ctx.mk_shift(inner, amount - delta as i16));
                     }
                 } else {
                     // stored_result == stored_input, whnf was no-op
@@ -1103,9 +1109,9 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             let is_family = if depth == sd {
                 self.ctx.sem_eq(si, e)
             } else if depth > sd {
-                self.ctx.shift_eq(si, e, depth - sd)
+                self.ctx.shift_eq(si, e, (depth - sd) as i16)
             } else {
-                self.ctx.shift_eq(e, si, sd - depth)
+                self.ctx.shift_eq(e, si, (sd - depth) as i16)
             };
             if is_family {
                 // Same family — prefer the lowest depth (canonical representative)
@@ -1135,14 +1141,16 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         // whnf_no_unfolding is shift-equivariant: peel top-level Shifts.
         // Must also shrink local_ctx because reduce_rec → to_ctor_when_k → infer
         // depends on local_ctx.
-        let mut total_shift: u16 = 0;
+        let mut total_shift: i16 = 0;
         let mut e = e;
         while let Shift { inner, amount, cutoff, .. } = self.ctx.read_expr(e) {
-            if cutoff == 0 {
+            if cutoff == 0 && amount > 0 {
                 total_shift += amount;
                 e = inner;
-            } else {
+            } else if cutoff > 0 {
                 e = self.ctx.push_shift(inner, amount, cutoff);
+            } else {
+                break; // negative shift with cutoff=0: can't peel (would need higher depth)
             }
         }
         if total_shift > 0 {
@@ -1185,7 +1193,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                         break;
                     }
                     if cur_depth > stored_depth {
-                        let delta = cur_depth - stored_depth;
+                        let delta = (cur_depth - stored_depth) as i16;
                         if self.ctx.shift_eq(stored_input, cur, delta) {
                             self.ctx.trace.wnu_cache_hits += 1;
                             if ci > 0 { self.ctx.trace.wnu_cache_overflow_hits += 1; }
@@ -1607,11 +1615,11 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             // Sound because Shift(a,k,0) = Shift(b,k,0) iff a = b.
             // Only attempt when at least one side is a Shift (avoid overhead on common case).
             if matches!((self.ctx.read_expr(x), self.ctx.read_expr(y)), (Expr::Shift { .. }, Expr::Shift { .. })) {
-                let (mut xi, mut xa) = (x, 0u16);
+                let (mut xi, mut xa) = (x, 0i16);
                 while let Expr::Shift { inner, amount, cutoff: 0, .. } = self.ctx.read_expr(xi) {
                     xa += amount; xi = inner;
                 }
-                let (mut yi, mut ya) = (y, 0u16);
+                let (mut yi, mut ya) = (y, 0i16);
                 while let Expr::Shift { inner, amount, cutoff: 0, .. } = self.ctx.read_expr(yi) {
                     ya += amount; yi = inner;
                 }
@@ -1814,11 +1822,11 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         // Shift-aware UF: strip matching Shift wrappers and check inner expressions.
         // Checked after open cache (cheaper checks first). Only when at least one is Shift.
         if matches!((self.ctx.read_expr(x), self.ctx.read_expr(y)), (Expr::Shift { .. }, Expr::Shift { .. })) {
-            let (mut xi, mut xa) = (x, 0u16);
+            let (mut xi, mut xa) = (x, 0i16);
             while let Expr::Shift { inner, amount, cutoff: 0, .. } = self.ctx.read_expr(xi) {
                 xa += amount; xi = inner;
             }
-            let (mut yi, mut ya) = (y, 0u16);
+            let (mut yi, mut ya) = (y, 0i16);
             while let Expr::Shift { inner, amount, cutoff: 0, .. } = self.ctx.read_expr(yi) {
                 ya += amount; yi = inner;
             }
@@ -1954,7 +1962,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         }
         // Shift-invariant match
         if depth >= stored_depth {
-            let delta = depth - stored_depth;
+            let delta = (depth - stored_depth) as i16;
             if delta > 0 {
                 if self.ctx.shift_eq(stored_a, qx, delta) && self.ctx.shift_eq(stored_b, qy, delta) {
                     if is_pos { self.ctx.trace.defeq_open_pos_hits += 1; } else { self.ctx.trace.defeq_open_neg_hits += 1; }

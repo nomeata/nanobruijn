@@ -20,8 +20,9 @@ We use a local context array with `push_local`/`pop_local` (zero allocation).
 
 ### Shift nodes (delayed shifting)
 
-`Shift { inner, amount, cutoff }` expression variant wraps expressions for O(1) shifting.
-Semantics: free Var indices in `inner` with index >= `cutoff` are shifted up by `amount`.
+`Shift { inner, amount: i16, cutoff }` expression variant wraps expressions for O(1) shifting.
+Semantics: free Var indices in `inner` with index >= `cutoff` are shifted by `amount`
+(positive = up, negative = down). Negative amounts are valid when shifted-away vars are unused.
 
 - `mk_shift` (cutoff=0): creates wrappers, collapses nested same-cutoff Shifts, elides on
   closed expressions, eagerly forces `Var` (O(1))
@@ -80,15 +81,17 @@ so shifted expressions share the same struct_hash.
 as a delta-encoded linked list. O(1) shift/unbind/normalize, O(n+m) union with shared-tail
 optimization. No false negatives at any depth (proved in Theory.lean).
 
-Canonical hash = `(struct_hash, normalized FVarList hash)`.
+Canonical hash = single u64, mixing struct_hash with normalized FVarList hash via golden
+ratio multiply.
 
 **All caches use fvar_lb-based bucketing**: `bucket_idx = depth - fvar_lb`. Expressions at
 different depths land in the same bucket only if they reference the same context range.
 Cross-depth hits use `shift_eq(stored, query, depth_delta)` and return shifted results.
 
-**2-slot overflow**: All caches (whnf, wnu, infer, eq) use a primary + overflow slot per
-canonical hash key to handle shift-family collisions. Eliminates verify_fails on
-pathological cases without regressing common cases.
+**ChainMap (key-increment chaining)**: All caches use a unified `ChainMap<K, V>` that
+chains collisions via key-increment (K, K+1, K+2) in a single FxHashMap. Replaces the
+previous primary+overflow 2-HashMap pattern. `ChainKey` trait provides `chain_next()`
+for key types (u64 wrapping_add, (u64,u64) increment on second component).
 
 **Cache hit promotion**: After a successful **same-depth** cache hit, replace the primary
 slot with the query for future pointer-equality fast-path. **Critical: never promote
@@ -205,6 +208,12 @@ These approaches were tried and found counterproductive or unsound:
   creating new nodes. Catastrophically expensive on large whnf results (1B+ allocations).
   The shifted-down results have different pointer identity from naturally-computed results,
   causing cascading misses downstream.
+- **Negative shifts for below-depth whnf cache hits**: Wrapping stored results in
+  `Shift(result, -delta)` to avoid push_shift_down traversal. Unsound: negative shifts
+  don't compose correctly with binder traversal. When def_eq_binder_aux pushes a local
+  and processes the Pi/Lambda body, the negatively-shifted variables reference wrong
+  locals (shifted Var(k) → Var(k-delta) references a different frame after push_local).
+  Conservative below-depth handling remains: closed results, Shift absorption, no-ops only.
 - **Negative def_eq caching**: Unsound — def_eq results can change due to side effects from
   intervening comparisons (which may prove sub-expressions equal).
 - **Persistent inst_cache across inst_beta calls** (fingerprint-based key): Soundness issues

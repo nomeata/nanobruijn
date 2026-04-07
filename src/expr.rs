@@ -123,7 +123,8 @@ pub enum Expr<'a> {
         binder_type: ExprPtr<'a>,
         id: FVarId,
     },
-    /// Delayed shift: free Var indices in `inner` with index >= `cutoff` are shifted up by `amount`.
+    /// Delayed shift: free Var indices in `inner` with index >= `cutoff` are shifted by `amount`.
+    /// Positive amount = shift up, negative = shift down (only valid when shifted-away vars unused).
     /// Created by mk_shift (cutoff=0) or mk_shift_cutoff (cutoff>0).
     /// Collapsed on nesting when cutoffs match: Shift(Shift(e, j, c), k, c) → Shift(e, j+k, c).
     /// Elided when inner has no free bvars above cutoff.
@@ -132,7 +133,7 @@ pub enum Expr<'a> {
         struct_hash: u64,
         fvar_list: FVarList<'a>,
         inner: ExprPtr<'a>,
-        amount: u16,
+        amount: i16,
         cutoff: u16,
         num_loose_bvars: u16,
         has_fvars: bool,
@@ -286,9 +287,9 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
     /// Combined shift+instantiation in one pass.
     /// `sh_amt`/`sh_cut` represent a pending outer Shift that is applied to `e` before
     /// instantiation, without creating intermediate Shift wrapper expressions.
-    fn inst_aux(&mut self, e: ExprPtr<'t>, substs: &[ExprPtr<'t>], offset: u16, shift_down: bool, sh_amt: u16, sh_cut: u16) -> ExprPtr<'t> {
+    fn inst_aux(&mut self, e: ExprPtr<'t>, substs: &[ExprPtr<'t>], offset: u16, shift_down: bool, sh_amt: i16, sh_cut: u16) -> ExprPtr<'t> {
         self.trace.inst_aux_calls += 1;
-        if sh_amt > 0 { self.trace.inst_aux_shifted_path += 1; }
+        if sh_amt != 0 { self.trace.inst_aux_shifted_path += 1; }
         self.check_heartbeat();
 
         // Early exit: check if the (possibly shifted) expression has no loose bvars
@@ -301,8 +302,8 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
                 return e;
             }
         } else {
-            let effective_nlbv = if nlbv <= sh_cut { nlbv } else { nlbv + sh_amt };
-            if effective_nlbv <= offset {
+            let effective_nlbv = if nlbv <= sh_cut { nlbv as i16 } else { nlbv as i16 + sh_amt };
+            if effective_nlbv <= offset as i16 {
                 self.trace.inst_aux_elided += 1;
                 // No loose bvars beyond offset after shift — but we still need the shifted form.
                 // If nlbv <= sh_cut, shift is a no-op on this expr:
@@ -314,7 +315,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
             }
         }
 
-        let cache_key = (e, (offset as u64) | ((sh_amt as u64) << 16) | ((sh_cut as u64) << 32));
+        let cache_key = (e, (offset as u64) | ((sh_amt as u16 as u64) << 16) | ((sh_cut as u64) << 32));
         if let Some(cached) = self.expr_cache.inst_cache.get(&cache_key) {
             self.trace.inst_aux_cache_hits += 1;
             return *cached;
@@ -331,7 +332,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         // This implies sh_amt >= n_substs (shift never goes negative with shift_down).
         // When the shift exactly cancels shift_down (sh_amt == n_substs, sh_cut == offset),
         // no variable gets substituted and the result is just `e` — O(1) with no new allocations.
-        if sh_amt > 0 && shift_down && sh_amt == n_substs && sh_cut == offset {
+        if sh_amt > 0 && shift_down && sh_amt == n_substs as i16 && sh_cut == offset {
             self.trace.inst_aux_shift_skip_clean += 1;
             self.trace.inst_aux_elided += 1;
             self.expr_cache.inst_cache.insert(cache_key, e);
@@ -340,9 +341,9 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         // More general case: shift pushes vars past substitution range but sh_amt > n_substs
         // or !shift_down. Creates a Shift wrapper — saves inst_aux traversal at the cost of
         // potentially increasing downstream TC work from Shift wrappers.
-        if sh_amt > 0 && sh_cut <= offset && sh_amt + sh_cut >= offset + n_substs {
+        if sh_amt > 0 && sh_cut <= offset && sh_amt as u16 + sh_cut >= offset + n_substs {
             let r = if shift_down {
-                let new_amt = sh_amt - n_substs;
+                let new_amt = sh_amt - n_substs as i16;
                 debug_assert!(new_amt > 0);
                 self.trace.inst_aux_shift_skip_wrap += 1;
                 self.mk_shift_cutoff(e, new_amt, sh_cut)
@@ -389,7 +390,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
                     // If cutoff < sh_cut and amount >= (sh_cut - cutoff), then
                     // all vars >= cutoff become >= cutoff + amount >= sh_cut,
                     // so both shifts apply uniformly. Compose as (sh_amt + amount, cutoff).
-                    if cutoff < sh_cut && amount >= sh_cut - cutoff {
+                    if cutoff < sh_cut && amount >= (sh_cut - cutoff) as i16 {
                         self.trace.inst_aux_shift_compose += 1;
                         let r = self.inst_aux(inner, substs, offset, shift_down, sh_amt + amount, cutoff);
                         self.expr_cache.inst_cache.insert(cache_key, r);
@@ -404,7 +405,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
                 }
                 Var { dbj_idx, .. } => {
                     // Apply pending shift first
-                    let shifted_idx = if dbj_idx >= sh_cut { dbj_idx + sh_amt } else { dbj_idx };
+                    let shifted_idx = if dbj_idx >= sh_cut { (dbj_idx as i16 + sh_amt) as u16 } else { dbj_idx };
                     if shifted_idx < offset {
                         self.mk_var(shifted_idx)
                     } else {
@@ -412,7 +413,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
                         if rel_idx < n_substs {
                             self.trace.inst_aux_shifted_var_subst += 1;
                             let val = substs[substs.len() - 1 - rel_idx as usize];
-                            if offset > 0 { self.mk_shift(val, offset) } else { val }
+                            if offset > 0 { self.mk_shift(val, offset as i16) } else { val }
                         } else {
                             self.trace.inst_aux_shifted_var_nosubst += 1;
                             if shift_down {
@@ -469,7 +470,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
                     if rel_idx < n_substs {
                         let val = substs[substs.len() - 1 - rel_idx as usize];
                         if offset > 0 {
-                            self.mk_shift(val, offset)
+                            self.mk_shift(val, offset as i16)
                         } else {
                             val
                         }
@@ -518,7 +519,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
             return e
         }
         if cutoff == 0 {
-            return self.mk_shift(e, amount);
+            return self.mk_shift(e, amount as i16);
         }
         self.shift_expr_aux(e, amount, cutoff)
     }
@@ -801,7 +802,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
     /// Accumulates Shift through the App spine; returns lazy (Shift-wrapped) args and fun.
     pub fn unfold_apps(&mut self, mut e: ExprPtr<'t>) -> (ExprPtr<'t>, Vec<ExprPtr<'t>>) {
         let mut args = Vec::new();
-        let mut pending_shift: u16 = 0;
+        let mut pending_shift: i16 = 0;
         loop {
             match self.read_expr(e) {
                 Shift { inner, amount, cutoff: 0, .. } => {
@@ -809,9 +810,8 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
                     e = inner;
                 }
                 Shift { inner, amount, cutoff, .. } => {
-                    // Shallow-force the cutoff>0 shift, then apply accumulated pending shift
                     let forced = self.push_shift(inner, amount, cutoff);
-                    if pending_shift > 0 {
+                    if pending_shift != 0 {
                         e = self.mk_shift(forced, pending_shift);
                         pending_shift = 0;
                     } else {
@@ -820,7 +820,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
                 }
                 App { fun, arg, .. } => {
                     e = fun;
-                    let arg = if pending_shift > 0 {
+                    let arg = if pending_shift != 0 {
                         self.mk_shift(arg, pending_shift)
                     } else {
                         arg
@@ -828,7 +828,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
                     args.push(arg);
                 },
                 _ => {
-                    if pending_shift > 0 {
+                    if pending_shift != 0 {
                         e = self.mk_shift(e, pending_shift);
                     }
                     break;
@@ -1173,7 +1173,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
 
     /// Check if `b` equals `shift(a, delta)` without allocating.
     /// Used to verify shift-invariant cache hits.
-    pub(crate) fn shift_eq(&mut self, a: ExprPtr<'t>, b: ExprPtr<'t>, delta: u16) -> bool {
+    pub(crate) fn shift_eq(&mut self, a: ExprPtr<'t>, b: ExprPtr<'t>, delta: i16) -> bool {
         self.shift_eq_aux(a, b, delta, 0)
     }
 
@@ -1182,17 +1182,17 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
     ///   eff = if amt2 > 0 && r >= sc2 { r + amt2 } else { r }  (outer shift)
     /// This represents shift(shift(e, amt1, sc1), amt2, sc2) without allocation.
     #[inline]
-    fn bishift_apply(amt1: u16, sc1: u16, amt2: u16, sc2: u16, i: u16) -> u16 {
-        let r = if amt1 > 0 && i >= sc1 { i + amt1 } else { i };
-        if amt2 > 0 && r >= sc2 { r + amt2 } else { r }
+    fn bishift_apply(amt1: i16, sc1: u16, amt2: i16, sc2: u16, i: u16) -> u16 {
+        let r = if amt1 != 0 && i >= sc1 { (i as i16 + amt1) as u16 } else { i };
+        if amt2 != 0 && r >= sc2 { (r as i16 + amt2) as u16 } else { r }
     }
 
     /// Try to absorb a Shift(_, new_amt, new_sc) as the new innermost layer
     /// into an existing BiShift (amt1, sc1, amt2, sc2).
     /// Returns Some((new_amt1, new_sc1, new_amt2, new_sc2)) for the composed BiShift, or None.
     #[inline]
-    fn bishift_absorb(amt1: u16, sc1: u16, amt2: u16, sc2: u16,
-                      new_amt: u16, new_sc: u16) -> Option<(u16, u16, u16, u16)> {
+    fn bishift_absorb(amt1: i16, sc1: u16, amt2: i16, sc2: u16,
+                      new_amt: i16, new_sc: u16) -> Option<(i16, u16, i16, u16)> {
         if new_amt == 0 { return Some((amt1, sc1, amt2, sc2)); }
         if amt1 == 0 {
             // Inner layer is free; put the new shift there
@@ -1205,7 +1205,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
             // Same cutoff: add amounts
             return Some((amt1 + new_amt, sc1, amt2, sc2));
         }
-        if new_sc < sc1 && new_amt >= sc1 - new_sc {
+        if new_sc < sc1 && new_amt >= (sc1 - new_sc) as i16 {
             // Inner shift lifts everything >= new_sc past sc1: compose additively
             return Some((amt1 + new_amt, new_sc, amt2, sc2));
         }
@@ -1214,8 +1214,8 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
             // For i < sc1: eff = i
             // For sc1 <= i < new_sc: eff = i + amt1
             // For i >= new_sc: eff = i + new_amt + amt1
-            // Represent as: layer 1 = (amt1, sc1), layer 2 = (new_amt, new_sc + amt1)
-            return Some((amt1, sc1, new_amt, new_sc + amt1));
+            // Represent as: layer 1 = (amt1, sc1), layer 2 = (new_amt, (new_sc as i16 + amt1) as u16)
+            return Some((amt1, sc1, new_amt, (new_sc as i16 + amt1) as u16));
         }
         None
     }
@@ -1241,7 +1241,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         result
     }
 
-    fn shift_eq_aux(&mut self, a: ExprPtr<'t>, b: ExprPtr<'t>, delta: u16, cutoff: u16) -> bool {
+    fn shift_eq_aux(&mut self, a: ExprPtr<'t>, b: ExprPtr<'t>, delta: i16, cutoff: u16) -> bool {
         use crate::expr::Expr::*;
         self.trace.shift_eq_aux_calls += 1;
         // Fast path: pointer equality. Valid when delta=0 (no shift needed)
@@ -1255,7 +1255,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         let se_tag = {
             let ak = (a.dag_marker as u64) << 32 | a.idx as u64;
             let bk = (b.dag_marker as u64) << 32 | b.idx as u64;
-            let dc = (delta as u64) << 16 | cutoff as u64;
+            let dc = (delta as u16 as u64) << 16 | cutoff as u64;
             ak.wrapping_mul(0x9e3779b97f4a7c15).wrapping_add(bk).wrapping_mul(0x517cc1b727220a95).wrapping_add(dc)
         };
         let se_idx = (se_tag as usize) & (crate::util::SHIFT_EQ_CACHE_SIZE - 1);
@@ -1267,7 +1267,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         result
     }
 
-    fn shift_eq_aux_inner(&mut self, a: ExprPtr<'t>, b: ExprPtr<'t>, delta: u16, cutoff: u16) -> bool {
+    fn shift_eq_aux_inner(&mut self, a: ExprPtr<'t>, b: ExprPtr<'t>, delta: i16, cutoff: u16) -> bool {
         use crate::expr::Expr::*;
         // Strip Shift wrappers before structural comparison.
         // This must come before the nlbv early-outs since Shift nodes change
@@ -1338,8 +1338,8 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
     /// Checks: shift(shift(a, a1, as1), a2, as2) == shift(shift(b, b1, bs1), b2, bs2)
     /// This handles mismatched Shift cutoffs that shift_eq_aux can't absorb.
     fn shift_eq_pending(&mut self, a: ExprPtr<'t>, b: ExprPtr<'t>,
-                        a1: u16, as1: u16, a2: u16, as2: u16,
-                        b1: u16, bs1: u16, b2: u16, bs2: u16) -> bool {
+                        a1: i16, as1: u16, a2: i16, as2: u16,
+                        b1: i16, bs1: u16, b2: i16, bs2: u16) -> bool {
         use crate::expr::Expr::*;
         self.trace.shift_eq_pending_calls += 1;
         // Fast path: pointer equality with identical pending shifts
@@ -1439,13 +1439,13 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
     }
 
     /// Structural comparison for shift_eq, assuming top-level Shifts already stripped.
-    fn shift_eq_struct(&mut self, a: ExprPtr<'t>, b: ExprPtr<'t>, delta: u16, cutoff: u16) -> bool {
+    fn shift_eq_struct(&mut self, a: ExprPtr<'t>, b: ExprPtr<'t>, delta: i16, cutoff: u16) -> bool {
         use crate::expr::Expr::*;
         self.trace.shift_eq_struct_calls += 1;
         match (self.read_expr(a), self.read_expr(b)) {
             (Var { dbj_idx: i, .. }, Var { dbj_idx: j, .. }) => {
                 if i >= cutoff {
-                    j == i + delta
+                    j as i16 == i as i16 + delta
                 } else {
                     j == i  // bound var: not shifted
                 }

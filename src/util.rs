@@ -933,12 +933,14 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
     }
 
     /// Shift: increment head delta by k. O(1).
-    pub(crate) fn fvar_shift(&mut self, fvl: FVarList<'t>, k: u16) -> FVarList<'t> {
+    pub(crate) fn fvar_shift(&mut self, fvl: FVarList<'t>, k: i16) -> FVarList<'t> {
         match fvl {
             None => None,
             Some(ptr) => {
                 let node = self.read_fvar_node(ptr);
-                Some(self.alloc_fvar_node(node.delta + k, node.tail))
+                let new_delta = node.delta as i16 + k;
+                assert!(new_delta >= 0, "fvar_shift: delta {} + k {} would go negative", node.delta, k);
+                Some(self.alloc_fvar_node(new_delta as u16, node.tail))
             }
         }
     }
@@ -946,25 +948,24 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
     /// Shift free var indices >= cutoff by k in the FVarList.
     /// Walk the delta-encoded list to find the first entry >= cutoff,
     /// add k to its delta, share the tail. O(position of cutoff in list).
-    pub(crate) fn fvar_shift_cutoff(&mut self, fvl: FVarList<'t>, k: u16, cutoff: u16) -> FVarList<'t> {
+    pub(crate) fn fvar_shift_cutoff(&mut self, fvl: FVarList<'t>, k: i16, cutoff: u16) -> FVarList<'t> {
         if cutoff == 0 {
             return self.fvar_shift(fvl, k);
         }
         self.fvar_shift_cutoff_aux(fvl, k, cutoff, 0)
     }
 
-    fn fvar_shift_cutoff_aux(&mut self, fvl: FVarList<'t>, k: u16, cutoff: u16, abs_pos: u16) -> FVarList<'t> {
+    fn fvar_shift_cutoff_aux(&mut self, fvl: FVarList<'t>, k: i16, cutoff: u16, abs_pos: u16) -> FVarList<'t> {
         match fvl {
             None => None,
             Some(ptr) => {
                 let node = self.read_fvar_node(ptr);
-                // Current absolute index: first element has abs = delta, subsequent have abs = prev_abs + 1 + delta
                 let cur_abs = abs_pos + node.delta;
                 if cur_abs >= cutoff {
-                    // This entry and all after get shifted by k
-                    Some(self.alloc_fvar_node(node.delta + k, node.tail))
+                    let new_delta = node.delta as i16 + k;
+                    assert!(new_delta >= 0, "fvar_shift_cutoff: delta {} + k {} would go negative", node.delta, k);
+                    Some(self.alloc_fvar_node(new_delta as u16, node.tail))
                 } else {
-                    // This entry stays, recurse on tail
                     let new_tail = self.fvar_shift_cutoff_aux(node.tail, k, cutoff, cur_abs + 1);
                     Some(self.alloc_fvar_node(node.delta, new_tail))
                 }
@@ -1471,19 +1472,14 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
     /// Create a delayed shift node: Shift(inner, amount) means all free Var indices
     /// in `inner` are shifted up by `amount`. O(1) — no traversal.
     /// Collapses nested shifts and elides shifts on closed expressions.
-    pub fn mk_shift(&mut self, inner: ExprPtr<'t>, amount: u16) -> ExprPtr<'t> {
-        // Lazy shifts: create Shift wrapper nodes instead of traversing.
-        self.mk_shift_lazy(inner, amount)
-    }
-
-    pub fn mk_shift_lazy(&mut self, inner: ExprPtr<'t>, amount: u16) -> ExprPtr<'t> {
+    pub fn mk_shift(&mut self, inner: ExprPtr<'t>, amount: i16) -> ExprPtr<'t> {
         self.mk_shift_cutoff(inner, amount, 0)
     }
 
     /// Create a delayed shift node: Shift(inner, amount, cutoff) means free Var indices
-    /// in `inner` with index >= cutoff are shifted up by `amount`. O(1) — no traversal.
-    /// Collapses nested shifts when cutoffs match.
-    pub fn mk_shift_cutoff(&mut self, inner: ExprPtr<'t>, amount: u16, cutoff: u16) -> ExprPtr<'t> {
+    /// in `inner` with index >= cutoff are shifted by `amount` (positive=up, negative=down).
+    /// O(1) — no traversal. Collapses nested shifts when cutoffs match.
+    pub fn mk_shift_cutoff(&mut self, inner: ExprPtr<'t>, amount: i16, cutoff: u16) -> ExprPtr<'t> {
         if amount == 0 {
             return inner;
         }
@@ -1493,9 +1489,12 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
             return inner;
         }
         // Normalize cutoff to 0 when all free vars are >= cutoff.
-        // This enables more Shift collapsing and faster handling in whnf/shift_eq.
         let inner_fvl = inner_expr.get_fvar_list();
         let cutoff = if cutoff > 0 && self.fvar_lb(inner_fvl) >= cutoff { 0 } else { cutoff };
+        // For negative shifts with cutoff=0, validate that fvar_lb won't go negative.
+        debug_assert!(amount >= 0 || cutoff > 0 || (self.fvar_lb(inner_fvl) as i16) + amount >= 0,
+            "mk_shift: negative shift would produce invalid fvar indices: fvar_lb={}, amount={}, cutoff={}",
+            self.fvar_lb(inner_fvl), amount, cutoff);
         // Collapse nested shifts when cutoffs match: Shift(Shift(e, j, c), k, c) -> Shift(e, j+k, c)
         if let Expr::Shift { inner: inner2, amount: prev, cutoff: prev_cutoff, .. } = inner_expr {
             if prev_cutoff == cutoff {
@@ -1505,21 +1504,24 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         // Eagerly force simple expressions (O(1))
         if cutoff == 0 {
             if let Expr::Var { dbj_idx, .. } = inner_expr {
-                return self.mk_var(dbj_idx + amount);
+                let new_idx = dbj_idx as i16 + amount;
+                debug_assert!(new_idx >= 0, "mk_shift: Var({}) + {} would go negative", dbj_idx, amount);
+                return self.mk_var(new_idx as u16);
             }
         }
         // Dedup: return existing Shift node if we've created this exact (inner, amount, cutoff) before.
-        let dedup_key = (inner, amount, cutoff);
+        let dedup_key = (inner, amount as u16, cutoff);
         if let Some(&existing) = self.expr_cache.shift_dedup.get(&dedup_key) {
             self.trace.shift_dedup_hits += 1;
             return existing;
         }
         self.trace.alloc_mk_shift += 1;
         let has_fvars = inner_expr.has_fvars();
-        let hash = hash64!(crate::expr::SHIFT_HASH, inner, amount, cutoff);
+        let hash = hash64!(crate::expr::SHIFT_HASH, inner, amount as u16, cutoff);
         let struct_hash = inner_expr.get_struct_hash();
         let fvar_list = self.fvar_shift_cutoff(inner_fvl, amount, cutoff);
-        let result = self.alloc_expr(Expr::Shift { hash, struct_hash, fvar_list, inner, amount, cutoff, num_loose_bvars: nlbv + amount, has_fvars });
+        let new_nlbv = (nlbv as i16 + amount).max(0) as u16;
+        let result = self.alloc_expr(Expr::Shift { hash, struct_hash, fvar_list, inner, amount, cutoff, num_loose_bvars: new_nlbv, has_fvars });
         self.expr_cache.shift_dedup.insert(dedup_key, result);
         result
     }
@@ -1528,7 +1530,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
     /// `push_shift(Shift(Pi(ty, body), k))` → `Pi(Shift(ty, k), Shift(body, k+1))`
     /// O(1) per binder node vs O(n) for full traversal. For App, recurses into both fun
     /// and arg to keep the App spine shift-free. Returns e unchanged if no shift needed.
-    pub fn push_shift(&mut self, e: ExprPtr<'t>, amount: u16, cutoff: u16) -> ExprPtr<'t> {
+    pub fn push_shift(&mut self, e: ExprPtr<'t>, amount: i16, cutoff: u16) -> ExprPtr<'t> {
         self.trace.push_shift_calls += 1;
         if amount == 0 {
             return e;
@@ -1537,7 +1539,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         if expr.num_loose_bvars() <= cutoff {
             return e;
         }
-        let cache_key = (e, amount, cutoff);
+        let cache_key = (e, amount as u16, cutoff);
         if let Some(&result) = self.expr_cache.shift_cache.get(&cache_key) {
             self.trace.push_shift_cache_hits += 1;
             return result;
@@ -1547,7 +1549,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         result
     }
 
-    fn push_shift_inner(&mut self, e: ExprPtr<'t>, amount: u16, cutoff: u16) -> ExprPtr<'t> {
+    fn push_shift_inner(&mut self, e: ExprPtr<'t>, amount: i16, cutoff: u16) -> ExprPtr<'t> {
         let expr = self.read_expr(e);
         if expr.num_loose_bvars() <= cutoff {
             return e;
@@ -1565,7 +1567,9 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
             }
             Expr::Var { dbj_idx, .. } => {
                 if dbj_idx >= cutoff {
-                    self.mk_var(dbj_idx + amount)
+                    let new_idx = dbj_idx as i16 + amount;
+                    debug_assert!(new_idx >= 0, "push_shift: Var({}) + {} would go negative", dbj_idx, amount);
+                    self.mk_var(new_idx as u16)
                 } else {
                     e
                 }
@@ -1641,8 +1645,8 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
                 if prev_cutoff == cutoff {
                     // Cutoffs match: Shift(inner, prev, c) shift_down(amount, c)
                     // = Shift(inner, prev - amount, c) if prev >= amount, else force + recurse.
-                    if prev >= amount {
-                        self.mk_shift_cutoff(inner, prev - amount, cutoff)
+                    if prev >= amount as i16 {
+                        self.mk_shift_cutoff(inner, prev - amount as i16, cutoff)
                     } else {
                         // prev < amount: force the Shift, then shift down the remainder
                         let forced = self.push_shift(inner, prev, prev_cutoff);
