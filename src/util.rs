@@ -129,61 +129,61 @@ impl<K: Eq + std::hash::Hash, V> LazyMap<K, V> {
 /// map. The common case (1 entry per key) is stored inline in SmallVec; collisions
 /// simply extend the chain.
 ///
-// ChainMap: FxHashMap primary + Vec overflow for hash-collision chaining.
-// Most keys have exactly one value (stored in the HashMap). On collision,
-// additional values go into the overflow Vec and are found by linear scan.
-// TODO: Consider implementing with linear probing / open addressing inside
-// a single flat HashMap (lookup-before-insert for chaining on top of FxHashMap).
-pub(crate) struct ChainMap<K, V> {
-    primary: FxHashMap<K, V>,
-    overflow: Vec<(K, V)>,
+/// Trait for keys that support chaining by incrementing.
+/// K+1, K+2, ... are used as overflow slots in ChainMap.
+pub(crate) trait ChainKey: Eq + std::hash::Hash + Copy {
+    fn chain_next(self) -> Self;
 }
+
+impl ChainKey for (u64, u64) {
+    fn chain_next(self) -> Self { (self.0, self.1.wrapping_add(1)) }
+}
+
+impl ChainKey for ((u64, u64), (u64, u64)) {
+    fn chain_next(self) -> Self { (self.0, (self.1.0, self.1.1.wrapping_add(1))) }
+}
+
+// ChainMap: open-addressed chaining in a single FxHashMap.
+// Insert at key; on collision insert at key+1, key+2, etc.
+// Lookup probes key, key+1, ... until miss.
+pub(crate) struct ChainMap<K, V>(FxHashMap<K, V>);
 
 impl<K, V> ChainMap<K, V> {
-    pub(crate) fn new() -> Self { ChainMap { primary: new_fx_hash_map(), overflow: Vec::new() } }
-    pub(crate) fn clear(&mut self) { self.primary.clear(); self.overflow.clear(); }
+    pub(crate) fn new() -> Self { ChainMap(new_fx_hash_map()) }
+    pub(crate) fn clear(&mut self) { self.0.clear(); }
 }
 
-impl<K: Eq + std::hash::Hash + Copy, V: Copy> ChainMap<K, V> {
+impl<K: ChainKey, V: Copy> ChainMap<K, V> {
     /// Collect all values for a key into a SmallVec.
     pub(crate) fn get_chain(&self, key: &K) -> SmallVec<[V; 2]> {
         let mut result = SmallVec::new();
-        if let Some(&v) = self.primary.get(key) {
-            result.push(v);
-            for &(ref k, v) in &self.overflow {
-                if k == key { result.push(v); }
+        let mut k = *key;
+        loop {
+            match self.0.get(&k) {
+                Some(&v) => { result.push(v); k = k.chain_next(); }
+                None => break,
             }
         }
         result
     }
 
-    /// Get a mutable reference to a specific chain entry by index (0 = primary).
+    /// Get a mutable reference to a specific chain entry by index.
     pub(crate) fn get_mut(&mut self, key: &K, idx: usize) -> Option<&mut V> {
-        if idx == 0 {
-            return self.primary.get_mut(key);
-        }
-        let mut count = 0usize;
-        for (k, v) in &mut self.overflow {
-            if k == key {
-                count += 1;
-                if count == idx { return Some(v); }
-            }
-        }
-        None
+        let mut k = *key;
+        for _ in 0..idx { k = k.chain_next(); }
+        self.0.get_mut(&k)
     }
 
     /// Append a value to the chain for this key.
     pub(crate) fn push(&mut self, key: K, value: V) {
-        if self.primary.contains_key(&key) {
-            self.overflow.push((key, value));
-        } else {
-            self.primary.insert(key, value);
-        }
+        let mut k = key;
+        while self.0.contains_key(&k) { k = k.chain_next(); }
+        self.0.insert(k, value);
     }
 
     /// Insert or replace the first entry in the chain.
     pub(crate) fn insert_first(&mut self, key: K, value: V) {
-        self.primary.insert(key, value);
+        self.0.insert(key, value);
     }
 }
 
@@ -194,7 +194,7 @@ impl<K, V> LazyChainMap<K, V> {
     pub(crate) fn new() -> Self { LazyChainMap(None) }
 }
 
-impl<K: Eq + std::hash::Hash + Copy, V: Copy> LazyChainMap<K, V> {
+impl<K: ChainKey, V: Copy> LazyChainMap<K, V> {
     pub(crate) fn get_chain(&self, key: &K) -> SmallVec<[V; 2]> {
         match &self.0 {
             Some(map) => map.get_chain(key),
