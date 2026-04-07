@@ -384,6 +384,7 @@ impl<'t> ExprCache<'t> {
             mk_var_cache: Vec::new(),
         }
     }
+
 }
 
 pub const SHIFT_EQ_CACHE_SIZE: usize = 1 << 20; // 1M entries
@@ -452,6 +453,16 @@ impl ReusableCaches {
         self.shift_eq_pending_cache.reset();
     }
 }
+/// Type-erased LeanDag for reuse across declarations.
+/// The inner LeanDag<'static> is always cleared before being transmuted to the correct lifetime.
+pub struct ReusableDag(LeanDag<'static>);
+
+impl ReusableDag {
+    pub fn new(config: &Config) -> Self {
+        ReusableDag(LeanDag::with_capacity(config, 16384))
+    }
+}
+
 pub const MK_APP_CACHE_SIZE: usize = 1 << 20; // 1M entries
 pub const MK_APP_DM_THRESHOLD: u32 = 10_000; // allocate DM cache after this many misses
 
@@ -493,25 +504,33 @@ impl<'p> ExportFile<'p> {
     pub fn with_tc_and_declar<F, A>(&self, d: crate::env::DeclarInfo<'p>, f: F) -> (A, TcTrace)
     where
         F: FnOnce(&mut TypeChecker<'_, '_, 'p>) -> A, {
-        self.with_tc_and_declar_reusing(d, ReusableCaches::new(), f).0
+        self.with_tc_and_declar_reusing(d, ReusableCaches::new(), ReusableDag::new(&self.config), f).0
     }
 
-    /// Like `with_tc_and_declar`, but reuses pre-allocated caches across declarations.
-    pub fn with_tc_and_declar_reusing<F, A>(&self, d: crate::env::DeclarInfo<'p>, mut reusable: ReusableCaches, f: F) -> ((A, TcTrace), ReusableCaches)
+    /// Like `with_tc_and_declar`, but reuses pre-allocated caches and dag across declarations.
+    /// The dag is passed as `ReusableDag` (type-erased) and rebound to the correct lifetime.
+    pub fn with_tc_and_declar_reusing<F, A>(&self, d: crate::env::DeclarInfo<'p>, mut reusable: ReusableCaches, reusable_dag: ReusableDag, f: F) -> ((A, TcTrace), ReusableCaches, ReusableDag)
     where
         F: FnOnce(&mut TypeChecker<'_, '_, 'p>) -> A, {
         reusable.reset();
-        // Pre-size the per-declaration dag to avoid rehash overhead.
-        // 16K covers most declarations; larger ones still grow dynamically.
-        let mut dag = LeanDag::with_capacity(&self.config, 16384);
-        let mut ctx = TcCtx::new(self, &mut dag, reusable);
+        // SAFETY: ReusableDag wraps LeanDag<'static>. After clear_for_reuse(), the IndexSets
+        // are empty (only Anon/Zero sentinels which are 'static). All types use PhantomData
+        // for lifetimes — identical layout across all lifetimes.
+        let mut dag_storage = std::mem::ManuallyDrop::new(reusable_dag.0);
+        let dag_ref: &mut LeanDag<'_> = unsafe { &mut *(&mut *dag_storage as *mut LeanDag<'static>).cast() };
+        dag_ref.clear_for_reuse();
+        let mut ctx = TcCtx::new(self, dag_ref, reusable);
         let env = self.new_env(EnvLimit::ByName(d.name));
         let mut tc = TypeChecker::new(&mut ctx, &env, Some(d));
         let result = f(&mut tc);
         let mut trace = tc.ctx.trace;
         trace.dag_size = tc.ctx.dag.exprs.len() as u64;
         let reusable = std::mem::replace(&mut tc.ctx.reusable, ReusableCaches::new());
-        ((result, trace), reusable)
+        drop(tc);
+        drop(ctx);
+        // Reclaim ownership and erase lifetime back to 'static.
+        let reusable_dag = ReusableDag(std::mem::ManuallyDrop::into_inner(dag_storage));
+        ((result, trace), reusable, reusable_dag)
     }
 
     pub fn with_nanoda_tc_and_declar<F, A>(&self, d: crate::env::DeclarInfo<'p>, f: F) -> (A, TcTrace)
@@ -1812,6 +1831,22 @@ impl<'a> LeanDag<'a> {
     /// of their backing storage, satisfying the exporter's assumption.
     pub fn new(config: &Config) -> Self {
         Self::with_capacity(config, 0)
+    }
+
+    /// Clear all storage for reuse across declarations, preserving allocated capacity.
+    pub fn clear_for_reuse(&mut self) {
+        self.names.clear();
+        self.levels.clear();
+        self.exprs.clear();
+        self.uparams.clear();
+        self.strings.clear();
+        if let Some(ref mut bignums) = self.bignums {
+            bignums.clear();
+        }
+        self.fvarlists.clear();
+        // Re-insert sentinel values (Anon at index 0, Zero at index 0).
+        let _ = self.names.insert(Name::Anon);
+        let _ = self.levels.insert(Level::Zero);
     }
 
     pub fn with_capacity(config: &Config, expr_capacity: usize) -> Self {

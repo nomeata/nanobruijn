@@ -162,6 +162,11 @@ Fixed worst outliers: #298261 from 11.5s to 830ms, #357120 from 2.3s to 85ms.
   **19.4% improvement on Init, ~20% on Mathlib 10K.**
 - Pre-sized per-declaration dag: `LeanDag::with_capacity(16384)` eliminates hashbrown rehash
   overhead (was 2.3% of runtime from repeated doublings during declaration checking).
+- `ReusableDag`: Reuses the per-declaration dag's allocated IndexSet memory across declarations
+  via `clear_for_reuse()` (clears entries but preserves capacity). Uses `ManuallyDrop` +
+  pointer cast to rebind `LeanDag<'static>` to the local TcCtx lifetime (sound because all
+  types use PhantomData for lifetimes with identical layout). Eliminates per-declaration
+  allocation/deallocation of ~2MB IndexSets. **~20% improvement on Init.**
 
 ## Results
 
