@@ -330,8 +330,9 @@ pub struct ExprCache<'t> {
     /// before every new call to `inst`, so there's no need to cache the sequence
     /// of substitutions.
     /// inst_cache key: (expr, offset | sh_amt << 16 | sh_cut << 32) -> result.
-    /// Packs offset/sh_amt/sh_cut into a single u64 for faster hashing.
-    pub(crate) inst_cache: FxHashMap<(ExprPtr<'t>, u64), ExprPtr<'t>>,
+    /// Direct-mapped cache with generation counter for O(1) clear.
+    pub(crate) inst_cache: Vec<(u32, u64, ExprPtr<'t>, ExprPtr<'t>)>,  // (gen, params, key_expr, result)
+    pub(crate) inst_cache_gen: u32,
     /// Caches (e, ks, vs) |-> output for level substitution.
     pub(crate) subst_cache: FxHashMap<(ExprPtr<'t>, LevelsPtr<'t>, LevelsPtr<'t>), ExprPtr<'t>>,
     pub(crate) dsubst_cache: FxHashMap<(ExprPtr<'t>, LevelsPtr<'t>, LevelsPtr<'t>), ExprPtr<'t>>,
@@ -369,7 +370,8 @@ pub struct ExprCache<'t> {
 impl<'t> ExprCache<'t> {
     fn new() -> Self {
         Self {
-            inst_cache: new_fx_hash_map(),
+            inst_cache: Vec::new(),
+            inst_cache_gen: 0,
             abstr_cache: new_fx_hash_map(),
             subst_cache: new_fx_hash_map(),
             dsubst_cache: new_fx_hash_map(),
@@ -466,6 +468,7 @@ impl ReusableDag {
 
 pub const MK_APP_CACHE_SIZE: usize = 1 << 16; // 64K entries (1MB)
 pub const MK_APP_DM_THRESHOLD: u32 = 1_000; // allocate DM cache after this many misses
+pub const INST_CACHE_SIZE: usize = 1 << 12; // 4096 entries for inst_cache DM
 
 pub struct ExportFile<'p> {
     /// The underlying storage for `Name`, `Level`, and `Expr` items (and Strings).
@@ -1313,7 +1316,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         } else {
             self.alloc_expr(app_expr)
         };
-        // Lazily allocate DM cache after enough misses to justify 16MB
+        // Lazily allocate DM cache after enough misses to justify 1MB
         if dm_len == 0 {
             self.expr_cache.mk_app_miss_count += 1;
             if self.expr_cache.mk_app_miss_count >= MK_APP_DM_THRESHOLD {

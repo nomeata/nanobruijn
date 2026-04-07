@@ -180,9 +180,10 @@ Fixed worst outliers: #298261 from 11.5s to 830ms, #357120 from 2.3s to 85ms.
 
 | Benchmark | nanoda | nanobruijn | Ratio |
 |-----------|--------|------------|-------|
-| Init (54k decls, 310MB) | 26s | 21s | 0.81x |
+| Init (54k decls, 310MB) | 26s | 20s | 0.77x |
 | app-lam N=4000 | 8.3s | 10ms | 0.001x |
-| Mathlib (630k decls, 4.9GB) | 978s | 1053s | **1.08x** |
+| Mathlib 100K (100k decls) | - | 128s | - |
+| Mathlib (630k decls, 4.9GB) | 978s | ~1025s (est.) | **~1.05x** |
 
 ### Gap analysis
 
@@ -200,11 +201,10 @@ more whnf/infer calls → more inst calls → more mk_app/mk_var calls.
 Per-operation cost is ~2.2x nanoda's, from shift_eq calls, extra expression nodes from
 Shift infrastructure, and fvar_union/fvar_shift_cutoff on every mk_app/pi/lambda.
 
-Profile hotspots (Init, post SmallVec/subst_aux opts): mk_app 13.6%, inst_aux 10.4%,
-insert_full 7.4%, whnf_no_unfolding 3.7%, HashMap::insert 3.6%, alloc_expr 3.4%,
-unfold_apps 3.3%, subst_aux 3.3%, infer_inner 2.8%, view_expr 2.6%,
-shift_eq_aux 2.4%, canonical_hash 1.6%, reserve_rehash 2.7% (total, 3 instances),
-mk_lambda 1.3%, ChainMap::get_chain 1.3%.
+Profile hotspots (Mathlib 100K): mk_app 9.85%, insert_full 7.76%, inst_aux 6.71%,
+parsing ~18%, reserve_rehash 3.36%, subst_aux 3.27%, alloc_expr ~3%, whnf_no_unfolding ~3%,
+infer_inner ~2.8%, view_expr ~2.6%, shift_eq_aux ~2.4%. inst_cache now uses 4K-entry
+direct-mapped Vec with generation counter (eliminated HashMap::insert overhead).
 
 ## Paths not taken
 
@@ -239,8 +239,11 @@ These approaches were tried and found counterproductive or unsound:
 - **Depth-sensitive canonical hash** (mixing shift amount into hash): Eliminates cross-depth
   verify-fails but loses 11% of valuable cross-depth cache hits. Net regression.
 - **inst_cache DM cache (64K, generation-counted)**: Replacing per-call HashMap with a
-  direct-mapped cache. 1.8% slower — the DM cache is in L2/L3 territory (1.3MB), while the
-  per-call HashMap is small and stays in L1.
+  direct-mapped cache at 64K entries (1.3MB). 1.8% slower — the DM cache is in L2/L3
+  territory while the per-call HashMap is small and stays in L1. At 4K entries (96KB),
+  however, the DM cache with generation counter gives ~3.6% improvement on Init and ~2.7%
+  on Mathlib 100K — the O(1) clear (generation bump vs HashMap::clear) and direct slot
+  access outweigh the occasional collisions. Now adopted as the inst_cache implementation.
 - **Lowering shift-down-only threshold to n_substs >= 1**: 0.4% slower due to HashMap overhead.
 - **Various micro-optimizations**: Identity checks in subst_aux/push_shift (branch overhead),
   struct_hash early rejection in shift_eq (most calls are positive matches), mk_app DM cache
@@ -255,7 +258,11 @@ These approaches were tried and found counterproductive or unsound:
   17% regression. The compiler optimizes the derived PartialEq into efficient memcmp; the
   match-based custom version has more branching overhead.
 - **Wider mk_app DM cache entries** (storing fun+arg+result to avoid read_expr verification):
-  24% regression. 24 bytes/entry vs 16 bytes increases L3 pressure by 50%.
+  No improvement at 64K entries (2MB, L2 pressure offset savings). Neutral at 32K (1MB).
+- **whnf_no_unfolding `cur` return shortcut**: Returning `cur` instead of `foldl_apps(e_fun, args)`
+  in no-reduction paths. 35% regression — `unfold_apps` normalizes Shift wrappers on args,
+  so `cur` still has unnormalized Shift wrappers while `foldl_apps` creates properly normalized
+  expressions.
 - **shift_eq GenCache reduction** (64K entries): 2x regression on Mathlib. 256K was marginal,
   1M is required for heavy declarations.
 - **PGO (Profile-Guided Optimization)**: <1% improvement on Init. Not worth the build complexity.
