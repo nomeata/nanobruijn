@@ -7,7 +7,6 @@ use crate::util::{
     nat_xor, nat_shr, nat_shl, CacheKey, ExportFile, ExprPtr, LevelPtr,
     LevelsPtr, NamePtr, TcCache, TcCtx, StringPtr, WhnfSlot
 };
-use smallvec::SmallVec;
 use std::error::Error;
 
 use num_traits::pow::Pow;
@@ -671,8 +670,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         let canon = self.ctx.canonical_hash(e);
         let is_check = flag == InferFlag::Check;
         // Infer cache lookup: scan chain.
-        let infer_chain: SmallVec<[(ExprPtr<'t>, ExprPtr<'t>, u16, bool); 2]> = SmallVec::from_slice(
-            self.tc_cache.infer_cache_chain(bucket_idx, &canon));
+        let infer_chain = self.tc_cache.infer_cache_chain(bucket_idx, &canon);
         if !infer_chain.is_empty() {
             self.ctx.trace.infer_cache_hash_hit += 1;
             for (ci, &(stored_input, stored_result, stored_depth, checked)) in infer_chain.iter().enumerate() {
@@ -745,8 +743,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
 
     /// Store an infer result in the chained cache.
     fn infer_cache_store(&mut self, bucket_idx: usize, canon: CacheKey, e: ExprPtr<'t>, r: ExprPtr<'t>, depth: u16, is_check: bool) {
-        let chain: SmallVec<[(ExprPtr<'t>, ExprPtr<'t>, u16, bool); 2]> = SmallVec::from_slice(
-            self.tc_cache.infer_cache_chain(bucket_idx, &canon));
+        let chain = self.tc_cache.infer_cache_chain(bucket_idx, &canon);
         for (ci, &(si, _sr, sd, sc)) in chain.iter().enumerate() {
             if si == e { return; }
             let is_family = if depth == sd {
@@ -1015,8 +1012,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         };
         // Look up in whnf cache chain.
         // Copy chain entries to release borrow before calling methods on self.
-        let chain: SmallVec<[WhnfSlot<'t>; 2]> = SmallVec::from_slice(
-            self.tc_cache.whnf_cache_chain(whnf_bucket_idx, &canon));
+        let chain = self.tc_cache.whnf_cache_chain(whnf_bucket_idx, &canon);
         if !chain.is_empty() {
             for (ci, &(stored_input, stored_result, stored_depth)) in chain.iter().enumerate() {
                 if let Some(result) = self.try_whnf_cache_hit(e, stored_input, stored_result, stored_depth, depth) {
@@ -1101,8 +1097,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
     /// Store a whnf result in the chained cache.
     fn whnf_cache_store(&mut self, bucket_idx: usize, canon: CacheKey, e: ExprPtr<'t>, result: ExprPtr<'t>, depth: u16) {
         let new_slot: WhnfSlot<'t> = (e, result, depth);
-        let chain: SmallVec<[WhnfSlot<'t>; 2]> = SmallVec::from_slice(
-            self.tc_cache.whnf_cache_chain(bucket_idx, &canon));
+        let chain = self.tc_cache.whnf_cache_chain(bucket_idx, &canon);
         for (ci, &(si, _sr, sd)) in chain.iter().enumerate() {
             if si == e { return; } // already stored
             let is_family = if depth == sd {
@@ -1178,8 +1173,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                 let cur_lb = self.ctx.fvar_lb(self.ctx.read_expr(cur).get_fvar_list());
                 (cur_depth - cur_lb) as usize
             };
-            let wnu_chain: SmallVec<[WhnfSlot<'t>; 2]> = SmallVec::from_slice(
-                self.tc_cache.wnu_cache_chain(wnu_bucket_idx, &cur_canon));
+            let wnu_chain = self.tc_cache.wnu_cache_chain(wnu_bucket_idx, &cur_canon);
             if !wnu_chain.is_empty() {
                 let mut wnu_hit = false;
                 for (ci, &(stored_input, stored_result, stored_depth)) in wnu_chain.iter().enumerate() {
@@ -1334,8 +1328,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                     (store_depth - entry_lb) as usize
                 };
                 let new_slot: WhnfSlot<'t> = (entry, result, store_depth);
-                let wnu_chain: SmallVec<[WhnfSlot<'t>; 2]> = SmallVec::from_slice(
-                    self.tc_cache.wnu_cache_chain(entry_bucket_idx, &entry_canon));
+                let wnu_chain = self.tc_cache.wnu_cache_chain(entry_bucket_idx, &entry_canon);
                 if !wnu_chain.is_empty() {
                     // Check if already stored
                     if wnu_chain.iter().any(|s| s.0 == entry) {

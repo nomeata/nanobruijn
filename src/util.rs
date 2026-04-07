@@ -129,44 +129,61 @@ impl<K: Eq + std::hash::Hash, V> LazyMap<K, V> {
 /// map. The common case (1 entry per key) is stored inline in SmallVec; collisions
 /// simply extend the chain.
 ///
-// TODO: Consider implementing this with linear probing / open addressing inside
-// a single flat HashMap (custom hasher where Hash = canonical hash, Eq = sem_eq).
-// This would avoid the SmallVec indirection. Requires a lookup-before-insert
-// pattern to implement chaining on top of a standard HashMap.
-pub(crate) struct ChainMap<K, V>(FxHashMap<K, SmallVec<[V; 1]>>);
-
-impl<K, V> ChainMap<K, V> {
-    pub(crate) fn new() -> Self { ChainMap(new_fx_hash_map()) }
-    pub(crate) fn clear(&mut self) { self.0.clear(); }
+// ChainMap: FxHashMap primary + Vec overflow for hash-collision chaining.
+// Most keys have exactly one value (stored in the HashMap). On collision,
+// additional values go into the overflow Vec and are found by linear scan.
+// TODO: Consider implementing with linear probing / open addressing inside
+// a single flat HashMap (lookup-before-insert for chaining on top of FxHashMap).
+pub(crate) struct ChainMap<K, V> {
+    primary: FxHashMap<K, V>,
+    overflow: Vec<(K, V)>,
 }
 
-impl<K: Eq + std::hash::Hash, V> ChainMap<K, V> {
-    /// Get the chain of values for a key.
-    pub(crate) fn get_chain(&self, key: &K) -> &[V] {
-        match self.0.get(key) {
-            Some(chain) => chain.as_slice(),
-            None => &[],
+impl<K, V> ChainMap<K, V> {
+    pub(crate) fn new() -> Self { ChainMap { primary: new_fx_hash_map(), overflow: Vec::new() } }
+    pub(crate) fn clear(&mut self) { self.primary.clear(); self.overflow.clear(); }
+}
+
+impl<K: Eq + std::hash::Hash + Copy, V: Copy> ChainMap<K, V> {
+    /// Collect all values for a key into a SmallVec.
+    pub(crate) fn get_chain(&self, key: &K) -> SmallVec<[V; 2]> {
+        let mut result = SmallVec::new();
+        if let Some(&v) = self.primary.get(key) {
+            result.push(v);
+            for &(ref k, v) in &self.overflow {
+                if k == key { result.push(v); }
+            }
         }
+        result
     }
 
-    /// Get a mutable reference to a specific chain entry by index.
+    /// Get a mutable reference to a specific chain entry by index (0 = primary).
     pub(crate) fn get_mut(&mut self, key: &K, idx: usize) -> Option<&mut V> {
-        self.0.get_mut(key)?.get_mut(idx)
+        if idx == 0 {
+            return self.primary.get_mut(key);
+        }
+        let mut count = 0usize;
+        for (k, v) in &mut self.overflow {
+            if k == key {
+                count += 1;
+                if count == idx { return Some(v); }
+            }
+        }
+        None
     }
 
     /// Append a value to the chain for this key.
     pub(crate) fn push(&mut self, key: K, value: V) {
-        self.0.entry(key).or_insert_with(SmallVec::new).push(value);
+        if self.primary.contains_key(&key) {
+            self.overflow.push((key, value));
+        } else {
+            self.primary.insert(key, value);
+        }
     }
 
-    /// Insert or replace the first entry in the chain. Used for single-entry semantics.
+    /// Insert or replace the first entry in the chain.
     pub(crate) fn insert_first(&mut self, key: K, value: V) {
-        let chain = self.0.entry(key).or_insert_with(SmallVec::new);
-        if chain.is_empty() {
-            chain.push(value);
-        } else {
-            chain[0] = value;
-        }
+        self.primary.insert(key, value);
     }
 }
 
@@ -177,11 +194,11 @@ impl<K, V> LazyChainMap<K, V> {
     pub(crate) fn new() -> Self { LazyChainMap(None) }
 }
 
-impl<K: Eq + std::hash::Hash, V> LazyChainMap<K, V> {
-    pub(crate) fn get_chain(&self, key: &K) -> &[V] {
+impl<K: Eq + std::hash::Hash + Copy, V: Copy> LazyChainMap<K, V> {
+    pub(crate) fn get_chain(&self, key: &K) -> SmallVec<[V; 2]> {
         match &self.0 {
             Some(map) => map.get_chain(key),
-            None => &[],
+            None => SmallVec::new(),
         }
     }
 
@@ -1968,9 +1985,9 @@ impl<'t> TcCache<'t> {
     // For whnf/infer/wnu caches: bucket 0 = base, bucket k>0 = frames[k-1].
     // For defeq caches: bucket k = frames[k] (no base bucket).
 
-    pub(crate) fn whnf_cache_chain(&self, bucket_idx: usize, key: &CacheKey) -> &[WhnfSlot<'t>] {
+    pub(crate) fn whnf_cache_chain(&self, bucket_idx: usize, key: &CacheKey) -> SmallVec<[WhnfSlot<'t>; 2]> {
         if bucket_idx == 0 { self.whnf_cache_base.get_chain(key) }
-        else { self.frames.get(bucket_idx - 1).map_or(&[], |f| f.whnf_cache.get_chain(key)) }
+        else { self.frames.get(bucket_idx - 1).map_or(SmallVec::new(), |f| f.whnf_cache.get_chain(key)) }
     }
 
     pub(crate) fn whnf_cache_get_mut(&mut self, bucket_idx: usize, key: &CacheKey, idx: usize) -> Option<&mut WhnfSlot<'t>> {
@@ -1994,9 +2011,9 @@ impl<'t> TcCache<'t> {
         else { self.frames.get(bucket_idx - 1).is_some() }
     }
 
-    pub(crate) fn wnu_cache_chain(&self, bucket_idx: usize, key: &CacheKey) -> &[WhnfSlot<'t>] {
+    pub(crate) fn wnu_cache_chain(&self, bucket_idx: usize, key: &CacheKey) -> SmallVec<[WhnfSlot<'t>; 2]> {
         if bucket_idx == 0 { self.wnu_cache_base.get_chain(key) }
-        else { self.frames.get(bucket_idx - 1).map_or(&[], |f| f.whnf_no_unfolding_cache.get_chain(key)) }
+        else { self.frames.get(bucket_idx - 1).map_or(SmallVec::new(), |f| f.whnf_no_unfolding_cache.get_chain(key)) }
     }
 
     pub(crate) fn wnu_cache_get_mut(&mut self, bucket_idx: usize, key: &CacheKey, idx: usize) -> Option<&mut WhnfSlot<'t>> {
@@ -2009,9 +2026,9 @@ impl<'t> TcCache<'t> {
         else if let Some(f) = self.frames.get_mut(bucket_idx - 1) { f.whnf_no_unfolding_cache.push(key, val); }
     }
 
-    pub(crate) fn infer_cache_chain(&self, bucket_idx: usize, key: &CacheKey) -> &[(ExprPtr<'t>, ExprPtr<'t>, u16, bool)] {
+    pub(crate) fn infer_cache_chain(&self, bucket_idx: usize, key: &CacheKey) -> SmallVec<[(ExprPtr<'t>, ExprPtr<'t>, u16, bool); 2]> {
         if bucket_idx == 0 { self.infer_cache_base.get_chain(key) }
-        else { self.frames.get(bucket_idx - 1).map_or(&[], |f| f.infer_cache.get_chain(key)) }
+        else { self.frames.get(bucket_idx - 1).map_or(SmallVec::new(), |f| f.infer_cache.get_chain(key)) }
     }
 
     pub(crate) fn infer_cache_get_mut(&mut self, bucket_idx: usize, key: &CacheKey, idx: usize) -> Option<&mut (ExprPtr<'t>, ExprPtr<'t>, u16, bool)> {
