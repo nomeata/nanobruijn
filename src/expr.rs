@@ -709,44 +709,44 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
             let r = match self.read_expr(e) {
                 Shift { inner, amount, cutoff, .. } => {
                     let inner_subst = self.subst_aux(inner, ks, vs);
-                    self.mk_shift_cutoff(inner_subst, amount, cutoff)
+                    if inner_subst == inner { e } else { self.mk_shift_cutoff(inner_subst, amount, cutoff) }
                 }
                 _ => match self.view_expr(e) {
                     Var { .. } | NatLit { .. } | StringLit { .. } => e,
                     Sort { level, .. } => {
-                        let level = self.subst_level(level, ks, vs);
-                        self.mk_sort(level)
+                        let new_level = self.subst_level(level, ks, vs);
+                        if new_level == level { e } else { self.mk_sort(new_level) }
                     }
                     Const { name, levels, .. } => {
-                        let levels = self.subst_levels(levels, ks, vs);
-                        self.mk_const(name, levels)
+                        let new_levels = self.subst_levels(levels, ks, vs);
+                        if new_levels == levels { e } else { self.mk_const(name, new_levels) }
                     }
                     App { fun, arg, .. } => {
-                        let fun = self.subst_aux(fun, ks, vs);
-                        let arg = self.subst_aux(arg, ks, vs);
-                        self.mk_app(fun, arg)
+                        let new_fun = self.subst_aux(fun, ks, vs);
+                        let new_arg = self.subst_aux(arg, ks, vs);
+                        if new_fun == fun && new_arg == arg { e } else { self.mk_app(new_fun, new_arg) }
                     }
                     Pi { binder_name, binder_style, binder_type, body, .. } => {
-                        let binder_type = self.subst_aux(binder_type, ks, vs);
-                        let body = self.subst_aux(body, ks, vs);
-                        self.mk_pi(binder_name, binder_style, binder_type, body)
+                        let new_type = self.subst_aux(binder_type, ks, vs);
+                        let new_body = self.subst_aux(body, ks, vs);
+                        if new_type == binder_type && new_body == body { e } else { self.mk_pi(binder_name, binder_style, new_type, new_body) }
                     }
                     Lambda { binder_name, binder_style, binder_type, body, .. } => {
-                        let binder_type = self.subst_aux(binder_type, ks, vs);
-                        let body = self.subst_aux(body, ks, vs);
-                        self.mk_lambda(binder_name, binder_style, binder_type, body)
+                        let new_type = self.subst_aux(binder_type, ks, vs);
+                        let new_body = self.subst_aux(body, ks, vs);
+                        if new_type == binder_type && new_body == body { e } else { self.mk_lambda(binder_name, binder_style, new_type, new_body) }
                     }
                     Let { binder_name, binder_type, val, body, nondep, .. } => {
-                        let binder_type = self.subst_aux(binder_type, ks, vs);
-                        let val = self.subst_aux(val, ks, vs);
-                        let body = self.subst_aux(body, ks, vs);
-                        self.mk_let(binder_name, binder_type, val, body, nondep)
+                        let new_type = self.subst_aux(binder_type, ks, vs);
+                        let new_val = self.subst_aux(val, ks, vs);
+                        let new_body = self.subst_aux(body, ks, vs);
+                        if new_type == binder_type && new_val == val && new_body == body { e } else { self.mk_let(binder_name, new_type, new_val, new_body, nondep) }
                     }
                     Local { .. } => panic!("level substitution should not find locals"),
                     Shift { .. } => unreachable!("view_expr never returns Shift"),
                     Proj { ty_name, idx, structure, .. } => {
-                        let structure = self.subst_aux(structure, ks, vs);
-                        self.mk_proj(ty_name, idx, structure)
+                        let new_structure = self.subst_aux(structure, ks, vs);
+                        if new_structure == structure { e } else { self.mk_proj(ty_name, idx, new_structure) }
                     }
                 }
             };
