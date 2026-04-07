@@ -1,5 +1,6 @@
 //! Implementation of Lean expressions
-use crate::util::{BigUintPtr, ExprPtr, FxHashMap, LevelPtr, LevelsPtr, NamePtr, Ptr, StringPtr, TcCtx};
+use crate::util::{AppArgs, BigUintPtr, ExprPtr, FxHashMap, LevelPtr, LevelsPtr, NamePtr, Ptr, StringPtr, TcCtx};
+use smallvec::SmallVec;
 use num_bigint::BigUint;
 use num_traits::identities::Zero;
 use Expr::*;
@@ -800,8 +801,8 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
 
     /// From `f a_0 .. a_N`, return `(f, [a_0, ..a_N])`
     /// Accumulates Shift through the App spine; returns lazy (Shift-wrapped) args and fun.
-    pub fn unfold_apps(&mut self, mut e: ExprPtr<'t>) -> (ExprPtr<'t>, Vec<ExprPtr<'t>>) {
-        let mut args = Vec::new();
+    pub fn unfold_apps(&mut self, mut e: ExprPtr<'t>) -> (ExprPtr<'t>, AppArgs<'t>) {
+        let mut args = AppArgs::new();
         let mut pending_shift: i16 = 0;
         loop {
             match self.read_expr(e) {
@@ -843,7 +844,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
     pub fn unfold_const_apps(
         &mut self,
         e: ExprPtr<'t>,
-    ) -> Option<(ExprPtr<'t>, NamePtr<'t>, LevelsPtr<'t>, Vec<ExprPtr<'t>>)> {
+    ) -> Option<(ExprPtr<'t>, NamePtr<'t>, LevelsPtr<'t>, AppArgs<'t>)> {
         let (f, args) = self.unfold_apps(e);
         match self.read_expr(f) {
             Const { name, levels, .. } => Some((f, name, levels, args)),
@@ -858,8 +859,8 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         }
     }
 
-    pub(crate) fn unfold_apps_stack(&mut self, mut e: ExprPtr<'t>) -> (ExprPtr<'t>, Vec<ExprPtr<'t>>) {
-        let mut args = Vec::new();
+    pub(crate) fn unfold_apps_stack(&mut self, mut e: ExprPtr<'t>) -> (ExprPtr<'t>, AppArgs<'t>) {
+        let mut args = AppArgs::new();
         loop {
             match self.view_expr(e) {
                 App { fun, arg, .. } => {

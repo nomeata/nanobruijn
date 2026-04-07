@@ -1,7 +1,7 @@
 use crate::env::{ConstructorData, Declar, DeclarInfo, DeclarMap, InductiveData, RecRule, RecursorData};
 use crate::expr::{BinderStyle, Expr::*};
 use crate::tc::{InferFlag, TypeChecker};
-use crate::util::{ExportFile, ExprPtr, FxIndexMap, LevelPtr, LevelsPtr, NamePtr, TcCtx};
+use crate::util::{AppArgs, ExportFile, ExprPtr, FxIndexMap, LevelPtr, LevelsPtr, NamePtr, TcCtx};
 use std::sync::Arc;
 
 impl<'t, 'p: 't> ExportFile<'p> {
@@ -764,7 +764,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
     /// For some application of arguments to an inductive type (e.g. `Eq A a`), get back
     /// the applied indices, and the index showing which inductive type from the block
     /// is being applied to.
-    fn get_i_indices(&mut self, st: &InductiveCheckState<'t>, ind_ty_app: ExprPtr<'t>) -> (usize, Vec<ExprPtr<'t>>) {
+    fn get_i_indices(&mut self, st: &InductiveCheckState<'t>, ind_ty_app: ExprPtr<'t>) -> (usize, AppArgs<'t>) {
         let valid_app_idx = self.which_valid_ind_app(st, ind_ty_app).unwrap();
         let (_, mut ctor_args_wo_params) = self.ctx.unfold_apps_stack(ind_ty_app);
         // Compensate for stack-like unfold

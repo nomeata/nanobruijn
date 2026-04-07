@@ -4,7 +4,7 @@ use crate::expr::Expr;
 use crate::level::Level;
 use crate::util::{
     nat_div, nat_mod, nat_sub, nat_gcd, nat_land, nat_lor,
-    nat_xor, nat_shr, nat_shl, CacheKey, ExportFile, ExprPtr, LevelPtr,
+    nat_xor, nat_shr, nat_shl, AppArgs, CacheKey, ExportFile, ExprPtr, LevelPtr,
     LevelsPtr, NamePtr, TcCache, TcCtx, StringPtr, WhnfSlot
 };
 use std::error::Error;
@@ -1290,7 +1290,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                     let inner = if args.is_empty() {
                         body
                     } else {
-                        let shifted_args: Vec<_> = args.into_iter().map(|a| self.ctx.mk_shift(a, 1)).collect();
+                        let shifted_args: AppArgs = args.into_iter().map(|a| self.ctx.mk_shift(a, 1)).collect();
                         self.ctx.foldl_apps(body, shifted_args.into_iter())
                     };
                     let reduced = self.whnf_no_unfolding_aux(inner, cheap_proj);

@@ -85,6 +85,7 @@ pub type NamePtr<'a> = Ptr<&'a Name<'a>>;
 pub type LevelPtr<'a> = Ptr<&'a Level<'a>>;
 pub type ExprPtr<'a> = Ptr<&'a Expr<'a>>;
 pub type BigUintPtr<'a> = Ptr<&'a BigUint>;
+pub type AppArgs<'a> = SmallVec<[ExprPtr<'a>; 8]>;
 
 pub(crate) fn new_fx_index_map<K, V>() -> FxIndexMap<K, V> { FxIndexMap::with_hasher(Default::default()) }
 
