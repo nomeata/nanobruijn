@@ -210,8 +210,10 @@ more whnf/infer calls → more inst calls → more mk_app/mk_var calls.
 Per-operation cost is ~2.2x nanoda's, from shift_eq calls, extra expression nodes from
 Shift infrastructure, and fvar_union/fvar_shift_cutoff on every mk_app/pi/lambda.
 
-Profile hotspots (Init, post alloc_expr_tc): mk_app 15.3%, inst_aux 8.6%, alloc_expr 7.6%,
-indexmap insert_full 5.0%, whnf_no_unfolding_aux 3.6%.
+Profile hotspots (Init, post DM cache right-sizing): mk_app 13.4%, inst_aux 9.3%,
+insert_full 7.2%, alloc_expr 3.9%, subst_aux 3.4%, whnf_no_unfolding 3.2%,
+unfold_apps 3.2%, HashMap::insert 5.6%, view_expr 2.2%, shift_eq_aux 2.1%,
+_int_free 2.1%, canonical_hash 1.7%.
 
 ## Paths not taken
 
@@ -265,6 +267,7 @@ These approaches were tried and found counterproductive or unsound:
   24% regression. 24 bytes/entry vs 16 bytes increases L3 pressure by 50%.
 - **shift_eq GenCache reduction** (64K entries): 2x regression on Mathlib. 256K was marginal,
   1M is required for heavy declarations.
+- **PGO (Profile-Guided Optimization)**: <1% improvement on Init. Not worth the build complexity.
 
 ## TODO
 
