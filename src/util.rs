@@ -135,12 +135,12 @@ pub(crate) trait ChainKey: Eq + std::hash::Hash + Copy {
     fn chain_next(self) -> Self;
 }
 
-impl ChainKey for (u64, u64) {
-    fn chain_next(self) -> Self { (self.0, self.1.wrapping_add(1)) }
+impl ChainKey for u64 {
+    fn chain_next(self) -> Self { self.wrapping_add(1) }
 }
 
-impl ChainKey for ((u64, u64), (u64, u64)) {
-    fn chain_next(self) -> Self { (self.0, (self.1.0, self.1.1.wrapping_add(1))) }
+impl ChainKey for (u64, u64) {
+    fn chain_next(self) -> Self { (self.0, self.1.wrapping_add(1)) }
 }
 
 // ChainMap: open-addressed chaining in a single FxHashMap.
@@ -215,9 +215,10 @@ impl<K: ChainKey, V: Copy> LazyChainMap<K, V> {
     }
 }
 
-/// Cache key types used in depth frames.
-pub(crate) type CacheKey = (u64, u64);
-pub(crate) type DefeqCacheKey = ((u64, u64), (u64, u64));
+/// Cache key: single u64 mixing struct_hash and fvar_list_hash.
+pub(crate) type CacheKey = u64;
+/// DefEq cache key: ordered pair of canonical hashes.
+pub(crate) type DefeqCacheKey = (u64, u64);
 
 /// A single depth frame: one local context entry plus all per-depth caches.
 /// Size: 16 bytes (local) + 7 * 8 bytes (lazy caches) = 72 bytes.
@@ -1055,9 +1056,11 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
     }
 
     /// Canonical hash for cache keys: (struct_hash, normalized_fvar_hash).
-    pub(crate) fn canonical_hash(&self, e: ExprPtr<'t>) -> (u64, u64) {
+    pub(crate) fn canonical_hash(&self, e: ExprPtr<'t>) -> u64 {
         let expr = self.read_expr(e);
-        (expr.get_struct_hash(), self.fvar_normalize_hash(expr.get_fvar_list()))
+        let sh = expr.get_struct_hash();
+        let fh = self.fvar_normalize_hash(expr.get_fvar_list());
+        sh ^ fh.wrapping_mul(0x9e3779b97f4a7c15) // mix with golden ratio
     }
 
     /// Compute a shift-invariant "child nlbv sign" for collision discrimination.

@@ -1925,7 +1925,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
     }
 
     /// Ordered canonical hash key for a pair of expressions.
-    fn defeq_canon_key(&self, x: ExprPtr<'t>, y: ExprPtr<'t>) -> (((u64, u64), (u64, u64)), bool) {
+    fn defeq_canon_key(&self, x: ExprPtr<'t>, y: ExprPtr<'t>) -> ((u64, u64), bool) {
         let cx = self.ctx.canonical_hash(x);
         let cy = self.ctx.canonical_hash(y);
         if cx <= cy {
