@@ -263,6 +263,9 @@ These approaches were tried and found counterproductive or unsound:
   Same root cause as ExprCache reuse without cap — HashMap capacity from previous declarations
   creates L1/L2 cache pressure even after shrinking. The allocation cost of fresh ExprCache
   per declaration is cheaper than the cache pressure from reused capacity.
+- **Precomputed canonical_hash in parallel Vec<u64>**: Store canonical_hash alongside DAG
+  expressions for O(1) lookup. No measurable improvement — the saved read_expr calls are
+  already cache-hot, and the Vec overhead (compute + push + memory) cancels the savings.
 
 ## TODO
 
