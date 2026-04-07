@@ -1979,12 +1979,16 @@ impl<'t> TcCache<'t> {
     /// Look up a local binding by de Bruijn index (0 = most recent).
     pub(crate) fn local_type(&self, dbj_idx: u16) -> ExprPtr<'t> {
         let depth = self.frames.len();
+        assert!(dbj_idx < depth as u16, "local_type: dbj_idx={} >= depth={} (free var reached type lookup)", dbj_idx, depth);
         self.frames[depth - 1 - dbj_idx as usize].local.0
     }
 
     /// Look up the value of a let-bound variable by de Bruijn index.
     pub(crate) fn local_value(&self, dbj_idx: u16) -> Option<ExprPtr<'t>> {
         let depth = self.frames.len();
+        if dbj_idx >= depth as u16 {
+            return None; // Free variable — not in local context
+        }
         self.frames[depth - 1 - dbj_idx as usize].local.1
     }
 

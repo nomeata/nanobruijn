@@ -641,11 +641,12 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
     }
 
     fn infer_inner(&mut self, e: ExprPtr<'t>, flag: InferFlag) -> ExprPtr<'t> {
+        let depth = self.depth() as u16;
         // Handle Shift nodes without forcing: infer(Shift(inner, k, 0), d) = mk_shift(infer(inner, d-k), k).
         // Temporarily shrink the context to depth d-k, infer inner, restore, shift result.
         // Only works for cutoff=0 (top-level shifts). For cutoff>0, force first.
         if let Expr::Shift { inner, amount, cutoff, .. } = self.ctx.read_expr(e) {
-            if cutoff == 0 {
+            if cutoff == 0 && amount > 0 {
                 let new_depth = self.depth() - amount as usize;
                 self.ctx.trace.infer_shift_peel += 1;
                 self.ctx.trace.shift_peel_frames_total += amount as u64;
@@ -654,6 +655,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                 self.tc_cache.extend(saved);
                 return self.ctx.mk_shift(inner_type, amount);
             } else {
+                // Negative shift or non-zero cutoff: force one level and re-infer.
                 let forced = self.ctx.push_shift(inner, amount, cutoff);
                 return self.infer(forced, flag);
             }
@@ -691,7 +693,10 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         }
         let r = match self.ctx.read_expr(e) {
             Local { binder_type, .. } => binder_type,
-            Var { dbj_idx, .. } => self.lookup_var(dbj_idx),
+            Var { dbj_idx, .. } => {
+                assert!(dbj_idx < depth, "infer_inner: Var({}) at depth {}", dbj_idx, depth);
+                self.lookup_var(dbj_idx)
+            },
             Sort { level, .. } => self.infer_sort(level, flag),
             App { .. } => self.infer_app(e, flag),
             Pi { .. } => self.infer_pi(e, flag),
@@ -1019,12 +1024,14 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                 if let Some(result) = self.try_whnf_cache_hit(e, stored_input, stored_result, stored_depth, depth) {
                     self.ctx.trace.whnf_cache_hits += 1;
                     if ci > 0 { self.ctx.trace.whnf_cache_overflow_hits += 1; }
-                    // On same-depth hit: replace entry's input ptr for future ptr_eq lookups.
-                    // On above-depth hit: do NOT replace — keep the low-depth canonical entry.
                     if stored_depth == depth && stored_input != e {
                         if let Some(slot) = self.tc_cache.whnf_cache_get_mut(whnf_bucket_idx, &canon, ci) {
                             *slot = (e, result, depth);
                         }
+                    }
+                    if stored_depth > depth {
+                        // Below-depth hit: return eagerly shifted result
+                        return result;
                     }
                     return result;
                 }
@@ -1066,35 +1073,32 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                 return Some(self.ctx.push_shift(stored_result, delta, 0));
             }
         }
-        // Below-depth (depth < stored_depth): only attempt O(1) result adjustment.
-        // Negative shifts don't compose correctly with binder traversal:
-        // shifted variables reference wrong locals after push_local in def_eq_binder_aux.
-        // Only use cheap adjustments (closed, Shift absorption, no-op).
+        // Below-depth hit: only for closed results or O(1) adjustable results.
+        // Check result usability BEFORE expensive shift_eq verification.
         if depth < stored_depth {
-            let delta = stored_depth - depth;
-            let adjustable = if self.ctx.num_loose_bvars(stored_result) == 0 {
-                true // closed result is depth-independent
-            } else if let Expr::Shift { amount, cutoff: 0, .. } = self.ctx.read_expr(stored_result) {
-                amount >= delta as i16 // can subtract delta from shift amount
+            let abs_delta = (stored_depth - depth) as i16;
+            let result_nlbv = self.ctx.num_loose_bvars(stored_result);
+            let usable = if result_nlbv == 0 {
+                true // Closed result
             } else if stored_result == stored_input {
-                true // whnf was a no-op
+                true // Identity (whnf was no-op)
+            } else if let Expr::Shift { amount, cutoff: 0, .. } = self.ctx.read_expr(stored_result) {
+                amount >= abs_delta // Shift-absorbable
             } else {
                 false
             };
-            if adjustable && self.ctx.shift_eq(e, stored_input, delta as i16) {
+            if usable && self.ctx.shift_eq(e, stored_input, abs_delta) {
                 self.ctx.trace.whnf_below_depth_hits += 1;
-                if self.ctx.num_loose_bvars(stored_result) == 0 {
+                if result_nlbv == 0 {
                     return Some(stored_result);
-                } else if let Expr::Shift { inner, amount, cutoff: 0, .. } = self.ctx.read_expr(stored_result) {
-                    if amount == delta as i16 {
-                        return Some(inner);
-                    } else {
-                        return Some(self.ctx.mk_shift(inner, amount - delta as i16));
-                    }
-                } else {
-                    // stored_result == stored_input, whnf was no-op
+                }
+                if stored_result == stored_input {
                     return Some(e);
                 }
+                if let Expr::Shift { inner, amount, cutoff: 0, .. } = self.ctx.read_expr(stored_result) {
+                    return Some(self.ctx.mk_shift(inner, amount - abs_delta));
+                }
+                unreachable!();
             }
         }
         None
@@ -1497,7 +1501,9 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             return false
         }
 
-        let args_eq = args1.into_iter().zip(args2).all(|(xx, yy)| self.def_eq(xx, yy));
+        let args_eq = args1.into_iter().zip(args2).all(|(xx, yy)| {
+            self.def_eq(xx, yy)
+        });
 
         if !args_eq {
             return false
@@ -2091,7 +2097,9 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             }
             let (r1, r2) = (self.get_applied_def(x), self.get_applied_def(y));
             match (r1, r2) {
-                (None, None) => return Exhausted(x, y),
+                (None, None) => {
+                    return Exhausted(x, y);
+                }
                 (Some(..), None) =>
                     if let Some(yprime) = self.try_unfold_proj_app(y) {
                         y = yprime;
