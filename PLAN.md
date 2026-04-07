@@ -150,10 +150,11 @@ Fixed worst outliers: #298261 from 11.5s to 830ms, #357120 from 2.3s to 85ms.
 - `GenCache`: generation-counted direct-mapped caches, pre-allocated once, reused across
   declarations via O(1) generation bump. Eliminated 13.6% Init overhead from per-declaration
   memset of shift_eq caches.
-- mk_var Vec cache (O(1) lookup by index) and 2-way set-associative mk_app cache (1M entries,
+- mk_var Vec cache (O(1) lookup by index) and 2-way set-associative mk_app cache (64K entries/1MB,
   lazily allocated after 10K misses). On hit in way-1, promote to way-0 (MRU). On miss,
   evict way-1, move way-0→way-1, insert in way-0. Eliminated billions of hash table lookups
-  on pathological declarations.
+  on pathological declarations. Originally 1M entries (16MB) but reduced to 64K — the 16MB
+  cache exceeded L3, causing every access to miss. **14% improvement on Init from right-sizing.**
 - `alloc_expr_tc`: When any child has `DagMarker::TcCtx`, the expression cannot exist in the
   export_file dag (PartialEq compares pointer fields, and export_file contains only ExportFile
   pointers). Skips the export_file IndexSet lookup entirely — avoids ~100M L3-miss-inducing
@@ -253,6 +254,17 @@ These approaches were tried and found counterproductive or unsound:
   doubling (L2/L3 cache pressure).
 - **Speculative Pi/Lambda congruence**: push_local overhead is negligible (0.007% of runtime);
   sem_eq on bodies already tried in quick_check.
+- **ExprCache reuse across declarations**: Reusing FxHashMaps across declarations. 2x regression
+  because large-declaration HashMap capacity creates L1/L2 cache pressure for small declarations.
+- **jemalloc**: 45% regression on Init (35.4s vs 24.5s). glibc's allocator works better for
+  this workload's allocation pattern (many small allocations in tight loops).
+- **Custom PartialEq for Expr** (only comparing payload fields, not hash/struct_hash/fvar_list):
+  17% regression. The compiler optimizes the derived PartialEq into efficient memcmp; the
+  match-based custom version has more branching overhead.
+- **Wider mk_app DM cache entries** (storing fun+arg+result to avoid read_expr verification):
+  24% regression. 24 bytes/entry vs 16 bytes increases L3 pressure by 50%.
+- **shift_eq GenCache reduction** (64K entries): 2x regression on Mathlib. 256K was marginal,
+  1M is required for heavy declarations.
 
 ## TODO
 
