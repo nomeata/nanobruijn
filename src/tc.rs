@@ -694,7 +694,6 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         let r = match self.ctx.read_expr(e) {
             Local { binder_type, .. } => binder_type,
             Var { dbj_idx, .. } => {
-                assert!(dbj_idx < depth, "infer_inner: Var({}) at depth {}", dbj_idx, depth);
                 self.lookup_var(dbj_idx)
             },
             Sort { level, .. } => self.infer_sort(level, flag),
@@ -1073,32 +1072,16 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                 return Some(self.ctx.push_shift(stored_result, delta, 0));
             }
         }
-        // Below-depth hit: only for closed results or O(1) adjustable results.
-        // Check result usability BEFORE expensive shift_eq verification.
+        // Below-depth hit: shift result down via eager push_shift_down
         if depth < stored_depth {
             let abs_delta = (stored_depth - depth) as i16;
-            let result_nlbv = self.ctx.num_loose_bvars(stored_result);
-            let usable = if result_nlbv == 0 {
-                true // Closed result
-            } else if stored_result == stored_input {
-                true // Identity (whnf was no-op)
-            } else if let Expr::Shift { amount, cutoff: 0, .. } = self.ctx.read_expr(stored_result) {
-                amount >= abs_delta // Shift-absorbable
-            } else {
-                false
-            };
-            if usable && self.ctx.shift_eq(e, stored_input, abs_delta) {
-                self.ctx.trace.whnf_below_depth_hits += 1;
-                if result_nlbv == 0 {
-                    return Some(stored_result);
+            if self.ctx.shift_eq(e, stored_input, abs_delta) {
+                let result_fvar_lb = self.ctx.fvar_lb(self.ctx.read_expr(stored_result).get_fvar_list());
+                if result_fvar_lb >= abs_delta as u16 {
+                    self.ctx.trace.whnf_below_depth_hits += 1;
+                    let shifted = self.ctx.push_shift_down(stored_result, abs_delta as u16);
+                    return Some(shifted);
                 }
-                if stored_result == stored_input {
-                    return Some(e);
-                }
-                if let Expr::Shift { inner, amount, cutoff: 0, .. } = self.ctx.read_expr(stored_result) {
-                    return Some(self.ctx.mk_shift(inner, amount - abs_delta));
-                }
-                unreachable!();
             }
         }
         None
@@ -1106,6 +1089,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
 
     /// Store a whnf result in the chained cache.
     fn whnf_cache_store(&mut self, bucket_idx: usize, canon: CacheKey, e: ExprPtr<'t>, result: ExprPtr<'t>, depth: u16) {
+        // Validate: stored result's fvar_lb must be < depth (or closed)
         let new_slot: WhnfSlot<'t> = (e, result, depth);
         let chain = self.tc_cache.whnf_cache_chain(bucket_idx, &canon);
         for (ci, &(si, _sr, sd)) in chain.iter().enumerate() {
@@ -1245,7 +1229,12 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                     self.ctx.trace.wnu_cache_no_bucket += 1;
                 }
             }
-            let (e_fun, args) = self.ctx.unfold_apps(cur);
+            let (mut e_fun, args) = self.ctx.unfold_apps(cur);
+            // Force any Shift wrapper on the head so the match sees real constructors.
+            // unfold_apps handles Shift for App spines but wraps non-App heads in mk_shift.
+            if let Expr::Shift { inner, amount, cutoff, .. } = self.ctx.read_expr(e_fun) {
+                e_fun = self.ctx.push_shift(inner, amount, cutoff);
+            }
             match self.ctx.read_expr(e_fun) {
                 Proj { idx, structure, .. } =>
                     if let Some(e) = self.reduce_proj(idx, structure, cheap_proj) {

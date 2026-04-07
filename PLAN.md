@@ -99,11 +99,10 @@ above-depth hits** — this would evict the low-depth canonical entry, causing c
 
 **WHNF cache**: Keyed by canonical hash → `(input, result, stored_depth)`. Prefers lower
 stored_depth (more reusable). Above-depth hits return `push_shift(result, delta, 0)`.
-Below-depth whnf hits check result usability BEFORE the expensive `shift_eq` verification:
-closed results (nlbv=0), identity (result==input), or Shift-absorbable (amount >= delta).
-Full `push_shift_down` creates new nodes with different pointer identity, causing cascading
-cache misses downstream. Lazy negative Shift wrappers cause crashes because sub-expressions
-with un-resolved high Var indices flow through infer/def_eq paths that expect valid indices.
+Below-depth whnf hits use `push_shift_down(result, abs_delta)` — full eager traversal
+that concretely resolves all Var indices to valid indices at the target depth. Guarded by
+`result_fvar_lb >= abs_delta` (ensures no negative indices). 17K hits on Init with zero
+measurable overhead (traversal cost offset by avoided whnf recomputation).
 
 **whnf_no_unfolding cache**: Same pattern as whnf cache. Uses inline 2-slot entries.
 Also peels top-level Shifts (shift-equivariance) before cache lookup. Identity caching:
@@ -207,17 +206,18 @@ These approaches were tried and found counterproductive or unsound:
   expression identities that cascade poorly through caches. Up to 9x slower.
 - **Lazy beta reduction** (push args as let-locals, whnf at higher depth): Changing evaluation
   depth causes catastrophic whnf/wnu cache miss rates (4.2x regression).
-- **Below-depth whnf cache matching** via push_shift_down: Full O(result_size) traversal
-  creating new nodes. ~2% regression on Init — shifted-down results have different pointer
-  identity from naturally-computed results, causing cascading cache misses downstream.
 - **Negative shifts for below-depth whnf cache hits**: Wrapping stored results in
-  `Shift(result, -delta)` to avoid push_shift_down traversal. Crashes: negative Shift
-  wrappers flow through infer/def_eq paths lazily, and sub-expressions retain original
-  (high) Var indices until the Shift is resolved. When these reach `infer_inner` or
-  `local_type`, the Var index exceeds the current depth (377-429 panics on Init).
-  The results are semantically correct (verified: 299 "mismatches" are all spurious
-  due to sem_eq checking with delta=0). Conservative below-depth handling remains:
-  closed results, Shift absorption, identity only.
+  `Shift(result, -delta)` or `push_shift(result, -delta, 0)` to lazily defer the shift.
+  Crashes: negative Shift wrappers on sub-expressions leak their inner (high-index) Var
+  nodes through caches, unfold_apps, and pattern matching. Even `push_shift` (one level)
+  fails because it creates `mk_shift_cutoff(child, -delta, 0)` wrappers on children which
+  then propagate. Only `push_shift_down` (full eager traversal) works correctly — all Var
+  indices are concretely resolved to valid indices at the target depth. The eager approach
+  has zero measurable overhead on Init (17K hits, cost offset by avoided recomputation).
+  Now implemented: `push_shift_down(stored_result, abs_delta)` with guard
+  `result_fvar_lb >= abs_delta`. Lazy negative Shift wrappers are fundamentally incompatible
+  with a system where expressions flow through multiple code paths that may read sub-expressions
+  directly (via read_expr, unfold_apps, cache lookup) without first resolving Shift wrappers.
 - **Negative def_eq caching**: Unsound — def_eq results can change due to side effects from
   intervening comparisons (which may prove sub-expressions equal).
 - **Persistent inst_cache across inst_beta calls** (fingerprint-based key): Soundness issues
