@@ -357,9 +357,10 @@ enum ExportJsonVal<'a> {
 pub(crate) fn parse_export_file<'p, R: BufRead>(
     buf_reader: R,
     config: Config,
+    estimated_exprs: usize,
 
 ) -> Result<(crate::util::ExportFile<'p>, Vec<String>), Box<dyn Error>> {
-    let mut parser = Parser::new(buf_reader, config);
+    let mut parser = Parser::new(buf_reader, config, estimated_exprs);
     let mut line_buffer = String::new();
 
     loop {
@@ -402,11 +403,11 @@ pub(crate) fn parse_export_file<'p, R: BufRead>(
 }
 
 impl<'a, R: BufRead> Parser<'a, R> {
-    pub fn new(buf_reader: R, config: Config) -> Self {
+    pub fn new(buf_reader: R, config: Config, estimated_exprs: usize) -> Self {
         Self {
             buf_reader,
             line_num: 0usize,
-            dag: LeanDag::new(&config),
+            dag: LeanDag::with_capacity(&config, estimated_exprs),
             declars: new_fx_index_map(),
             notations: new_fx_hash_map(),
             config,

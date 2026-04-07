@@ -1852,7 +1852,11 @@ impl<'a> LeanDag<'a> {
 
     pub fn with_capacity(config: &Config, expr_capacity: usize) -> Self {
         let mut out = Self {
-            names: new_unique_index_set(),
+            names: if expr_capacity > 0 {
+                IndexSet::with_capacity_and_hasher(expr_capacity / 20, Default::default())
+            } else {
+                new_unique_index_set()
+            },
             levels: new_unique_index_set(),
             exprs: if expr_capacity > 0 {
                 IndexSet::with_capacity_and_hasher(expr_capacity, Default::default())
@@ -2306,12 +2310,19 @@ impl Config {
     pub fn to_export_file<'a>(self) -> Result<(ExportFile<'a>, Vec<String>), Box<dyn Error>> {
         if let Some(pathbuf) = self.export_file_path.as_ref() {
             match OpenOptions::new().read(true).truncate(false).open(pathbuf) {
-                Ok(file) => crate::parser::parse_export_file(BufReader::new(file), self),
+                Ok(file) => {
+                    // Estimate expression count from file size to pre-allocate DAG.
+                    // Average line is ~55 bytes, ~95% of lines are expressions.
+                    let estimated_exprs = file.metadata()
+                        .map(|m| (m.len() / 58) as usize)
+                        .unwrap_or(0);
+                    crate::parser::parse_export_file(BufReader::new(file), self, estimated_exprs)
+                }
                 Err(e) => Err(Box::from(format!("Failed to open export file: {:?}", e))),
             }
         } else if self.use_stdin {
             let reader = BufReader::new(std::io::stdin());
-            crate::parser::parse_export_file(reader, self)
+            crate::parser::parse_export_file(reader, self, 0)
         } else {
             panic!("Configuration file must specify en export file path or \"use_stdin\": true")
         }

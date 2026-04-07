@@ -445,8 +445,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
                     let new_type = self.inst_aux(binder_type, substs, offset, shift_down, sh_amt, sh_cut);
                     let new_val = self.inst_aux(val, substs, offset, shift_down, sh_amt, sh_cut);
                     let new_body = self.inst_aux(body, substs, offset + 1, shift_down, sh_amt, sh_cut + 1);
-                    self.trace.inst_aux_shifted_alloc += 1;
-                    self.mk_let(binder_name, new_type, new_val, new_body, nondep)
+                    if new_type == binder_type && new_val == val && new_body == body { self.trace.inst_aux_shifted_identity += 1; e } else { self.trace.inst_aux_shifted_alloc += 1; self.mk_let(binder_name, new_type, new_val, new_body, nondep) }
                 }
                 Proj { ty_name, idx, structure, .. } => {
                     let new_structure = self.inst_aux(structure, substs, offset, shift_down, sh_amt, sh_cut);
@@ -497,14 +496,14 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
                     if new_type == binder_type && new_body == body { self.trace.inst_aux_nonshift_identity += 1; e } else { self.mk_lambda(binder_name, binder_style, new_type, new_body) }
                 }
                 Let { binder_name, binder_type, val, body, nondep, .. } => {
-                    let binder_type = self.inst_aux(binder_type, substs, offset, shift_down, 0, 0);
-                    let val = self.inst_aux(val, substs, offset, shift_down, 0, 0);
-                    let body = self.inst_aux(body, substs, offset + 1, shift_down, 0, 0);
-                    self.mk_let(binder_name, binder_type, val, body, nondep)
+                    let new_type = self.inst_aux(binder_type, substs, offset, shift_down, 0, 0);
+                    let new_val = self.inst_aux(val, substs, offset, shift_down, 0, 0);
+                    let new_body = self.inst_aux(body, substs, offset + 1, shift_down, 0, 0);
+                    if new_type == binder_type && new_val == val && new_body == body { self.trace.inst_aux_nonshift_identity += 1; e } else { self.mk_let(binder_name, new_type, new_val, new_body, nondep) }
                 }
                 Proj { ty_name, idx, structure, .. } => {
-                    let structure = self.inst_aux(structure, substs, offset, shift_down, 0, 0);
-                    self.mk_proj(ty_name, idx, structure)
+                    let new_structure = self.inst_aux(structure, substs, offset, shift_down, 0, 0);
+                    if new_structure == structure { self.trace.inst_aux_nonshift_identity += 1; e } else { self.mk_proj(ty_name, idx, new_structure) }
                 }
             }
         };
