@@ -77,12 +77,14 @@ Each expression stores `struct_hash: u64` — purely structural hash (tag + chil
 struct_hashes + binder_name/style). Bvar indices are replaced by a constant (VAR_HASH),
 so shifted expressions share the same struct_hash.
 
-**FVarList** (delta-encoded free variable set): Stores the sorted set of free bvar indices
-as a delta-encoded linked list. O(1) shift/unbind/normalize, O(n+m) union with shared-tail
-optimization. No false negatives at any depth (proved in Theory.lean).
+**fvar_lb** (free variable lower bound): Parallel `Vec<u16>` in LeanDag storing the minimum
+free bvar index for each expression (0 for closed expressions). Replaces the former
+delta-encoded FVarList linked list. Computed O(1) from children's values:
+`min` for App, `min(ty_lb, unbind(body_lb))` for binders, shifted for Shift nodes.
+Conservative (lower bound), so no false negatives — if fvar_lb says "no free bvars below k",
+that's guaranteed true.
 
-Canonical hash = single u64, mixing struct_hash with normalized FVarList hash via golden
-ratio multiply.
+Canonical hash = struct_hash alone (no fvar component needed).
 
 **All caches use fvar_lb-based bucketing**: `bucket_idx = depth - fvar_lb`. Expressions at
 different depths land in the same bucket only if they reference the same context range.
@@ -202,8 +204,8 @@ create new App/Pi/Lambda parents, breaking pointer identity for all downstream c
 The cascade: Shift wrappers → pointer identity divergence → lower cache hit rates →
 more whnf/infer calls → more inst calls → more mk_app/mk_var calls.
 
-Per-operation cost is ~2.2x nanoda's, from shift_eq calls, extra expression nodes from
-Shift infrastructure, and fvar_union/fvar_shift_cutoff on every mk_app/pi/lambda.
+Per-operation cost is ~2.2x nanoda's, from shift_eq calls and extra expression nodes from
+Shift infrastructure. (fvar_union/fvar_shift_cutoff eliminated — replaced by O(1) fvar_lb.)
 
 Profile hotspots (Mathlib 100K): mk_app 9.85%, insert_full 7.76%, inst_aux 6.71%,
 parsing ~18%, reserve_rehash 3.36%, subst_aux 3.27%, alloc_expr ~3%, whnf_no_unfolding ~3%,
@@ -258,7 +260,7 @@ These approaches were tried and found counterproductive or unsound:
   because large-declaration HashMap capacity creates L1/L2 cache pressure for small declarations.
 - **jemalloc**: 45% regression on Init (35.4s vs 24.5s). glibc's allocator works better for
   this workload's allocation pattern (many small allocations in tight loops).
-- **Custom PartialEq for Expr** (only comparing payload fields, not hash/struct_hash/fvar_list):
+- **Custom PartialEq for Expr** (only comparing payload fields, not hash/struct_hash):
   17% regression. The compiler optimizes the derived PartialEq into efficient memcmp; the
   match-based custom version has more branching overhead.
 - **Wider mk_app DM cache entries** (storing fun+arg+result to avoid read_expr verification):
@@ -281,11 +283,8 @@ These approaches were tried and found counterproductive or unsound:
   the subst_cache is traversal-based (walks entire subexpression DAG within one call). DM cache
   collisions evict entries needed later in the same traversal, causing subtree re-traversal.
   The per-call HashMap stays in L1 and has zero evictions.
-- **alloc_fvar_node DM cache** (1K entries): 20% regression. FVarList nodes have high reuse
-  within a declaration; DM cache collisions cause expensive re-traversals in fvar_merge.
-- **fvar_list TcCtx check in mk_app/mk_lambda/mk_pi/mk_let**: Skipping export_file probe when
-  fvar_list has TcCtx dag_marker. No improvement — when all child pointers are ExportFile,
-  fvar_union almost always produces ExportFile results, so the check is rarely true.
+- **alloc_fvar_node DM cache** (1K entries): 20% regression. (Moot — FVarList removed.)
+- **fvar_list TcCtx check in mk_app/mk_lambda/mk_pi/mk_let**: (Moot — FVarList removed.)
 
 ## TODO
 
