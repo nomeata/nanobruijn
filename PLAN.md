@@ -183,7 +183,7 @@ Fixed worst outliers: #298261 from 11.5s to 830ms, #357120 from 2.3s to 85ms.
 | Init (54k decls, 310MB) | 26s | 20s | 0.77x |
 | app-lam N=4000 | 8.3s | 10ms | 0.001x |
 | Mathlib 100K (100k decls) | - | 128s | - |
-| Mathlib (630k decls, 4.9GB) | 978s | ~1025s (est.) | **~1.05x** |
+| Mathlib (630k decls, 4.9GB) | 978s | 1025s | **1.05x** |
 
 ### Gap analysis
 
@@ -273,6 +273,15 @@ These approaches were tried and found counterproductive or unsound:
 - **Precomputed canonical_hash in parallel Vec<u64>**: Store canonical_hash alongside DAG
   expressions for O(1) lookup. No measurable improvement — the saved read_expr calls are
   already cache-hot, and the Vec overhead (compute + push + memory) cancels the savings.
+- **subst_cache DM cache** (4K entries, generation-counted): 10% regression. Unlike inst_cache,
+  the subst_cache is traversal-based (walks entire subexpression DAG within one call). DM cache
+  collisions evict entries needed later in the same traversal, causing subtree re-traversal.
+  The per-call HashMap stays in L1 and has zero evictions.
+- **alloc_fvar_node DM cache** (1K entries): 20% regression. FVarList nodes have high reuse
+  within a declaration; DM cache collisions cause expensive re-traversals in fvar_merge.
+- **fvar_list TcCtx check in mk_app/mk_lambda/mk_pi/mk_let**: Skipping export_file probe when
+  fvar_list has TcCtx dag_marker. No improvement — when all child pointers are ExportFile,
+  fvar_union almost always produces ExportFile results, so the check is rarely true.
 
 ## TODO
 
