@@ -6,6 +6,11 @@ Forked from [nanoda_lib](https://github.com/ammkrn/nanoda_lib) (Rust Lean 4 type
 caching. Avoid the expensive substitution on binder entry while retaining cross-depth
 cache hits via shift-invariant keys.
 
+**Principle**: Performance comparisons should reflect the design differences, not
+low-level tuning. Optimizations that could equally be applied to nanoda (e.g. parsing
+tricks, SIMD, micro-benchmarking tweaks) are out of scope. Only optimizations that arise
+from or interact with the de Bruijn + shift-homomorphic design are interesting.
+
 ## Design (changes from vanilla nanoda)
 
 ### Pure de Bruijn (no locally nameless)
@@ -179,6 +184,8 @@ Fixed worst outliers: #298261 from 11.5s to 830ms, #357120 from 2.3s to 85ms.
   `#[serde(flatten)]` forces serde to buffer all JSON fields into an intermediate `Content`
   representation for every line, even simple ones like bvar/sort. Custom `visit_map` dispatches
   directly on the first key, avoiding this overhead. **~7.5% improvement on Mathlib 100K.**
+  Note: this is a design-neutral optimization (could be applied to nanoda too); it fixes a
+  serde pitfall rather than reflecting a design advantage.
 
 ## Results
 
