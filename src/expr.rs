@@ -1172,7 +1172,14 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
     
     /// The number of "loose" bound variables, which is the number of bound variables
     /// in an expression which are boudn by something above it.
-    pub(crate) fn num_loose_bvars(&self, e: ExprPtr<'t>) -> u16 { self.read_expr(e).num_loose_bvars() }
+    /// Fast num_loose_bvars lookup via parallel Vec (avoids reading the full 48-byte Expr).
+    #[inline(always)]
+    pub(crate) fn num_loose_bvars(&self, e: ExprPtr<'t>) -> u16 {
+        match e.dag_marker() {
+            crate::util::DagMarker::ExportFile => self.export_file.dag.expr_nlbv[e.idx()],
+            crate::util::DagMarker::TcCtx => self.dag.expr_nlbv[e.idx()],
+        }
+    }
 
     pub(crate) fn has_fvars(&self, e: ExprPtr<'t>) -> bool { self.read_expr(e).has_fvars() }
 

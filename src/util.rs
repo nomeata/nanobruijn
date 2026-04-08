@@ -881,7 +881,10 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         if let Some(idx) = self.export_file.dag.exprs.get_index_of(&e) {
             Ptr::from(DagMarker::ExportFile, idx)
         } else {
-            Ptr::from(DagMarker::TcCtx, self.dag.exprs.insert_full(e).0)
+            let nlbv = e.num_loose_bvars();
+            let (idx, inserted) = self.dag.exprs.insert_full(e);
+            if inserted { self.dag.expr_nlbv.push(nlbv); }
+            Ptr::from(DagMarker::TcCtx, idx)
         }
     }
 
@@ -890,7 +893,10 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
     #[inline(always)]
     fn alloc_expr_tc(&mut self, e: Expr<'t>) -> ExprPtr<'t> {
         self.trace.alloc_expr_calls += 1;
-        Ptr::from(DagMarker::TcCtx, self.dag.exprs.insert_full(e).0)
+        let nlbv = e.num_loose_bvars();
+        let (idx, inserted) = self.dag.exprs.insert_full(e);
+        if inserted { self.dag.expr_nlbv.push(nlbv); }
+        Ptr::from(DagMarker::TcCtx, idx)
     }
 
     /// Store a string (a `CowStr`), getting back a pointer to the allocated item. If the item was
@@ -1820,6 +1826,9 @@ pub struct LeanDag<'a> {
     pub names: UniqueIndexSet<Name<'a>>,
     pub levels: UniqueIndexSet<Level<'a>>,
     pub exprs: UniqueIndexSet<Expr<'a>>,
+    /// Parallel array: expr_nlbv[i] = exprs[i].num_loose_bvars().
+    /// Allows O(1) nlbv lookup without reading the full 48-byte Expr.
+    pub expr_nlbv: Vec<u16>,
     pub uparams: FxIndexSet<Arc<[LevelPtr<'a>]>>,
     pub strings: FxIndexSet<CowStr<'a>>,
     pub bignums: Option<FxIndexSet<BigUint>>,
@@ -1842,6 +1851,7 @@ impl<'a> LeanDag<'a> {
         self.names.clear();
         self.levels.clear();
         self.exprs.clear();
+        self.expr_nlbv.clear();
         self.uparams.clear();
         self.strings.clear();
         if let Some(ref mut bignums) = self.bignums {
@@ -1865,6 +1875,11 @@ impl<'a> LeanDag<'a> {
                 IndexSet::with_capacity_and_hasher(expr_capacity, Default::default())
             } else {
                 new_unique_index_set()
+            },
+            expr_nlbv: if expr_capacity > 0 {
+                Vec::with_capacity(expr_capacity)
+            } else {
+                Vec::new()
             },
             uparams: new_fx_index_set(),
             strings: new_fx_index_set(),

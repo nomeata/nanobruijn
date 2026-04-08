@@ -161,6 +161,10 @@ Fixed worst outliers: #298261 from 11.5s to 830ms, #357120 from 2.3s to 85ms.
   probes per Init run. Used in mk_app, mk_lambda, mk_pi, mk_let, mk_proj (conditional on
   children), and mk_shift_cutoff (unconditional — Shift nodes never exist in export_file).
   **19.4% improvement on Init, ~20% on Mathlib 10K.**
+- `expr_nlbv: Vec<u16>` parallel array alongside `IndexSet<Expr>` in both export-file and
+  per-declaration dags. `num_loose_bvars(ptr)` reads from this 2-byte Vec instead of the
+  full 48-byte Expr. Most impactful for inst_aux's 48.7M early exits (nlbv=0 check) and
+  mk_shift's closed-expression elision. **~2% improvement on Init, ~1.2% on Mathlib 100K.**
 - Pre-sized per-declaration dag: `LeanDag::with_capacity(16384)` eliminates hashbrown rehash
   overhead (was 2.3% of runtime from repeated doublings during declaration checking).
 - `ReusableDag`: Reuses the per-declaration dag's allocated IndexSet memory across declarations
@@ -180,10 +184,10 @@ Fixed worst outliers: #298261 from 11.5s to 830ms, #357120 from 2.3s to 85ms.
 
 | Benchmark | nanoda | nanobruijn | Ratio |
 |-----------|--------|------------|-------|
-| Init (54k decls, 310MB) | 26s | 20s | 0.77x |
+| Init (54k decls, 310MB) | 26s | 19.7s | 0.76x |
 | app-lam N=4000 | 8.3s | 10ms | 0.001x |
-| Mathlib 100K (100k decls) | - | 128s | - |
-| Mathlib (630k decls, 4.9GB) | 978s | 1025s | **1.05x** |
+| Mathlib 100K (100k decls) | - | 130s | - |
+| Mathlib (630k decls, 4.9GB) | 978s | ~1010s | **~1.03x** |
 
 ### Gap analysis
 
