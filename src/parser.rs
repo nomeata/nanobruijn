@@ -104,12 +104,116 @@ impl BackRef {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 struct ExportJsonObject<'a> {
-    #[serde(flatten)]
     val: ExportJsonVal<'a>,
-    #[serde(flatten)]
     i: Option<BackRef>
+}
+
+impl<'de: 'a, 'a> serde::Deserialize<'de> for ExportJsonObject<'a> {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where D: serde::Deserializer<'de> {
+        use serde::de::{self, MapAccess, Visitor};
+
+        struct ExportVisitor<'a>(std::marker::PhantomData<&'a ()>);
+
+        impl<'de: 'a, 'a> Visitor<'de> for ExportVisitor<'a> {
+            type Value = ExportJsonObject<'a>;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("an export JSON object")
+            }
+
+            fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+            where A: MapAccess<'de> {
+                let mut backref: Option<BackRef> = None;
+                let mut val: Option<ExportJsonVal<'a>> = None;
+
+                while let Some(key) = map.next_key::<&str>()? {
+                    match key {
+                        "in" => { backref = Some(BackRef::In(map.next_value()?)); }
+                        "il" => { backref = Some(BackRef::Il(map.next_value()?)); }
+                        "ie" => { backref = Some(BackRef::Ie(map.next_value()?)); }
+                        "meta" => { val = Some(ExportJsonVal::Metadata(map.next_value()?)); }
+                        "str" => {
+                            #[derive(serde::Deserialize)]
+                            struct NameStrInner<'a> { pre: u32, str: std::borrow::Cow<'a, str> }
+                            let inner: NameStrInner<'a> = map.next_value()?;
+                            val = Some(ExportJsonVal::NameStr { pre: inner.pre, str: inner.str });
+                        }
+                        "num" => {
+                            #[derive(serde::Deserialize)]
+                            struct NameNumInner { pre: u32, i: u32 }
+                            let inner: NameNumInner = map.next_value()?;
+                            val = Some(ExportJsonVal::NameNum { pre: inner.pre, i: inner.i });
+                        }
+                        "succ" => { val = Some(ExportJsonVal::LevelSucc(map.next_value()?)); }
+                        "max" => { val = Some(ExportJsonVal::LevelMax(map.next_value()?)); }
+                        "imax" => { val = Some(ExportJsonVal::LevelIMax(map.next_value()?)); }
+                        "param" => { val = Some(ExportJsonVal::LevelParam(map.next_value()?)); }
+                        "natVal" => {
+                            let s: &str = map.next_value()?;
+                            let n = s.parse::<BigUint>().map_err(de::Error::custom)?;
+                            val = Some(ExportJsonVal::NatLit(n));
+                        }
+                        "strVal" => { val = Some(ExportJsonVal::StrLit(map.next_value()?)); }
+                        "mdata" => { panic!("Expr.mdata not supported"); }
+                        "letE" => {
+                            #[derive(serde::Deserialize)]
+                            struct LetInner { name: u32, #[serde(rename = "type")] ty: u32, value: u32, body: u32, nondep: bool }
+                            let inner: LetInner = map.next_value()?;
+                            val = Some(ExportJsonVal::ExprLet { name: inner.name, ty: inner.ty, value: inner.value, body: inner.body, nondep: inner.nondep });
+                        }
+                        "const" => {
+                            #[derive(serde::Deserialize)]
+                            struct ConstInner { name: u32, #[serde(rename = "us")] levels: Vec<u32> }
+                            let inner: ConstInner = map.next_value()?;
+                            val = Some(ExportJsonVal::ExprConst { name: inner.name, levels: inner.levels });
+                        }
+                        "app" => {
+                            #[derive(serde::Deserialize)]
+                            struct AppInner { #[serde(rename = "fn")] fun: u32, arg: u32 }
+                            let inner: AppInner = map.next_value()?;
+                            val = Some(ExportJsonVal::ExprApp { fun: inner.fun, arg: inner.arg });
+                        }
+                        "forallE" => {
+                            #[derive(serde::Deserialize)]
+                            struct PiInner { #[serde(rename = "name")] binder_name: u32, #[serde(rename = "type")] binder_type: u32, body: u32, #[serde(rename = "binderInfo")] binder_info: BinderStyle }
+                            let inner: PiInner = map.next_value()?;
+                            val = Some(ExportJsonVal::ExprPi { binder_name: inner.binder_name, binder_type: inner.binder_type, body: inner.body, binder_info: inner.binder_info });
+                        }
+                        "lam" => {
+                            #[derive(serde::Deserialize)]
+                            struct LamInner { #[serde(rename = "name")] binder_name: u32, #[serde(rename = "type")] binder_type: u32, body: u32, #[serde(rename = "binderInfo")] binder_info: BinderStyle }
+                            let inner: LamInner = map.next_value()?;
+                            val = Some(ExportJsonVal::ExprLambda { binder_name: inner.binder_name, binder_type: inner.binder_type, body: inner.body, binder_info: inner.binder_info });
+                        }
+                        "proj" => {
+                            #[derive(serde::Deserialize)]
+                            struct ProjInner { #[serde(rename = "typeName")] type_name: u32, idx: u32, #[serde(rename = "struct")] structure: u32 }
+                            let inner: ProjInner = map.next_value()?;
+                            val = Some(ExportJsonVal::ExprProj { type_name: inner.type_name, idx: inner.idx, structure: inner.structure });
+                        }
+                        "sort" => { val = Some(ExportJsonVal::ExprSort(map.next_value()?)); }
+                        "bvar" => { val = Some(ExportJsonVal::ExprBVar(map.next_value()?)); }
+                        "axiom" => { val = Some(ExportJsonVal::Axiom(map.next_value()?)); }
+                        "thm" => { val = Some(ExportJsonVal::Thm(map.next_value()?)); }
+                        "def" => { val = Some(ExportJsonVal::Defn(map.next_value()?)); }
+                        "opaque" => { val = Some(ExportJsonVal::Opaque(map.next_value()?)); }
+                        "quot" => { val = Some(ExportJsonVal::Quot(map.next_value()?)); }
+                        "inductive" => { val = Some(ExportJsonVal::Inductive(map.next_value()?)); }
+                        other => { return Err(de::Error::unknown_field(other, &[])); }
+                    }
+                }
+
+                Ok(ExportJsonObject {
+                    val: val.ok_or_else(|| de::Error::custom("missing variant field"))?,
+                    i: backref,
+                })
+            }
+        }
+
+        deserializer.deserialize_map(ExportVisitor(std::marker::PhantomData))
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Deserialize)]
@@ -204,6 +308,73 @@ struct Recursor {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+struct AxiomData {
+    name: u32,
+    #[serde(rename = "levelParams")]
+    uparams: Vec<u32>,
+    #[serde(rename = "type")]
+    ty: u32,
+    #[serde(rename = "isUnsafe")]
+    is_unsafe: bool
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+struct ThmData {
+    name: u32,
+    #[serde(rename = "levelParams")]
+    uparams: Vec<u32>,
+    #[serde(rename = "type")]
+    ty: u32,
+    value: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+struct DefnData {
+    name: u32,
+    #[serde(rename = "levelParams")]
+    uparams: Vec<u32>,
+    #[serde(rename = "type")]
+    ty: u32,
+    value: u32,
+    #[serde(rename = "hints")]
+    hint: ReducibilityHint,
+    safety: DefinitionSafety
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+struct OpaqueData {
+    name: u32,
+    #[serde(rename = "levelParams")]
+    uparams: Vec<u32>,
+    #[serde(rename = "type")]
+    ty: u32,
+    value: u32,
+    #[serde(rename = "isUnsafe")]
+    is_unsafe: bool
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+struct QuotData {
+    name: u32,
+    #[serde(rename = "levelParams")]
+    uparams: Vec<u32>,
+    #[serde(rename = "type")]
+    ty: u32,
+    #[serde(rename = "kind")]
+    kind: QuotKind
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+struct InductiveJsonData {
+    #[serde(rename = "types")]
+    ind_vals: Vec<IndInfo>,
+    #[serde(rename = "ctors")]
+    ctor_vals: Vec<Constructor>,
+    #[serde(rename = "recs")]
+    rec_vals: Vec<Recursor>
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 enum ExportJsonVal<'a> {
     // The exporter metadata, incl. info about the lean, exporter, and format versions used
     // to create the export file.
@@ -290,68 +461,12 @@ enum ExportJsonVal<'a> {
     ExprSort(u32),
     #[serde(rename = "bvar")]
     ExprBVar(u16),
-    #[serde(rename = "axiom")]
-    Axiom {
-        name: u32,
-        #[serde(rename = "levelParams")]
-        uparams: Vec<u32>,
-        #[serde(rename = "type")]
-        ty: u32,
-        #[serde(rename = "isUnsafe")]
-        is_unsafe: bool
-    },
-    #[serde(rename = "thm")]
-    Thm {
-        name: u32,
-        #[serde(rename = "levelParams")]
-        uparams: Vec<u32>,
-        #[serde(rename = "type")]
-        ty: u32,
-        value: u32,
-    },
-    #[serde(rename = "def")]
-    Defn {
-        name: u32,
-        #[serde(rename = "levelParams")]
-        uparams: Vec<u32>,
-        #[serde(rename = "type")]
-        ty: u32,
-        value: u32,
-        #[serde(rename = "hints")]
-        hint: ReducibilityHint,
-        //all: Vec<usize>,
-        safety: DefinitionSafety
-    },
-    #[serde(rename = "opaque")]
-    Opaque {
-        name: u32,
-        #[serde(rename = "levelParams")]
-        uparams: Vec<u32>,
-        #[serde(rename = "type")]
-        ty: u32,
-        value: u32,
-        #[serde(rename = "isUnsafe")]
-        is_unsafe: bool
-    },
-    #[serde(rename = "quot")]
-    Quot {
-        name: u32,
-        #[serde(rename = "levelParams")]
-        uparams: Vec<u32>,
-        #[serde(rename = "type")]
-        ty: u32,
-        #[serde(rename = "kind")]
-        kind: QuotKind
-    },
-    #[serde(rename = "inductive")]
-    Inductive {
-        #[serde(rename = "types")]
-        ind_vals: Vec<IndInfo>,
-        #[serde(rename = "ctors")]
-        ctor_vals: Vec<Constructor>,
-        #[serde(rename = "recs")]
-        rec_vals: Vec<Recursor>
-    },
+    Axiom(AxiomData),
+    Thm(ThmData),
+    Defn(DefnData),
+    Opaque(OpaqueData),
+    Quot(QuotData),
+    Inductive(InductiveJsonData),
 }
 
 pub(crate) fn parse_export_file<'p, R: BufRead>(
@@ -795,7 +910,7 @@ impl<'a, R: BufRead> Parser<'a, R> {
                 };
                 assigned_idx.unwrap().assert_ie(insert_result);
             }
-            Axiom {name, ty, uparams, is_unsafe} => {
+            Axiom(AxiomData {name, ty, uparams, is_unsafe}) => {
                 assert!(!is_unsafe);
                 let name = self.get_name_ptr(name);
                 let uparams = self.get_uparams_ptr(&uparams);
@@ -813,7 +928,7 @@ impl<'a, R: BufRead> Parser<'a, R> {
                     }
                 }
             }
-            Defn {name, ty, uparams, value, hint, safety} => {
+            Defn(DefnData {name, ty, uparams, value, hint, safety}) => {
                 assert!(!matches!(safety, DefinitionSafety::Unsafe | DefinitionSafety::Partial));
                 let name = self.get_name_ptr(name);
                 let ty = self.get_expr_ptr(ty);
@@ -823,7 +938,7 @@ impl<'a, R: BufRead> Parser<'a, R> {
                 let definition = Declar::Definition { info, val, hint };
                 assert!(self.declars.insert(name, definition).is_none());
             }
-            Thm {name, ty, uparams, value} => {
+            Thm(ThmData {name, ty, uparams, value}) => {
                 let name = self.get_name_ptr(name);
                 let ty = self.get_expr_ptr(ty);
                 let val = self.get_expr_ptr(value);
@@ -832,7 +947,7 @@ impl<'a, R: BufRead> Parser<'a, R> {
                 let theorem = Declar::Theorem { info, val };
                 assert!(self.declars.insert(name, theorem).is_none());
             }
-            Opaque {name, ty, uparams, value, is_unsafe} => {
+            Opaque(OpaqueData {name, ty, uparams, value, is_unsafe}) => {
                 assert!(!is_unsafe);
                 let name = self.get_name_ptr(name);
                 let ty = self.get_expr_ptr(ty);
@@ -842,7 +957,7 @@ impl<'a, R: BufRead> Parser<'a, R> {
                 let definition = Declar::Opaque { info, val };
                 assert!(self.declars.insert(name, definition).is_none());
             }
-            Quot {name, ty, uparams, ..} => {
+            Quot(QuotData {name, ty, uparams, ..}) => {
                 let name = self.get_name_ptr(name);
                 let ty = self.get_expr_ptr(ty);
                 let uparams = self.get_uparams_ptr(&uparams);
@@ -850,7 +965,7 @@ impl<'a, R: BufRead> Parser<'a, R> {
                 let quot = Declar::Quot { info };
                 assert!(self.declars.insert(name, quot).is_none());
             }
-            Inductive {ind_vals, ctor_vals, rec_vals} => {
+            Inductive(InductiveJsonData {ind_vals, ctor_vals, rec_vals}) => {
                 let block_start = self.declars.len();
                 let block_size = ind_vals.len() + ctor_vals.len() + rec_vals.len();
                 for IndInfo {name, ty, uparams, all, ctors, is_rec, num_nested, num_params, num_indices, is_unsafe, ..} in ind_vals {
