@@ -184,31 +184,31 @@ Fixed worst outliers: #298261 from 11.5s to 830ms, #357120 from 2.3s to 85ms.
 
 | Benchmark | nanoda | nanobruijn | Ratio |
 |-----------|--------|------------|-------|
-| Init (54k decls, 310MB) | 26s | 19.7s | 0.76x |
+| Init (54k decls, 310MB) | 24.2s | 19.9s | **0.82x** |
 | app-lam N=4000 | 8.3s | 10ms | 0.001x |
-| Mathlib 100K (100k decls) | - | 130s | - |
-| Mathlib (630k decls, 4.9GB) | 978s | ~1010s | **~1.03x** |
+| Mathlib 100K (100k decls) | - | 131s | - |
+| Mathlib (310k decls, 4.9GB) | 898s | 980s | **1.09x** |
 
 ### Gap analysis
 
-84% of the gap (501s / 598s) is in the 1-3x ratio band — uniform constant-factor overhead,
-not outliers. We save time on 22 declarations (ratio < 0.5) involving tensor products and
-categorical diagrams where cross-depth caching avoids recomputation.
+On Init we're 18% faster than nanoda, driven by the mk_app DM cache (59% hit rate,
+avoids IndexMap lookups). On full Mathlib we're 9% slower.
 
-**Root cause of the remaining 1.35x gap**: inst shift_down creates new Var nodes. Nanoda's
-inst returns `e` UNCHANGED for free variables past the substitution range (Locals are absolute
-level refs). Our inst creates `mk_var(k - n_substs)` — a new node that propagates up to
-create new App/Pi/Lambda parents, breaking pointer identity for all downstream caches.
-The cascade: Shift wrappers → pointer identity divergence → lower cache hit rates →
-more whnf/infer calls → more inst calls → more mk_app/mk_var calls.
+The shift approach is roughly break-even on heavy declarations: ~11% shift overhead
+(view_expr 3.2%, canonical_hash 2.7%, shift_eq_aux 2.4%, mk_shift_cutoff 1.8%,
+push_shift 1.0%) is offset by ~11% savings from the mk_app DM cache (IndexMap
+get_index_of drops from 13.3% in nanoda to 2.3% in nanobruijn).
 
-Per-operation cost is ~2.2x nanoda's, from shift_eq calls, extra expression nodes from
-Shift infrastructure, and fvar_union/fvar_shift_cutoff on every mk_app/pi/lambda.
+The 9% Mathlib gap appears structural — the flat profile (nothing above 15%) means
+no single function can be optimized to close the gap. The top hotspot declarations
+(AlgebraicGeometry.Scheme, 40s each) have 99.99% DM cache hit rates, so the DM cache
+is already maximally effective there. The gap comes from aggregate shift overhead across
+~310K declarations.
 
-Profile hotspots (Mathlib 100K): mk_app 9.85%, insert_full 7.76%, inst_aux 6.71%,
-parsing ~18%, reserve_rehash 3.36%, subst_aux 3.27%, alloc_expr ~3%, whnf_no_unfolding ~3%,
-infer_inner ~2.8%, view_expr ~2.6%, shift_eq_aux ~2.4%. inst_cache now uses 4K-entry
-direct-mapped Vec with generation counter (eliminated HashMap::insert overhead).
+Profile hotspots (Mathlib last 210K): mk_app 14.7%, inst_aux 10.3%, insert_full 7.6%,
+subst_aux 4.4%, whnf_no_unfolding 4.2%, unfold_apps 3.2%, view_expr 3.2%,
+canonical_hash 2.7%, shift_eq_aux 2.4%, infer_inner 2.4%, alloc_expr 2.3%,
+get_index_of 2.3%, HashMap::insert 2.1%, mk_shift_cutoff 1.8%.
 
 ## Paths not taken
 
@@ -296,6 +296,25 @@ These approaches were tried and found counterproductive or unsound:
   is essential for discriminating same-structure different-free-var-pattern expressions.
   Computing fvar_normalize_hash without the linked list is infeasible because hash(union(A,B))
   can't be derived from hash(A) and hash(B) without set intersection information.
+
+- **Cached constant ExprPtrs** (Bool.true/false, Nat.zero/succ, Nat, String): Cache the
+  ExprPtrs for common constants used in nat/bool/string reduction to avoid repeated
+  `alloc_levels_slice(&[]) + mk_const` hash table lookups. No measurable improvement —
+  these constants are the first entries in their hash tables, so lookups are already O(1).
+  The 2.48% `bool_to_expr` profile cost is dominated by inlined surrounding code, not lookups.
+- **Lower mk_app DM threshold** (100 misses instead of 1000): Allocating the 1MB DM cache
+  earlier to benefit more declarations. Slightly worse — the 1MB allocation for lightweight
+  declarations creates L2/L3 cache pressure without enough mk_app calls to amortize it.
+- **view_expr #[inline]**: 10% regression on Init from instruction cache pressure.
+  The compiler's default inlining decisions are already optimal.
+- **target-cpu=native**: Regression. Generic x86-64 code performs better, likely because
+  the wider AVX-512 instructions cause frequency throttling on this CPU.
+- **Trace counter removal**: Commenting out all 116 `self.trace.xxx += 1` increments.
+  15% regression — the compiler uses trace field accesses for register allocation and
+  code layout decisions; removing them changes the instruction sequence for the worse.
+- **canonical_hash fast-path for closed expressions**: Skip `fvar_normalize_hash` when
+  `fvar_list.is_none()`. No measurable improvement — the compiler already optimizes
+  `fvar_normalize_hash(None)` to return 0 quickly.
 
 ## TODO
 
