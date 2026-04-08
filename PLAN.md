@@ -77,12 +77,15 @@ Each expression stores `struct_hash: u64` — purely structural hash (tag + chil
 struct_hashes + binder_name/style). Bvar indices are replaced by a constant (VAR_HASH),
 so shifted expressions share the same struct_hash.
 
-**FVarList** (delta-encoded free variable set): Stores the sorted set of free bvar indices
-as a delta-encoded linked list. O(1) shift/unbind/normalize, O(n+m) union with shared-tail
-optimization. No false negatives at any depth (proved in Theory.lean).
+**FVarBloom** (bloom filter for free variable discrimination): Each expression stores a
+32-bit bloom filter (`fvar_bloom: u32`) where bit `min(idx, 31)` is set for each free
+bvar index `idx`, plus an exact lower bound (`fvar_lb: u16`). All operations are O(1)
+bitwise: union = OR, unbind = right-shift by 1, shift = left/right-shift. Replaced the
+previous delta-encoded FVarList linked list which required O(n+m) recursive merge with
+hash-consed node allocation (was 20% of Mathlib runtime including IndexSet overhead).
 
-Canonical hash = single u64, mixing struct_hash with normalized FVarList hash via golden
-ratio multiply.
+Canonical hash = single u64, mixing struct_hash with normalized fvar_bloom via golden
+ratio multiply. Normalization: `bloom >> fvar_lb` (shift-invariant).
 
 **All caches use fvar_lb-based bucketing**: `bucket_idx = depth - fvar_lb`. Expressions at
 different depths land in the same bucket only if they reference the same context range.
@@ -184,10 +187,12 @@ Fixed worst outliers: #298261 from 11.5s to 830ms, #357120 from 2.3s to 85ms.
 
 | Benchmark | nanoda | nanobruijn | Ratio |
 |-----------|--------|------------|-------|
-| Init (54k decls, 310MB) | 24.2s | 19.9s | **0.82x** |
+| Init (54k decls, 310MB) | 24.2s | 20.1s | **0.83x** |
 | app-lam N=4000 | 8.3s | 10ms | 0.001x |
-| Mathlib 100K (100k decls) | - | 131s | - |
-| Mathlib (310k decls, 4.9GB) | 898s | 980s | **1.09x** |
+| Mathlib 100K (100k decls) | - | 128s | - |
+| Mathlib (310k decls, 4.9GB) | 898s | ~957s* | **~1.07x*** |
+
+*Estimated from 100K scaling; full Mathlib benchmark pending.
 
 ### Gap analysis
 
@@ -289,13 +294,14 @@ These approaches were tried and found counterproductive or unsound:
 - **fvar_list TcCtx check in mk_app/mk_lambda/mk_pi/mk_let**: Skipping export_file probe when
   fvar_list has TcCtx dag_marker. No improvement — when all child pointers are ExportFile,
   fvar_union almost always produces ExportFile results, so the check is rarely true.
-- **Replacing fvar_list with fvar_lb parallel Vec**: Removed delta-encoded FVarList linked list
-  from Expr, replaced with O(1) fvar_lb computation from children. Eliminated fvar_union
-  (6.33% on Init). But canonical_hash degraded to struct_hash alone (no fvar_normalize_hash),
-  causing 15% regression on Mathlib 100K from cache collision increase. The fvar_normalize_hash
-  is essential for discriminating same-structure different-free-var-pattern expressions.
-  Computing fvar_normalize_hash without the linked list is infeasible because hash(union(A,B))
-  can't be derived from hash(A) and hash(B) without set intersection information.
+- **Replacing fvar_list with fvar_lb parallel Vec (no bloom)**: Removed delta-encoded FVarList
+  linked list from Expr, replaced with O(1) fvar_lb computation from children. Eliminated
+  fvar_union (6.33% on Init). But canonical_hash degraded to struct_hash alone (no
+  fvar_normalize_hash), causing 15% regression on Mathlib 100K from cache collision increase.
+  **Superseded**: the fvar_bloom approach (32-bit bloom filter) provides sufficient discrimination
+  for canonical_hash without the linked list overhead. Now adopted as `fvar_bloom: u32` +
+  `fvar_lb: u16` in every Expr variant, replacing FVarList entirely.
+  **~2.3% improvement on Mathlib 100K** (fvar_union went from 6.33%+14% children = 20% to 0%).
 
 - **Cached constant ExprPtrs** (Bool.true/false, Nat.zero/succ, Nat, String): Cache the
   ExprPtrs for common constants used in nat/bool/string reduction to avoid repeated

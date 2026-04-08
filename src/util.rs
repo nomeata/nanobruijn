@@ -1,5 +1,5 @@
 use crate::env::{DeclarMap, Env, NotationMap, EnvLimit};
-use crate::expr::{BinderStyle, Expr, FVarId, FVarList, FVarListPtr, FVarNode, FVAR_HASH};
+use crate::expr::{BinderStyle, Expr, FVarId};
 use crate::level::Level;
 use crate::name::Name;
 use crate::pretty_printer::{PpOptions, PrettyPrinter};
@@ -216,7 +216,7 @@ impl<K: ChainKey, V: Copy> LazyChainMap<K, V> {
     }
 }
 
-/// Cache key: single u64 mixing struct_hash and fvar_list_hash.
+/// Cache key: single u64 mixing struct_hash and fvar_bloom hash.
 pub(crate) type CacheKey = u64;
 /// DefEq cache key: ordered pair of canonical hashes.
 pub(crate) type DefeqCacheKey = (u64, u64);
@@ -946,160 +946,13 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         }
     }
 
-    // --- FVarList operations ---
-
-    pub(crate) fn read_fvar_node(&self, ptr: FVarListPtr<'t>) -> FVarNode<'t> {
-        match ptr.dag_marker() {
-            DagMarker::ExportFile => *self.export_file.dag.fvarlists.get_index(ptr.idx()).unwrap(),
-            DagMarker::TcCtx => *self.dag.fvarlists.get_index(ptr.idx()).unwrap(),
-        }
-    }
-
-    pub(crate) fn alloc_fvar_node(&mut self, delta: u16, tail: FVarList<'t>) -> FVarListPtr<'t> {
-        let tail_hash = tail.map(|t| self.read_fvar_node(t).get_hash()).unwrap_or(0);
-        let hash = hash64!(FVAR_HASH, delta as u64, tail_hash);
-        let node = FVarNode { hash, delta, tail };
-        if let Some(idx) = self.export_file.dag.fvarlists.get_index_of(&node) {
-            Ptr::from(DagMarker::ExportFile, idx)
-        } else {
-            Ptr::from(DagMarker::TcCtx, self.dag.fvarlists.insert_full(node).0)
-        }
-    }
-
-    /// Singleton fvar list for bvar(i)
-    pub(crate) fn fvar_singleton(&mut self, idx: u16) -> FVarList<'t> {
-        Some(self.alloc_fvar_node(idx, None))
-    }
-
-    /// Shift: increment head delta by k. O(1).
-    pub(crate) fn fvar_shift(&mut self, fvl: FVarList<'t>, k: i16) -> FVarList<'t> {
-        match fvl {
-            None => None,
-            Some(ptr) => {
-                let node = self.read_fvar_node(ptr);
-                let new_delta = node.delta as i16 + k;
-                assert!(new_delta >= 0, "fvar_shift: delta {} + k {} would go negative", node.delta, k);
-                Some(self.alloc_fvar_node(new_delta as u16, node.tail))
-            }
-        }
-    }
-
-    /// Shift free var indices >= cutoff by k in the FVarList.
-    /// Walk the delta-encoded list to find the first entry >= cutoff,
-    /// add k to its delta, share the tail. O(position of cutoff in list).
-    pub(crate) fn fvar_shift_cutoff(&mut self, fvl: FVarList<'t>, k: i16, cutoff: u16) -> FVarList<'t> {
-        if cutoff == 0 {
-            return self.fvar_shift(fvl, k);
-        }
-        self.fvar_shift_cutoff_aux(fvl, k, cutoff, 0)
-    }
-
-    fn fvar_shift_cutoff_aux(&mut self, fvl: FVarList<'t>, k: i16, cutoff: u16, abs_pos: u16) -> FVarList<'t> {
-        match fvl {
-            None => None,
-            Some(ptr) => {
-                let node = self.read_fvar_node(ptr);
-                let cur_abs = abs_pos + node.delta;
-                if cur_abs >= cutoff {
-                    let new_delta = node.delta as i16 + k;
-                    assert!(new_delta >= 0, "fvar_shift_cutoff: delta {} + k {} would go negative", node.delta, k);
-                    Some(self.alloc_fvar_node(new_delta as u16, node.tail))
-                } else {
-                    let new_tail = self.fvar_shift_cutoff_aux(node.tail, k, cutoff, cur_abs + 1);
-                    Some(self.alloc_fvar_node(node.delta, new_tail))
-                }
-            }
-        }
-    }
-
-    /// Unbind: remove bvar(0), decrement others. O(1).
-    pub(crate) fn fvar_unbind(&mut self, fvl: FVarList<'t>) -> FVarList<'t> {
-        match fvl {
-            None => None,
-            Some(ptr) => {
-                let node = self.read_fvar_node(ptr);
-                if node.delta == 0 {
-                    node.tail  // pop: bound var was free
-                } else {
-                    Some(self.alloc_fvar_node(node.delta - 1, node.tail))
-                }
-            }
-        }
-    }
-
-    /// Union: merge two delta-encoded sorted sets.
-    pub(crate) fn fvar_union(&mut self, a: FVarList<'t>, b: FVarList<'t>) -> FVarList<'t> {
-        match (a, b) {
-            (None, _) => b,
-            (_, None) => a,
-            (Some(ap), Some(bp)) => {
-                if ap == bp { return a; }  // ptr-eq shortcut
-                let an = self.read_fvar_node(ap);
-                let bn = self.read_fvar_node(bp);
-                self.fvar_merge(an.delta, an.tail, bn.delta, bn.tail)
-            }
-        }
-    }
-
-    /// Core merge: two "virtual" heads (a_d, a_tail) and (b_d, b_tail).
-    /// Both deltas are relative to the same base.
-    fn fvar_merge(&mut self, a_d: u16, a_tail: FVarList<'t>, b_d: u16, b_tail: FVarList<'t>) -> FVarList<'t> {
-        if a_d < b_d {
-            // Emit a_d. b's head relative to (a_d+1): b_d - a_d - 1.
-            // a's tail is already relative to (a_d+1).
-            let rest = self.fvar_merge_into(a_tail, b_d - a_d - 1, b_tail);
-            Some(self.alloc_fvar_node(a_d, rest))
-        } else if a_d == b_d {
-            // Same element. Merge tails (both relative to a_d+1). ptr-eq works here.
-            let rest = self.fvar_union(a_tail, b_tail);
-            Some(self.alloc_fvar_node(a_d, rest))
-        } else {
-            // Emit b_d. Symmetric.
-            let rest = self.fvar_merge_into(b_tail, a_d - b_d - 1, a_tail);
-            Some(self.alloc_fvar_node(b_d, rest))
-        }
-    }
-
-    /// Merge a FVarList with a virtual head (vd, vtail). vd is relative to the list's base.
-    fn fvar_merge_into(&mut self, list: FVarList<'t>, vd: u16, vtail: FVarList<'t>) -> FVarList<'t> {
-        match list {
-            None => Some(self.alloc_fvar_node(vd, vtail)),
-            Some(lp) => {
-                let ln = self.read_fvar_node(lp);
-                self.fvar_merge(ln.delta, ln.tail, vd, vtail)
-            }
-        }
-    }
-
-    /// Hash of the normalized fvar_list (shift-invariant). For canonical cache keys.
-    pub(crate) fn fvar_normalize_hash(&self, fvl: FVarList<'t>) -> u64 {
-        match fvl {
-            None => 0,
-            Some(ptr) => {
-                let node = self.read_fvar_node(ptr);
-                if node.delta == 0 {
-                    node.get_hash()
-                } else {
-                    let tail_hash = node.tail.map(|t| self.read_fvar_node(t).get_hash()).unwrap_or(0);
-                    hash64!(FVAR_HASH, 0u64, tail_hash)
-                }
-            }
-        }
-    }
-
-    /// Lower bound (smallest free bvar index), or 0 if closed.
-    pub(crate) fn fvar_lb(&self, fvl: FVarList<'t>) -> u16 {
-        match fvl {
-            None => 0,
-            Some(ptr) => self.read_fvar_node(ptr).delta,
-        }
-    }
-
     /// Canonical hash for cache keys: (struct_hash, normalized_fvar_hash).
     pub(crate) fn canonical_hash(&self, e: ExprPtr<'t>) -> u64 {
         let expr = self.read_expr(e);
         let sh = expr.get_struct_hash();
-        let fh = self.fvar_normalize_hash(expr.get_fvar_list());
+        let bloom = expr.get_fvar_bloom();
+        let lb = expr.get_fvar_lb();
+        let fh = if bloom == 0 { 0 } else { crate::expr::bloom_normalize(bloom, lb) as u64 };
         sh ^ fh.wrapping_mul(0x9e3779b97f4a7c15) // mix with golden ratio
     }
 
@@ -1160,21 +1013,17 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
                 let short = n.rsplit('.').next().unwrap_or(&n);
                 format!("C({})", short)
             }
-            Expr::App { fun, arg, fvar_list, .. } => {
-                let lb = self.fvar_lb(fvar_list);
-                format!("App({},{},lb={})", self.expr_desc(fun, max_depth - 1), self.expr_desc(arg, max_depth - 1), lb)
+            Expr::App { fun, arg, fvar_lb, .. } => {
+                format!("App({},{},lb={})", self.expr_desc(fun, max_depth - 1), self.expr_desc(arg, max_depth - 1), fvar_lb)
             }
-            Expr::Pi { binder_type, body, fvar_list, .. } => {
-                let lb = self.fvar_lb(fvar_list);
-                format!("Pi({},{},lb={})", self.expr_desc(binder_type, max_depth - 1), self.expr_desc(body, max_depth - 1), lb)
+            Expr::Pi { binder_type, body, fvar_lb, .. } => {
+                format!("Pi({},{},lb={})", self.expr_desc(binder_type, max_depth - 1), self.expr_desc(body, max_depth - 1), fvar_lb)
             }
-            Expr::Lambda { binder_type, body, fvar_list, .. } => {
-                let lb = self.fvar_lb(fvar_list);
-                format!("Lam({},{},lb={})", self.expr_desc(binder_type, max_depth - 1), self.expr_desc(body, max_depth - 1), lb)
+            Expr::Lambda { binder_type, body, fvar_lb, .. } => {
+                format!("Lam({},{},lb={})", self.expr_desc(binder_type, max_depth - 1), self.expr_desc(body, max_depth - 1), fvar_lb)
             }
-            Expr::Let { val, body, fvar_list, .. } => {
-                let lb = self.fvar_lb(fvar_list);
-                format!("Let({},{},lb={})", self.expr_desc(val, max_depth - 1), self.expr_desc(body, max_depth - 1), lb)
+            Expr::Let { val, body, fvar_lb, .. } => {
+                format!("Let({},{},lb={})", self.expr_desc(val, max_depth - 1), self.expr_desc(body, max_depth - 1), fvar_lb)
             }
             Expr::Proj { ty_name, idx, structure, .. } => {
                 let n = self.name_to_string(ty_name);
@@ -1253,8 +1102,9 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         }
         let hash = hash64!(crate::expr::VAR_HASH, dbj_idx);
         let struct_hash = crate::expr::VAR_HASH;
-        let fvar_list = self.fvar_singleton(dbj_idx);
-        let result = self.alloc_expr(Expr::Var { dbj_idx, hash, struct_hash, fvar_list });
+        let fvar_bloom = crate::expr::bloom_single(dbj_idx);
+        let fvar_lb = dbj_idx;
+        let result = self.alloc_expr(Expr::Var { dbj_idx, hash, struct_hash, fvar_bloom, fvar_lb });
         if idx >= self.expr_cache.mk_var_cache.len() {
             self.expr_cache.mk_var_cache.resize(idx + 1, None);
         }
@@ -1266,16 +1116,14 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         self.trace.alloc_mk_other += 1;
         let hash = hash64!(crate::expr::SORT_HASH, level);
         let struct_hash = hash;
-        let fvar_list = None;
-        self.alloc_expr(Expr::Sort { level, hash, struct_hash, fvar_list })
+        self.alloc_expr(Expr::Sort { level, hash, struct_hash, fvar_bloom: 0, fvar_lb: 0 })
     }
 
     pub fn mk_const(&mut self, name: NamePtr<'t>, levels: LevelsPtr<'t>) -> ExprPtr<'t> {
         self.trace.alloc_mk_other += 1;
         let hash = hash64!(crate::expr::CONST_HASH, name, levels);
         let struct_hash = hash;
-        let fvar_list = None;
-        self.alloc_expr(Expr::Const { name, levels, hash, struct_hash, fvar_list })
+        self.alloc_expr(Expr::Const { name, levels, hash, struct_hash, fvar_bloom: 0, fvar_lb: 0 })
     }
 
     pub fn mk_app(&mut self, fun: ExprPtr<'t>, arg: ExprPtr<'t>) -> ExprPtr<'t> {
@@ -1315,8 +1163,15 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         let num_loose_bvars = fun_e.num_loose_bvars().max(arg_e.num_loose_bvars());
         let has_fvars = fun_e.has_fvars() || arg_e.has_fvars();
         let struct_hash = hash64!(crate::expr::APP_HASH, fun_e.get_struct_hash(), arg_e.get_struct_hash());
-        let fvar_list = self.fvar_union(fun_e.get_fvar_list(), arg_e.get_fvar_list());
-        let app_expr = Expr::App { fun, arg, num_loose_bvars, has_fvars, hash, struct_hash, fvar_list };
+        let fvar_bloom = crate::expr::bloom_union(fun_e.get_fvar_bloom(), arg_e.get_fvar_bloom());
+        let fvar_lb = if num_loose_bvars == 0 { 0 } else {
+            let f_nlbv = fun_e.num_loose_bvars();
+            let a_nlbv = arg_e.num_loose_bvars();
+            if f_nlbv == 0 { arg_e.get_fvar_lb() }
+            else if a_nlbv == 0 { fun_e.get_fvar_lb() }
+            else { fun_e.get_fvar_lb().min(arg_e.get_fvar_lb()) }
+        };
+        let app_expr = Expr::App { fun, arg, num_loose_bvars, has_fvars, hash, struct_hash, fvar_bloom, fvar_lb };
         let result = if fun.dag_marker() == DagMarker::TcCtx || arg.dag_marker() == DagMarker::TcCtx {
             self.alloc_expr_tc(app_expr)
         } else {
@@ -1359,9 +1214,18 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         let num_loose_bvars = ty_e.num_loose_bvars().max(body_e.num_loose_bvars().saturating_sub(1));
         let has_fvars = ty_e.has_fvars() || body_e.has_fvars();
         let struct_hash = hash64!(crate::expr::LAMBDA_HASH, binder_name, binder_style, ty_e.get_struct_hash(), body_e.get_struct_hash());
-        let body_free_fvl = self.fvar_unbind(body_e.get_fvar_list());
-        let fvar_list = self.fvar_union(ty_e.get_fvar_list(), body_free_fvl);
-        let lambda_expr = Expr::Lambda { binder_name, binder_style, binder_type, body, num_loose_bvars, has_fvars, hash, struct_hash, fvar_list };
+        let body_bloom = crate::expr::bloom_unbind(body_e.get_fvar_bloom());
+        let fvar_bloom = crate::expr::bloom_union(ty_e.get_fvar_bloom(), body_bloom);
+        let fvar_lb = if num_loose_bvars == 0 { 0 } else {
+            let t_nlbv = ty_e.num_loose_bvars();
+            let b_nlbv = body_e.num_loose_bvars();
+            let b_lb = body_e.get_fvar_lb().saturating_sub(1);
+            if t_nlbv == 0 && b_nlbv <= 1 { 0 }
+            else if t_nlbv == 0 { b_lb }
+            else if b_nlbv <= 1 { ty_e.get_fvar_lb() }
+            else { ty_e.get_fvar_lb().min(b_lb) }
+        };
+        let lambda_expr = Expr::Lambda { binder_name, binder_style, binder_type, body, num_loose_bvars, has_fvars, hash, struct_hash, fvar_bloom, fvar_lb };
         let result = if binder_type.dag_marker() == DagMarker::TcCtx || body.dag_marker() == DagMarker::TcCtx {
             self.alloc_expr_tc(lambda_expr)
         } else {
@@ -1389,9 +1253,18 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         let num_loose_bvars = ty_e.num_loose_bvars().max(body_e.num_loose_bvars().saturating_sub(1));
         let has_fvars = ty_e.has_fvars() || body_e.has_fvars();
         let struct_hash = hash64!(crate::expr::PI_HASH, binder_name, binder_style, ty_e.get_struct_hash(), body_e.get_struct_hash());
-        let body_free_fvl = self.fvar_unbind(body_e.get_fvar_list());
-        let fvar_list = self.fvar_union(ty_e.get_fvar_list(), body_free_fvl);
-        let pi_expr = Expr::Pi { binder_name, binder_style, binder_type, body, num_loose_bvars, has_fvars, hash, struct_hash, fvar_list };
+        let body_bloom = crate::expr::bloom_unbind(body_e.get_fvar_bloom());
+        let fvar_bloom = crate::expr::bloom_union(ty_e.get_fvar_bloom(), body_bloom);
+        let fvar_lb = if num_loose_bvars == 0 { 0 } else {
+            let t_nlbv = ty_e.num_loose_bvars();
+            let b_nlbv = body_e.num_loose_bvars();
+            let b_lb = body_e.get_fvar_lb().saturating_sub(1);
+            if t_nlbv == 0 && b_nlbv <= 1 { 0 }
+            else if t_nlbv == 0 { b_lb }
+            else if b_nlbv <= 1 { ty_e.get_fvar_lb() }
+            else { ty_e.get_fvar_lb().min(b_lb) }
+        };
+        let pi_expr = Expr::Pi { binder_name, binder_style, binder_type, body, num_loose_bvars, has_fvars, hash, struct_hash, fvar_bloom, fvar_lb };
         let result = if binder_type.dag_marker() == DagMarker::TcCtx || body.dag_marker() == DagMarker::TcCtx {
             self.alloc_expr_tc(pi_expr)
         } else {
@@ -1420,12 +1293,23 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         let num_loose_bvars = ty_ub.max(val_ub.max(body_ub.saturating_sub(1)));
         let has_fvars = ty_e.has_fvars() || val_e.has_fvars() || body_e.has_fvars();
         let struct_hash = hash64!(crate::expr::LET_HASH, binder_name, ty_e.get_struct_hash(), val_e.get_struct_hash(), body_e.get_struct_hash(), nondep);
-        let ty_fvl = ty_e.get_fvar_list();
-        let val_fvl = val_e.get_fvar_list();
-        let body_free_fvl = self.fvar_unbind(body_e.get_fvar_list());
-        let tv_fvl = self.fvar_union(ty_fvl, val_fvl);
-        let fvar_list = self.fvar_union(tv_fvl, body_free_fvl);
-        let let_expr = Expr::Let { binder_name, binder_type, val, body, num_loose_bvars, has_fvars, hash, nondep, struct_hash, fvar_list };
+        let body_bloom = crate::expr::bloom_unbind(body_e.get_fvar_bloom());
+        let fvar_bloom = crate::expr::bloom_union(
+            crate::expr::bloom_union(ty_e.get_fvar_bloom(), val_e.get_fvar_bloom()),
+            body_bloom
+        );
+        let fvar_lb = if num_loose_bvars == 0 { 0 } else {
+            let t_nlbv = ty_ub;
+            let v_nlbv = val_ub;
+            let b_nlbv = body_ub;
+            let b_lb = body_e.get_fvar_lb().saturating_sub(1);
+            let mut lb = u16::MAX;
+            if t_nlbv > 0 { lb = lb.min(ty_e.get_fvar_lb()); }
+            if v_nlbv > 0 { lb = lb.min(val_e.get_fvar_lb()); }
+            if b_nlbv > 1 || (b_nlbv == 1 && body_e.get_fvar_lb() > 0) { lb = lb.min(b_lb); }
+            if lb == u16::MAX { 0 } else { lb }
+        };
+        let let_expr = Expr::Let { binder_name, binder_type, val, body, num_loose_bvars, has_fvars, hash, nondep, struct_hash, fvar_bloom, fvar_lb };
         if binder_type.dag_marker() == DagMarker::TcCtx || val.dag_marker() == DagMarker::TcCtx || body.dag_marker() == DagMarker::TcCtx {
             self.alloc_expr_tc(let_expr)
         } else {
@@ -1440,11 +1324,12 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         let num_loose_bvars = s_e.num_loose_bvars();
         let has_fvars = s_e.has_fvars();
         let struct_hash = hash64!(crate::expr::PROJ_HASH, ty_name, idx, s_e.get_struct_hash());
-        let fvar_list = s_e.get_fvar_list();
+        let fvar_bloom = s_e.get_fvar_bloom();
+        let fvar_lb = s_e.get_fvar_lb();
         if structure.dag_marker() == DagMarker::TcCtx {
-            self.alloc_expr_tc(Expr::Proj { ty_name, idx, structure, num_loose_bvars, has_fvars, hash, struct_hash, fvar_list })
+            self.alloc_expr_tc(Expr::Proj { ty_name, idx, structure, num_loose_bvars, has_fvars, hash, struct_hash, fvar_bloom, fvar_lb })
         } else {
-            self.alloc_expr(Expr::Proj { ty_name, idx, structure, num_loose_bvars, has_fvars, hash, struct_hash, fvar_list })
+            self.alloc_expr(Expr::Proj { ty_name, idx, structure, num_loose_bvars, has_fvars, hash, struct_hash, fvar_bloom, fvar_lb })
         }
     }
 
@@ -1454,8 +1339,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         }
         let hash = hash64!(crate::expr::STRING_LIT_HASH, string_ptr);
         let struct_hash = hash;
-        let fvar_list = None;
-        Some(self.alloc_expr(Expr::StringLit { ptr: string_ptr, hash, struct_hash, fvar_list }))
+        Some(self.alloc_expr(Expr::StringLit { ptr: string_ptr, hash, struct_hash, fvar_bloom: 0, fvar_lb: 0 }))
     }
 
     pub fn mk_string_lit_quick(&mut self, s: CowStr<'t>) -> Option<ExprPtr<'t>> {
@@ -1472,8 +1356,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         }
         let hash = hash64!(crate::expr::NAT_LIT_HASH, num_ptr);
         let struct_hash = hash;
-        let fvar_list = None;
-        Some(self.alloc_expr(Expr::NatLit { ptr: num_ptr, hash, struct_hash, fvar_list }))
+        Some(self.alloc_expr(Expr::NatLit { ptr: num_ptr, hash, struct_hash, fvar_bloom: 0, fvar_lb: 0 }))
     }
 
     /// Shortcut to make an `Expr::NatLit` directly from a `BigUint`, rather than
@@ -1496,8 +1379,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         let id = FVarId::Unique(unique_id);
         let hash = hash64!(crate::expr::LOCAL_HASH, binder_name, binder_style, binder_type, id);
         let struct_hash = hash;
-        let fvar_list = None;
-        self.alloc_expr(Expr::Local { binder_name, binder_style, binder_type, id, hash, struct_hash, fvar_list })
+        self.alloc_expr(Expr::Local { binder_name, binder_style, binder_type, id, hash, struct_hash, fvar_bloom: 0, fvar_lb: 0 })
     }
 
     /// Construct a free variable representing a deBruijn level, incrementing the counter.
@@ -1513,8 +1395,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         let id = FVarId::DbjLevel(level);
         let hash = hash64!(crate::expr::LOCAL_HASH, binder_name, binder_style, binder_type, id);
         let struct_hash = hash;
-        let fvar_list = None;
-        self.alloc_expr(Expr::Local { binder_name, binder_style, binder_type, id, hash, struct_hash, fvar_list })
+        self.alloc_expr(Expr::Local { binder_name, binder_style, binder_type, id, hash, struct_hash, fvar_bloom: 0, fvar_lb: 0 })
     }
 
     /// Construct a free variable representing a deBruijn level, reusing a particular level
@@ -1529,8 +1410,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         let id = FVarId::DbjLevel(level);
         let hash = hash64!(crate::expr::LOCAL_HASH, binder_name, binder_style, binder_type, id);
         let struct_hash = hash;
-        let fvar_list = None;
-        self.alloc_expr(Expr::Local { binder_name, binder_style, binder_type, id, hash, struct_hash, fvar_list })
+        self.alloc_expr(Expr::Local { binder_name, binder_style, binder_type, id, hash, struct_hash, fvar_bloom: 0, fvar_lb: 0 })
     }
 
     /// Decrement the deBruijn level counter when closing a binder.
@@ -1569,12 +1449,13 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
             return inner;
         }
         // Normalize cutoff to 0 when all free vars are >= cutoff.
-        let inner_fvl = inner_expr.get_fvar_list();
-        let cutoff = if cutoff > 0 && self.fvar_lb(inner_fvl) >= cutoff { 0 } else { cutoff };
+        let inner_lb = inner_expr.get_fvar_lb();
+        let inner_bloom = inner_expr.get_fvar_bloom();
+        let cutoff = if cutoff > 0 && inner_lb >= cutoff { 0 } else { cutoff };
         // For negative shifts with cutoff=0, validate that fvar_lb won't go negative.
-        debug_assert!(amount >= 0 || cutoff > 0 || (self.fvar_lb(inner_fvl) as i16) + amount >= 0,
+        debug_assert!(amount >= 0 || cutoff > 0 || (inner_lb as i16) + amount >= 0,
             "mk_shift: negative shift would produce invalid fvar indices: fvar_lb={}, amount={}, cutoff={}",
-            self.fvar_lb(inner_fvl), amount, cutoff);
+            inner_lb, amount, cutoff);
         // Collapse nested shifts when cutoffs match: Shift(Shift(e, j, c), k, c) -> Shift(e, j+k, c)
         if let Expr::Shift { inner: inner2, amount: prev, cutoff: prev_cutoff, .. } = inner_expr {
             if prev_cutoff == cutoff {
@@ -1599,10 +1480,24 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         let has_fvars = inner_expr.has_fvars();
         let hash = hash64!(crate::expr::SHIFT_HASH, inner, amount as u16, cutoff);
         let struct_hash = inner_expr.get_struct_hash();
-        let fvar_list = self.fvar_shift_cutoff(inner_fvl, amount, cutoff);
         let new_nlbv = (nlbv as i16 + amount).max(0) as u16;
+        // Compute fvar_lb for Shift
+        let fvar_lb = if new_nlbv == 0 { 0 }
+            else if inner_lb >= cutoff { (inner_lb as i32 + amount as i32).max(0) as u16 }
+            else { inner_lb };
+        // Compute fvar_bloom for Shift: shift bits at positions >= cutoff by amount
+        let fvar_bloom = if cutoff == 0 {
+            if amount > 0 { inner_bloom.checked_shl(amount as u32).unwrap_or(0) | (if inner_bloom & 0x80000000 != 0 { 0x80000000 } else { 0 }) }
+            else { inner_bloom >> ((-amount) as u32) }
+        } else {
+            let low_mask = if cutoff >= 32 { u32::MAX } else { (1u32 << cutoff) - 1 };
+            let low = inner_bloom & low_mask;
+            let high = inner_bloom & !low_mask;
+            if amount > 0 { low | high.checked_shl(amount as u32).unwrap_or(0) | (if high & 0x80000000 != 0 { 0x80000000 } else { 0 }) }
+            else { low | (high >> ((-amount) as u32)) }
+        };
         // Shift nodes never exist in the export_file dag — always use tc-only alloc.
-        let result = self.alloc_expr_tc(Expr::Shift { hash, struct_hash, fvar_list, inner, amount, cutoff, num_loose_bvars: new_nlbv, has_fvars });
+        let result = self.alloc_expr_tc(Expr::Shift { hash, struct_hash, fvar_bloom, fvar_lb, inner, amount, cutoff, num_loose_bvars: new_nlbv, has_fvars });
         self.expr_cache.shift_dedup.insert(dedup_key, result);
         result
     }
@@ -1832,7 +1727,6 @@ pub struct LeanDag<'a> {
     pub uparams: FxIndexSet<Arc<[LevelPtr<'a>]>>,
     pub strings: FxIndexSet<CowStr<'a>>,
     pub bignums: Option<FxIndexSet<BigUint>>,
-    pub fvarlists: UniqueIndexSet<FVarNode<'a>>,
 }
 
 impl<'a> LeanDag<'a> {
@@ -1857,7 +1751,6 @@ impl<'a> LeanDag<'a> {
         if let Some(ref mut bignums) = self.bignums {
             bignums.clear();
         }
-        self.fvarlists.clear();
         // Re-insert sentinel values (Anon at index 0, Zero at index 0).
         let _ = self.names.insert(Name::Anon);
         let _ = self.levels.insert(Level::Zero);
@@ -1884,11 +1777,6 @@ impl<'a> LeanDag<'a> {
             uparams: new_fx_index_set(),
             strings: new_fx_index_set(),
             bignums: if config.nat_extension { Some(new_fx_index_set()) } else { None },
-            fvarlists: if expr_capacity > 0 {
-                IndexSet::with_capacity_and_hasher(expr_capacity / 2, Default::default())
-            } else {
-                new_unique_index_set()
-            },
         };
 
         let _ = out.names.insert(Name::Anon);

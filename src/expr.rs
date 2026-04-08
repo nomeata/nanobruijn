@@ -1,5 +1,5 @@
 //! Implementation of Lean expressions
-use crate::util::{AppArgs, BigUintPtr, ExprPtr, FxHashMap, LevelPtr, LevelsPtr, NamePtr, Ptr, StringPtr, TcCtx};
+use crate::util::{AppArgs, BigUintPtr, ExprPtr, FxHashMap, LevelPtr, LevelsPtr, NamePtr, StringPtr, TcCtx};
 use smallvec::SmallVec;
 use num_bigint::BigUint;
 use num_traits::identities::Zero;
@@ -18,28 +18,29 @@ pub(crate) const LOCAL_HASH: u64 = 211;
 pub(crate) const STRING_LIT_HASH: u64 = 1493;
 pub(crate) const NAT_LIT_HASH: u64 = 1583;
 pub(crate) const SHIFT_HASH: u64 = 1699;
-pub(crate) const FVAR_HASH: u64 = 1871;
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Expr<'a> {
     /// A string literal with a pointer to a utf-8 string.
     StringLit {
         hash: u64,
         struct_hash: u64,
-        fvar_list: FVarList<'a>,
+        fvar_bloom: u32,
+        fvar_lb: u16,
         ptr: StringPtr<'a>,
     },
     /// A nat literal, holds a pointer to an arbitrary precision bignum.
     NatLit {
         hash: u64,
         struct_hash: u64,
-        fvar_list: FVarList<'a>,
+        fvar_bloom: u32,
+        fvar_lb: u16,
         ptr: BigUintPtr<'a>,
     },
     Proj {
         hash: u64,
         struct_hash: u64,
-        fvar_list: FVarList<'a>,
+        fvar_bloom: u32,
+        fvar_lb: u16,
         /// The name of the structure being projected. E.g. `Prod` if this is
         /// projection 0 of `Prod.mk ..`
         ty_name: NamePtr<'a>,
@@ -55,26 +56,30 @@ pub enum Expr<'a> {
     Var {
         hash: u64,
         struct_hash: u64,
-        fvar_list: FVarList<'a>,
+        fvar_bloom: u32,
+        fvar_lb: u16,
         dbj_idx: u16,
     },
     Sort {
         hash: u64,
         struct_hash: u64,
-        fvar_list: FVarList<'a>,
+        fvar_bloom: u32,
+        fvar_lb: u16,
         level: LevelPtr<'a>,
     },
     Const {
         hash: u64,
         struct_hash: u64,
-        fvar_list: FVarList<'a>,
+        fvar_bloom: u32,
+        fvar_lb: u16,
         name: NamePtr<'a>,
         levels: LevelsPtr<'a>,
     },
     App {
         hash: u64,
         struct_hash: u64,
-        fvar_list: FVarList<'a>,
+        fvar_bloom: u32,
+        fvar_lb: u16,
         fun: ExprPtr<'a>,
         arg: ExprPtr<'a>,
         num_loose_bvars: u16,
@@ -83,7 +88,8 @@ pub enum Expr<'a> {
     Pi {
         hash: u64,
         struct_hash: u64,
-        fvar_list: FVarList<'a>,
+        fvar_bloom: u32,
+        fvar_lb: u16,
         binder_name: NamePtr<'a>,
         binder_style: BinderStyle,
         binder_type: ExprPtr<'a>,
@@ -94,7 +100,8 @@ pub enum Expr<'a> {
     Lambda {
         hash: u64,
         struct_hash: u64,
-        fvar_list: FVarList<'a>,
+        fvar_bloom: u32,
+        fvar_lb: u16,
         binder_name: NamePtr<'a>,
         binder_style: BinderStyle,
         binder_type: ExprPtr<'a>,
@@ -105,7 +112,8 @@ pub enum Expr<'a> {
     Let {
         hash: u64,
         struct_hash: u64,
-        fvar_list: FVarList<'a>,
+        fvar_bloom: u32,
+        fvar_lb: u16,
         binder_name: NamePtr<'a>,
         binder_type: ExprPtr<'a>,
         val: ExprPtr<'a>,
@@ -118,7 +126,8 @@ pub enum Expr<'a> {
     Local {
         hash: u64,
         struct_hash: u64,
-        fvar_list: FVarList<'a>,
+        fvar_bloom: u32,
+        fvar_lb: u16,
         binder_name: NamePtr<'a>,
         binder_style: BinderStyle,
         binder_type: ExprPtr<'a>,
@@ -132,7 +141,8 @@ pub enum Expr<'a> {
     Shift {
         hash: u64,
         struct_hash: u64,
-        fvar_list: FVarList<'a>,
+        fvar_bloom: u32,
+        fvar_lb: u16,
         inner: ExprPtr<'a>,
         amount: i16,
         cutoff: u16,
@@ -148,31 +158,6 @@ pub enum FVarId {
     DbjLevel(u16),
     /// Unique ID from monotonically increasing counter.
     Unique(u32),
-}
-
-/// A node in a delta-encoded sorted set of free bvar indices.
-/// The set {a0, a1, a2, ...} (sorted) is encoded as [a0, a1-a0-1, a2-a1-1, ...].
-/// None = empty set (closed). Some(ptr) = non-empty.
-pub type FVarList<'a> = Option<FVarListPtr<'a>>;
-pub type FVarListPtr<'a> = Ptr<&'a FVarNode<'a>>;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct FVarNode<'a> {
-    /// Hash of this node (delta + tail hash), for hash-consing via UniqueHasher.
-    pub(crate) hash: u64,
-    /// For the head: the lower bound (smallest free bvar index).
-    /// For subsequent nodes: the gap minus 1 to the next free bvar index.
-    pub(crate) delta: u16,
-    /// The rest of the list.
-    pub(crate) tail: FVarList<'a>,
-}
-
-impl<'a> FVarNode<'a> {
-    pub(crate) fn get_hash(&self) -> u64 { self.hash }
-}
-
-impl<'a> std::hash::Hash for FVarNode<'a> {
-    fn hash<H: std::hash::Hasher>(&self, state: &mut H) { state.write_u64(self.hash) }
 }
 
 impl<'a> Expr<'a> {
@@ -210,20 +195,37 @@ impl<'a> Expr<'a> {
         }
     }
 
-    pub(crate) fn get_fvar_list(&self) -> FVarList<'a> {
+    pub(crate) fn get_fvar_bloom(&self) -> u32 {
         match self {
-            Var { fvar_list, .. }
-            | Sort { fvar_list, .. }
-            | Const { fvar_list, .. }
-            | App { fvar_list, .. }
-            | Pi { fvar_list, .. }
-            | Lambda { fvar_list, .. }
-            | Let { fvar_list, .. }
-            | Local { fvar_list, .. }
-            | StringLit { fvar_list, .. }
-            | NatLit { fvar_list, .. }
-            | Proj { fvar_list, .. }
-            | Shift { fvar_list, .. } => *fvar_list,
+            Var { fvar_bloom, .. }
+            | Sort { fvar_bloom, .. }
+            | Const { fvar_bloom, .. }
+            | App { fvar_bloom, .. }
+            | Pi { fvar_bloom, .. }
+            | Lambda { fvar_bloom, .. }
+            | Let { fvar_bloom, .. }
+            | Local { fvar_bloom, .. }
+            | StringLit { fvar_bloom, .. }
+            | NatLit { fvar_bloom, .. }
+            | Proj { fvar_bloom, .. }
+            | Shift { fvar_bloom, .. } => *fvar_bloom,
+        }
+    }
+
+    pub(crate) fn get_fvar_lb(&self) -> u16 {
+        match self {
+            Var { fvar_lb, .. }
+            | Sort { fvar_lb, .. }
+            | Const { fvar_lb, .. }
+            | App { fvar_lb, .. }
+            | Pi { fvar_lb, .. }
+            | Lambda { fvar_lb, .. }
+            | Let { fvar_lb, .. }
+            | Local { fvar_lb, .. }
+            | StringLit { fvar_lb, .. }
+            | NatLit { fvar_lb, .. }
+            | Proj { fvar_lb, .. }
+            | Shift { fvar_lb, .. } => *fvar_lb,
         }
     }
 }
@@ -372,8 +374,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         // Only for sh_amt == 0 path; the sh_amt > 0 case has complex shift composition.
         // Guard: nlbv > offset + n_substs is a necessary condition (free since nlbv already computed).
         if shift_down && sh_amt == 0 && n_substs >= 4 && nlbv > offset + n_substs {
-            let fvl = self.read_expr(e).get_fvar_list();
-            let lb = self.fvar_lb(fvl);
+            let lb = self.read_expr(e).get_fvar_lb();
             if lb >= offset + n_substs {
                 let r = self.push_shift_down_cutoff(e, n_substs, offset);
                 self.expr_cache.inst_cache[slot] = (gen, params, e,r);
@@ -1185,7 +1186,9 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
 
     pub(crate) fn struct_hash(&self, e: ExprPtr<'t>) -> u64 { self.read_expr(e).get_struct_hash() }
 
-    pub(crate) fn fvar_list_of(&self, e: ExprPtr<'t>) -> FVarList<'t> { self.read_expr(e).get_fvar_list() }
+    pub(crate) fn fvar_lb(&self, e: ExprPtr<'t>) -> u16 {
+        self.read_expr(e).get_fvar_lb()
+    }
 
     /// Check if `b` equals `shift(a, delta)` without allocating.
     /// Used to verify shift-invariant cache hits.
@@ -1294,8 +1297,8 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
                 return self.shift_eq_aux(inner, b, delta + amount, cutoff),
             // a-side Shift with mismatched cutoff: if all vars are above both cutoffs,
             // the shift only affects free vars and is equivalent to Shift(inner, amount, cutoff)
-            (Shift { inner, amount, cutoff: sc, fvar_list, .. }, _) if sc != cutoff
-                && self.fvar_lb(fvar_list) >= cutoff.max(sc) =>
+            (Shift { inner, amount, cutoff: sc, fvar_lb, .. }, _) if sc != cutoff
+                && fvar_lb >= cutoff.max(sc) =>
                 return self.shift_eq_aux(inner, b, delta + amount, cutoff),
             // a-side Shift with mismatched cutoff, general case: use pending-shift comparison
             (Shift { inner, amount, cutoff: sc, .. }, _) if sc != cutoff =>
@@ -1315,8 +1318,8 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
                 };
             }
             // b-side Shift with mismatched cutoff: same optimization
-            (_, Shift { inner, amount, cutoff: sc, fvar_list, .. }) if sc != cutoff
-                && self.fvar_lb(fvar_list) >= cutoff.max(sc) => {
+            (_, Shift { inner, amount, cutoff: sc, fvar_lb, .. }) if sc != cutoff
+                && fvar_lb >= cutoff.max(sc) => {
                 return if amount <= delta {
                     self.shift_eq_aux(a, inner, delta - amount, cutoff)
                 } else {
@@ -1493,8 +1496,8 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
             // Handle by stripping and adjusting delta.
             (Shift { inner, amount, cutoff: sc, .. }, _) if sc == cutoff =>
                 self.shift_eq_aux(inner, b, delta + amount, cutoff),
-            (Shift { inner, amount, cutoff: sc, fvar_list, .. }, _) if sc != cutoff
-                && self.fvar_lb(fvar_list) >= cutoff.max(sc) =>
+            (Shift { inner, amount, cutoff: sc, fvar_lb, .. }, _) if sc != cutoff
+                && fvar_lb >= cutoff.max(sc) =>
                 self.shift_eq_aux(inner, b, delta + amount, cutoff),
             // a-side Shift with mismatched cutoff, general case
             (Shift { inner, amount, cutoff: sc, .. }, _) if sc != cutoff =>
@@ -1510,8 +1513,8 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
                     self.shift_eq_aux(inner, a, amount - delta, cutoff)
                 }
             }
-            (_, Shift { inner, amount, cutoff: sc, fvar_list, .. }) if sc != cutoff
-                && self.fvar_lb(fvar_list) >= cutoff.max(sc) => {
+            (_, Shift { inner, amount, cutoff: sc, fvar_lb, .. }) if sc != cutoff
+                && fvar_lb >= cutoff.max(sc) => {
                 if amount <= delta {
                     self.shift_eq_aux(a, inner, delta - amount, cutoff)
                 } else {
@@ -1558,5 +1561,25 @@ impl<'t> Expr<'t> {
             | Shift { has_fvars, .. } => *has_fvars,
         }
     }
+}
+
+/// Bloom filter for a single bvar index. Bit position = min(idx, 31).
+pub(crate) fn bloom_single(idx: u16) -> u32 {
+    1u32 << idx.min(31)
+}
+
+/// Bloom filter union (bitwise OR).
+pub(crate) fn bloom_union(a: u32, b: u32) -> u32 {
+    a | b
+}
+
+/// Bloom unbind: remove bvar 0 (shift all indices down by 1).
+pub(crate) fn bloom_unbind(b: u32) -> u32 {
+    b >> 1
+}
+
+/// Normalize bloom filter for canonical hashing: shift out the lower bound.
+pub(crate) fn bloom_normalize(b: u32, lb: u16) -> u32 {
+    if lb >= 32 { b } else { b >> lb }
 }
 

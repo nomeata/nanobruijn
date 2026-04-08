@@ -670,8 +670,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         let bucket_idx = if self.ctx.num_loose_bvars(e) == 0 {
             0
         } else {
-            let e_fvl = self.ctx.read_expr(e).get_fvar_list();
-            let e_lb = self.ctx.fvar_lb(e_fvl);
+            let e_lb = self.ctx.read_expr(e).get_fvar_lb();
             (depth - e_lb) as usize
         };
         let canon = self.ctx.canonical_hash(e);
@@ -742,7 +741,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         // depth < stored_depth: reverse shift_eq + push_shift_down
         let delta = (stored_depth - depth) as i16;
         if self.ctx.shift_eq(e, stored_input, delta) {
-            let result_fvar_lb = self.ctx.fvar_lb(self.ctx.read_expr(stored_result).get_fvar_list());
+            let result_fvar_lb = self.ctx.read_expr(stored_result).get_fvar_lb();
             if self.ctx.num_loose_bvars(stored_result) == 0 || result_fvar_lb >= delta as u16 {
                 return Some(self.ctx.push_shift_down(stored_result, delta as u16));
             }
@@ -1017,7 +1016,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         let whnf_bucket_idx = if e_nlbv == 0 {
             0
         } else {
-            let e_lb = self.ctx.fvar_lb(self.ctx.read_expr(e).get_fvar_list());
+            let e_lb = self.ctx.read_expr(e).get_fvar_lb();
             (depth - e_lb) as usize
         };
         // Look up in whnf cache chain.
@@ -1081,7 +1080,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         if depth < stored_depth {
             let abs_delta = (stored_depth - depth) as i16;
             if self.ctx.shift_eq(e, stored_input, abs_delta) {
-                let result_fvar_lb = self.ctx.fvar_lb(self.ctx.read_expr(stored_result).get_fvar_list());
+                let result_fvar_lb = self.ctx.read_expr(stored_result).get_fvar_lb();
                 if result_fvar_lb >= abs_delta as u16 {
                     self.ctx.trace.whnf_below_depth_hits += 1;
                     let shifted = self.ctx.push_shift_down(stored_result, abs_delta as u16);
@@ -1171,7 +1170,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             let wnu_bucket_idx = if cur_nlbv == 0 {
                 0
             } else {
-                let cur_lb = self.ctx.fvar_lb(self.ctx.read_expr(cur).get_fvar_list());
+                let cur_lb = self.ctx.read_expr(cur).get_fvar_lb();
                 (cur_depth - cur_lb) as usize
             };
             let wnu_chain = self.tc_cache.wnu_cache_chain(wnu_bucket_idx, &cur_canon);
@@ -1357,7 +1356,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                 let entry_bucket_idx = if entry_nlbv == 0 {
                     0
                 } else {
-                    let entry_lb = self.ctx.fvar_lb(self.ctx.read_expr(entry).get_fvar_list());
+                    let entry_lb = self.ctx.read_expr(entry).get_fvar_lb();
                     (store_depth - entry_lb) as usize
                 };
                 let new_slot: WhnfSlot<'t> = (entry, result, store_depth);
@@ -1913,8 +1912,8 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             return None;
         }
         // Use u16::MAX for closed expressions so they don't constrain the bucket
-        let x_lb = if x_nlbv > 0 { self.ctx.fvar_lb(self.ctx.read_expr(x).get_fvar_list()) } else { u16::MAX };
-        let y_lb = if y_nlbv > 0 { self.ctx.fvar_lb(self.ctx.read_expr(y).get_fvar_list()) } else { u16::MAX };
+        let x_lb = if x_nlbv > 0 { self.ctx.read_expr(x).get_fvar_lb() } else { u16::MAX };
+        let y_lb = if y_nlbv > 0 { self.ctx.read_expr(y).get_fvar_lb() } else { u16::MAX };
         let min_lb = x_lb.min(y_lb);
         Some((depth - 1 - min_lb) as usize)
     }
@@ -2023,8 +2022,8 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         let y_nlbv = self.ctx.num_loose_bvars(y);
         if x_nlbv == 0 && y_nlbv == 0 { return; }
         if depth == 0 { return; }
-        let x_lb = if x_nlbv > 0 { self.ctx.fvar_lb(self.ctx.read_expr(x).get_fvar_list()) } else { u16::MAX };
-        let y_lb = if y_nlbv > 0 { self.ctx.fvar_lb(self.ctx.read_expr(y).get_fvar_list()) } else { u16::MAX };
+        let x_lb = if x_nlbv > 0 { self.ctx.read_expr(x).get_fvar_lb() } else { u16::MAX };
+        let y_lb = if y_nlbv > 0 { self.ctx.read_expr(y).get_fvar_lb() } else { u16::MAX };
         let min_lb = x_lb.min(y_lb);
         let bucket_idx = (depth - 1 - min_lb) as usize;
         let cx = self.ctx.canonical_hash(x);
