@@ -277,6 +277,9 @@ These approaches were tried and found counterproductive or unsound:
 - **Precomputed canonical_hash in parallel Vec<u64>**: Store canonical_hash alongside DAG
   expressions for O(1) lookup. No measurable improvement — the saved read_expr calls are
   already cache-hot, and the Vec overhead (compute + push + memory) cancels the savings.
+- **fvar_lb parallel Vec<u16>**: Store fvar_lb alongside DAG expressions for O(1) lookup,
+  avoiding read_expr + read_fvar_node for cache bucketing. 2% regression — same root cause
+  as canonical_hash Vec: the push overhead exceeds the read savings.
 - **subst_cache DM cache** (4K entries, generation-counted): 10% regression. Unlike inst_cache,
   the subst_cache is traversal-based (walks entire subexpression DAG within one call). DM cache
   collisions evict entries needed later in the same traversal, causing subtree re-traversal.
