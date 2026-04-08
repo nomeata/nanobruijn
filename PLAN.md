@@ -201,9 +201,11 @@ Fixed worst outliers: #298261 from 11.5s to 830ms, #357120 from 2.3s to 85ms.
 | Init (54k decls, 310MB) | 24.2s | 20.1s | **0.83x** |
 | app-lam N=4000 | 8.3s | 10ms | 0.001x |
 | Mathlib 100K (100k decls) | - | 115s | - |
-| Mathlib (310k decls, 4.9GB) | 898s | ~860s* | **~0.96x*** |
+| Mathlib (630k decls, 4.9GB) | 898s* | ~1414s* | **~1.57x*** |
 
-*Estimated from 100K scaling; full Mathlib benchmark pending.
+*Full Mathlib times are wall time on a variable-load system and not directly comparable.
+The Mathlib 100K benchmark (3 runs, low variance) is the most reliable comparison point.
+Note: nanobruijn includes ~13% parsing overhead (custom deserialize) that is design-neutral.
 
 ### Gap analysis
 
