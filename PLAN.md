@@ -286,6 +286,13 @@ These approaches were tried and found counterproductive or unsound:
 - **fvar_list TcCtx check in mk_app/mk_lambda/mk_pi/mk_let**: Skipping export_file probe when
   fvar_list has TcCtx dag_marker. No improvement — when all child pointers are ExportFile,
   fvar_union almost always produces ExportFile results, so the check is rarely true.
+- **Replacing fvar_list with fvar_lb parallel Vec**: Removed delta-encoded FVarList linked list
+  from Expr, replaced with O(1) fvar_lb computation from children. Eliminated fvar_union
+  (6.33% on Init). But canonical_hash degraded to struct_hash alone (no fvar_normalize_hash),
+  causing 15% regression on Mathlib 100K from cache collision increase. The fvar_normalize_hash
+  is essential for discriminating same-structure different-free-var-pattern expressions.
+  Computing fvar_normalize_hash without the linked list is infeasible because hash(union(A,B))
+  can't be derived from hash(A) and hash(B) without set intersection information.
 
 ## TODO
 
