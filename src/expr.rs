@@ -1263,6 +1263,17 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
     /// Unlike pointer equality (`a == b`), this traverses the structure to handle
     /// expressions built by `push_shift` or `mk_shift` that are semantically
     /// identical but have different ExprPtrs.
+    /// Strip outer Shift(_, _, 0) wrappers, returning (inner, total_shift).
+    pub(crate) fn strip_outer_shifts(&self, e: ExprPtr<'t>) -> (ExprPtr<'t>, i16) {
+        let mut inner = e;
+        let mut total = 0i16;
+        while let Expr::Shift { inner: i, amount, cutoff: 0, .. } = self.read_expr(inner) {
+            total += amount;
+            inner = i;
+        }
+        (inner, total)
+    }
+
     pub(crate) fn sem_eq(&mut self, a: ExprPtr<'t>, b: ExprPtr<'t>) -> bool {
         // Fast path: pointer equality (most common case)
         if a == b { return true; }

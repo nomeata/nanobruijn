@@ -794,13 +794,20 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
     }
 
     fn infer_app(&mut self, e: ExprPtr<'t>, flag: InferFlag) -> ExprPtr<'t> {
-        let (mut fun, mut args) = self.ctx.unfold_apps_stack(e);
+        // Use unfold_apps which preserves lazy Shift wrappers on fun and args.
+        // This allows infer's shift-peel optimization to fire: infer(Shift(e, k, 0))
+        // strips the shift and infers e at depth d-k, hitting the cache for the
+        // unshifted expression. unfold_apps_stack would force shifts into the structure,
+        // creating new expression variants that miss the infer cache.
+        let (mut fun, args, _) = self.ctx.unfold_apps(e);
         let mut ctx = Vec::new();
         fun = self.infer(fun, flag);
-        while !args.is_empty() {
+        let mut arg_idx = 0;
+        while arg_idx < args.len() {
             match self.ctx.view_expr(fun) {
                 Pi { binder_type, body, .. } => {
-                    let arg = args.pop().unwrap();
+                    let arg = args[arg_idx];
+                    arg_idx += 1;
                     if flag == Check {
                         let arg_type = self.infer(arg, flag);
                         let binder_type_instd = self.ctx.inst_beta(binder_type, ctx.as_slice());
@@ -1981,6 +1988,21 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                     self.ctx.trace.eq_cache_cross_depth_hits += 1;
                 }
                 return true;
+            }
+        }
+        // Shift-aware fallback: if both query expressions are Shift(_, k, 0) with
+        // the same k > 0, strip the shifts and retry against stored entries.
+        // Sound because def_eq is preserved by uniform shifting: if def_eq(A, B)
+        // at depth d, then def_eq(Shift(A,k,0), Shift(B,k,0)) at depth d+k.
+        let (ix, kx) = self.ctx.strip_outer_shifts(qx);
+        let (iy, ky) = self.ctx.strip_outer_shifts(qy);
+        if kx == ky && kx > 0 {
+            for (ci, &(stored_a, stored_b)) in chain.iter().enumerate() {
+                if self.ctx.sem_eq(stored_a, ix) && self.ctx.sem_eq(stored_b, iy) {
+                    self.ctx.trace.eq_cache_hits += 1;
+                    self.ctx.trace.eq_cache_cross_depth_hits += 1;
+                    return true;
+                }
             }
         }
         self.ctx.trace.eq_cache_verify_fail += 1;
