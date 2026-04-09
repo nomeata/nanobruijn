@@ -190,30 +190,37 @@ Fixed worst outliers: #298261 from 11.5s to 830ms, #357120 from 2.3s to 85ms.
 
 ### Performance
 
-| Benchmark | nanoda | nanobruijn | Ratio |
-|-----------|--------|------------|-------|
-| Init (54k decls, 310MB) | 24.2s | 20.1s | **0.83x** |
-| app-lam N=4000 | 8.3s | 10ms | 0.001x |
-| Mathlib 100K (100k decls) | - | 128s | - |
-| Mathlib (310k decls, 4.9GB) | 898s | ~957s* | **~1.07x*** |
+Fair in-binary comparison (same binary, both TC paths with ReusableDag, 4 threads):
 
-*Estimated from 100K scaling; full Mathlib benchmark pending.
+| Benchmark | nanoda TC | nanobruijn TC | Ratio |
+|-----------|-----------|---------------|-------|
+| Init (54k decls, 310MB) | 6.3s | 7.2s | **1.14x** |
+| app-lam N=4000 | 8.3s | 10ms | 0.001x |
+| Mathlib (630k decls, 5.0GB) | 320s | 439s | **1.37x** |
+
+Previous table had Init at 24.2s/20.1s — those were standalone binaries with different
+IndexSet implementations. The in-binary comparison is fair: same parsing, same dag, same
+thread pool, only the TC algorithm differs.
 
 ### Gap analysis
 
-On Init we're 18% faster than nanoda, driven by the mk_app DM cache (59% hit rate,
-avoids IndexMap lookups). On full Mathlib we're ~7% slower (estimated from 100K scaling).
+On Init nanobruijn is 14% slower. On full Mathlib it's 37% slower (119s gap).
 
-The shift approach is roughly break-even on heavy declarations: ~11% shift overhead
-(view_expr 3.2%, canonical_hash 2.7%, shift_eq_aux 2.4%, mk_shift_cutoff 1.8%,
-push_shift 1.0%) is offset by ~11% savings from the mk_app DM cache (IndexMap
-get_index_of drops from 13.3% in nanoda to 2.3% in nanobruijn).
+Profile hotspots comparison (Mathlib 100K, absolute time deltas nanobruijn - nanoda):
+- insert_full: +7.2s (more expressions created due to Shift nodes)
+- inst_aux: +5.9s (shift-aware instantiation is more complex)
+- mk_app: +3.2s (more app nodes created from shift pushing)
+- memset: +2.4s (larger working set from Shift node overhead)
+- shift_eq_aux: +2.1s (shift-aware equality has no nanoda equivalent)
+- canonical_hash: +1.7s (struct_hash + bloom filter overhead)
+- mk_shift_cutoff: +1.3s (creating Shift wrapper nodes)
+- view_expr: +1.2s (more read_expr calls to look through Shifts)
+- nanoda-only costs: reserve_rehash -2.0s, abstr_aux -1.4s
 
-The 9% Mathlib gap appears structural — the flat profile (nothing above 15%) means
-no single function can be optimized to close the gap. The top hotspot declarations
-(AlgebraicGeometry.Scheme, 40s each) have 99.99% DM cache hit rates, so the DM cache
-is already maximally effective there. The gap comes from aggregate shift overhead across
-~310K declarations.
+The gap is structural: de Bruijn shifts create ~30-40% more expressions than
+locally-nameless fvar substitution, inflating insert_full, mk_app, and inst_aux
+proportionally. The mk_app DM cache (59% hit rate on Init) helps but doesn't
+fully offset the increased expression volume on Mathlib's heavier declarations.
 
 Profile hotspots (Mathlib last 210K): mk_app 14.7%, inst_aux 10.3%, insert_full 7.6%,
 subst_aux 4.4%, whnf_no_unfolding 4.2%, unfold_apps 3.2%, view_expr 3.2%,
