@@ -333,6 +333,19 @@ These approaches were tried and found counterproductive, unsound, or out of scop
 
 ## TODO
 
+- **OSNF (Outermost-Shift Normal Form)**: For expression `e` with `fvar_lb = k > 0`,
+  represent as `Shift(core, k, 0)` where `core = shift_down(e, k, 0)` has `fvar_lb = 0`.
+  Two expressions differing only by a uniform bvar offset share the same core.
+  Statistics (cutoff-0 only):
+  - Init: 2.9M candidates → 1.9M unique cores (1.51x sharing, ~973K fewer exprs)
+  - Mathlib 100K: 47M candidates → 23.6M unique cores (1.99x sharing, ~23.4M fewer exprs)
+  - Largest sharing group: 1031 (Mathlib), 128 (Init)
+  - Cores already in DAG at fvar_lb=0: ~0% (normalization creates new expressions)
+  Next steps:
+  - **Prove uniqueness of OSNF** (new proof obligation for Theory.lean)
+  - Implement as a parse-time transformation (not just statistics)
+  - Measure impact on TC caching (does explicit core sharing beat canonical_hash alone?)
+  - Only cutoff-0 for now; general shifts are more complex and the normal form is less clear
 - **Remove remaining dead code**: thread_local profiling counters, dead locally-nameless
   code (Local variant, FVarId, abstr, etc.)
 - **Fill in Theory.lean sorry's**: `decode_shift`, `fvars_shift_zero`

@@ -15,6 +15,7 @@ pub mod pretty_printer;
 pub mod quot;
 pub mod tc;
 pub mod nanoda_tc;
+pub mod osnf;
 pub(crate) mod union_find;
 #[cfg(test)]
 mod tests;
