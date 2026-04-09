@@ -315,6 +315,18 @@ These approaches were tried and found counterproductive, unsound, or out of scop
   `fvar_lb: u16` in every Expr variant, replacing FVarList entirely.
   **~2.3% improvement on Mathlib 100K** (fvar_union went from 6.33%+14% children = 20% to 0%).
 
+- **def_eq shift-peel** (strip matching Shift wrappers from both sides, split_off context,
+  recurse at lower depth): 10% regression on Init. The split_off/extend Vec operations
+  (allocation + copy per call) outweigh the cache reuse benefit. The approach is correct
+  (def_eq is preserved by uniform shifting) but impractical due to per-call overhead.
+- **eq_cache shift-stripping fallback** (after sem_eq verify failure, strip matching outer
+  shifts and retry): Converts only 1.1% of verify failures to hits. Most verify failures
+  are genuine hash collisions, not shifted variants. Negligible impact on both Init and
+  Mathlib.
+- **unfold_apps `shifted` flag** (skip foldl_apps rebuild on no-reduction paths when no
+  shifts encountered): Correct but negligible performance impact — the foldl_apps rebuild
+  was already cheap relative to the shift overhead.
+
 - **OSNF expression rewriting** (Outermost-Shift Normal Form): For expression `e` with
   `fvar_lb = k > 0`, pre-compute `core = shift_down(e, k, 0)` (fvar_lb = 0). In
   mk_shift_cutoff, rewrite `Shift(e, amount, 0)` → `Shift(core, fvar_lb+amount, 0)`.
