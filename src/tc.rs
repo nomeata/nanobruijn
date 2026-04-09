@@ -1990,21 +1990,6 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                 return true;
             }
         }
-        // Shift-aware fallback: if both query expressions are Shift(_, k, 0) with
-        // the same k > 0, strip the shifts and retry against stored entries.
-        // Sound because def_eq is preserved by uniform shifting: if def_eq(A, B)
-        // at depth d, then def_eq(Shift(A,k,0), Shift(B,k,0)) at depth d+k.
-        let (ix, kx) = self.ctx.strip_outer_shifts(qx);
-        let (iy, ky) = self.ctx.strip_outer_shifts(qy);
-        if kx == ky && kx > 0 {
-            for (ci, &(stored_a, stored_b)) in chain.iter().enumerate() {
-                if self.ctx.sem_eq(stored_a, ix) && self.ctx.sem_eq(stored_b, iy) {
-                    self.ctx.trace.eq_cache_hits += 1;
-                    self.ctx.trace.eq_cache_cross_depth_hits += 1;
-                    return true;
-                }
-            }
-        }
         self.ctx.trace.eq_cache_verify_fail += 1;
         false
     }

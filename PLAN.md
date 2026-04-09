@@ -196,7 +196,7 @@ Fair in-binary comparison (same binary, both TC paths with ReusableDag, 4 thread
 |-----------|-----------|---------------|-------|
 | Init (54k decls, 310MB) | 6.3s | 7.2s | **1.14x** |
 | app-lam N=4000 | 8.3s | 10ms | 0.001x |
-| Mathlib (630k decls, 5.0GB) | 320s | 439s | **1.37x** |
+| Mathlib (630k decls, 5.0GB) | 320s | 345s | **1.08x** |
 
 Previous table had Init at 24.2s/20.1s — those were standalone binaries with different
 IndexSet implementations. The in-binary comparison is fair: same parsing, same dag, same
@@ -204,28 +204,24 @@ thread pool, only the TC algorithm differs.
 
 ### Gap analysis
 
-On Init nanobruijn is 14% slower. On full Mathlib it's 37% slower (119s gap).
+On Init nanobruijn is 14% slower. On full Mathlib it's 8% slower (25s gap).
 
-Profile hotspots comparison (Mathlib 100K, absolute time deltas nanobruijn - nanoda):
-- insert_full: +7.2s (more expressions created due to Shift nodes)
-- inst_aux: +5.9s (shift-aware instantiation is more complex)
-- mk_app: +3.2s (more app nodes created from shift pushing)
-- memset: +2.4s (larger working set from Shift node overhead)
-- shift_eq_aux: +2.1s (shift-aware equality has no nanoda equivalent)
-- canonical_hash: +1.7s (struct_hash + bloom filter overhead)
-- mk_shift_cutoff: +1.3s (creating Shift wrapper nodes)
-- view_expr: +1.2s (more read_expr calls to look through Shifts)
-- nanoda-only costs: reserve_rehash -2.0s, abstr_aux -1.4s
+Key optimization: `infer_app` preserves lazy Shift wrappers (using `unfold_apps` instead
+of `unfold_apps_stack`), allowing infer's shift-peel to strip shifts and infer inner
+expressions at their natural depth. This reuses cached inferences from lower binder depths,
+avoiding redundant work on shifted expression variants. **-21% on Mathlib** (439s → 345s).
 
-The gap is structural: de Bruijn shifts create ~30-40% more expressions than
-locally-nameless fvar substitution, inflating insert_full, mk_app, and inst_aux
-proportionally. The mk_app DM cache (59% hit rate on Init) helps but doesn't
-fully offset the increased expression volume on Mathlib's heavier declarations.
+Trace analysis (Init, per-declaration aggregates):
+- nanobruijn creates only 2% more expressions than nanoda (80M vs 78M alloc_expr)
+- But does 50% more infer calls (24M vs 16M) and 56% more def_eq calls (12M vs 7M)
+- The extra calls come from shifted expression variants causing cache misses
+- mk_app allocations are nearly identical (59.5M vs 59.1M) — shift overhead is in
+  the number of operations, not the number of expressions
 
-Profile hotspots (Mathlib last 210K): mk_app 14.7%, inst_aux 10.3%, insert_full 7.6%,
-subst_aux 4.4%, whnf_no_unfolding 4.2%, unfold_apps 3.2%, view_expr 3.2%,
-canonical_hash 2.7%, shift_eq_aux 2.4%, infer_inner 2.4%, alloc_expr 2.3%,
-get_index_of 2.3%, HashMap::insert 2.1%, mk_shift_cutoff 1.8%.
+Profile hotspots (Mathlib last 210K, pre-optimization): mk_app 14.7%, inst_aux 10.3%,
+insert_full 7.6%, subst_aux 4.4%, whnf_no_unfolding 4.2%, unfold_apps 3.2%,
+view_expr 3.2%, canonical_hash 2.7%, shift_eq_aux 2.4%, infer_inner 2.4%,
+alloc_expr 2.3%, get_index_of 2.3%, HashMap::insert 2.1%, mk_shift_cutoff 1.8%.
 
 ## Paths not taken
 
