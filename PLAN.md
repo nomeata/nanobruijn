@@ -180,12 +180,6 @@ Fixed worst outliers: #298261 from 11.5s to 830ms, #357120 from 2.3s to 85ms.
   pointer cast to rebind `LeanDag<'static>` to the local TcCtx lifetime (sound because all
   types use PhantomData for lifetimes with identical layout). Eliminates per-declaration
   allocation/deallocation of ~2MB IndexSets. **~20% improvement on Init.**
-- Custom `Deserialize` for `ExportJsonObject` (replacing `#[serde(flatten)]`): The derived
-  `#[serde(flatten)]` forces serde to buffer all JSON fields into an intermediate `Content`
-  representation for every line, even simple ones like bvar/sort. Custom `visit_map` dispatches
-  directly on the first key, avoiding this overhead. **~7.5% improvement on Mathlib 100K.**
-  Note: this is a design-neutral optimization (could be applied to nanoda too); it fixes a
-  serde pitfall rather than reflecting a design advantage.
 
 ## Results
 
@@ -200,26 +194,23 @@ Fixed worst outliers: #298261 from 11.5s to 830ms, #357120 from 2.3s to 85ms.
 |-----------|--------|------------|-------|
 | Init (54k decls, 310MB) | 24.2s | 20.1s | **0.83x** |
 | app-lam N=4000 | 8.3s | 10ms | 0.001x |
-| Mathlib 100K (100k decls) | - | 115s | - |
-| Mathlib (630k decls, 4.9GB) | 898s* | ~1414s* | **~1.57x*** |
+| Mathlib 100K (100k decls) | - | 128s | - |
+| Mathlib (310k decls, 4.9GB) | 898s | ~957s* | **~1.07x*** |
 
-*Full Mathlib times are wall time on a variable-load system and not directly comparable.
-The Mathlib 100K benchmark (3 runs, low variance) is the most reliable comparison point.
-Note: nanobruijn includes ~13% parsing overhead (custom deserialize) that is design-neutral.
+*Estimated from 100K scaling; full Mathlib benchmark pending.
 
 ### Gap analysis
 
 On Init we're 18% faster than nanoda, driven by the mk_app DM cache (59% hit rate,
-avoids IndexMap lookups). On Mathlib 100K we're competitive (115s, estimated ~0.96x nanoda
-extrapolating from 100K scaling).
+avoids IndexMap lookups). On full Mathlib we're ~7% slower (estimated from 100K scaling).
 
 The shift approach is roughly break-even on heavy declarations: ~11% shift overhead
 (view_expr 3.2%, canonical_hash 2.7%, shift_eq_aux 2.4%, mk_shift_cutoff 1.8%,
 push_shift 1.0%) is offset by ~11% savings from the mk_app DM cache (IndexMap
 get_index_of drops from 13.3% in nanoda to 2.3% in nanobruijn).
 
-The remaining gap (if any) appears structural — the flat profile (nothing above 15%) means
-no single function can be optimized to close it significantly. The top hotspot declarations
+The 9% Mathlib gap appears structural — the flat profile (nothing above 15%) means
+no single function can be optimized to close the gap. The top hotspot declarations
 (AlgebraicGeometry.Scheme, 40s each) have 99.99% DM cache hit rates, so the DM cache
 is already maximally effective there. The gap comes from aggregate shift overhead across
 ~310K declarations.
@@ -231,7 +222,11 @@ get_index_of 2.3%, HashMap::insert 2.1%, mk_shift_cutoff 1.8%.
 
 ## Paths not taken
 
-These approaches were tried and found counterproductive or unsound:
+These approaches were tried and found counterproductive, unsound, or out of scope:
+
+- **Custom Deserialize for ExportJsonObject** (replacing `#[serde(flatten)]`): **~7.5%
+  improvement on Mathlib 100K** (128s → 115s). Reverted because this is a design-neutral
+  optimization that could equally be applied to nanoda — out of scope for the design comparison.
 
 - **Eager shift resolution** (push_shift in lookup_var, in inst_aux vals): Creates different
   expression identities that cascade poorly through caches. Up to 9x slower.
