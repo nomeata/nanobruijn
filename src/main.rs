@@ -35,9 +35,10 @@ fn use_config(config_path: &Path) -> Result<Option<String>, Box<dyn Error>> {
     // Make sure the target pretty printer destination is accessible before doing any real work.
     let mut pp_destination = cfg.get_pp_destination()?;
     let (mut export_file, skipped_axioms) = cfg.to_export_file()?;
-    // OSNF: normalize export DAG to outermost-shift normal form
-    // Disabled: mk_shift_cutoff canonicalization causes ~60% slowdown on Mathlib 100K.
-    // TODO: re-enable with cache-based approach instead of expression rewriting.
+    // OSNF: normalize export DAG to outermost-shift normal form.
+    // Disabled: expression rewriting causes 60% slowdown (broken pointer equality).
+    // Cache-key approach not needed: canonical_hash (struct_hash + normalized bloom)
+    // already captures shift-equivalence between same-core expressions.
     // nanobruijn::osnf::osnf_normalize(&mut export_file);
     // Check the environment
     let panic_count = export_file.check_all_declars();
