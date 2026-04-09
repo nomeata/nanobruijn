@@ -11,6 +11,10 @@ an independent Rust implementation of the Lean 4 kernel. The original uses
 locally-nameless binding representation (free variables as names, bound variables
 as de Bruijn indices), matching the official Lean kernel.
 
+Upstream nanoda commits reviewed and ported through
+[`6d2f037`](https://github.com/ammkrn/nanoda_lib/commit/6d2f03717af89dde5b8906bb957a6a50eeecbb94)
+(2026-04-07).
+
 nanobruijn replaces the binding representation and caching strategy while keeping
 the rest of the type-checking logic largely intact.
 

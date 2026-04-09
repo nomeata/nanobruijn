@@ -608,7 +608,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         } else {
             let calcd = match self.read_expr(e) {
                 Local { .. } =>
-                    locals.iter().rev().position(|x| *x == e).map(|pos| self.mk_var(pos as u16 + offset)).unwrap_or(e),
+                    locals.iter().rev().position(|x| *x == e).map(|pos| self.mk_var(u16::try_from(pos).unwrap() + offset)).unwrap_or(e),
                 App { fun, arg, .. } => {
                     let fun = self.abstr_aux(fun, locals, offset);
                     let arg = self.abstr_aux(arg, locals, offset);
@@ -1269,8 +1269,8 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         // Fast rejection: if canonical hashes differ, expressions can't be sem_eq
         if self.canonical_hash(a) != self.canonical_hash(b) { return false; }
         // Cache lookup: ordered pair for symmetry (order by idx + dag_marker)
-        let a_key = (a.dag_marker as u64) << 32 | a.idx as u64;
-        let b_key = (b.dag_marker as u64) << 32 | b.idx as u64;
+        let a_key = a.get_hash();
+        let b_key = b.get_hash();
         let key = if a_key <= b_key { (a, b) } else { (b, a) };
         if self.expr_cache.sem_eq_cache.contains(&key) { self.trace.sem_eq_cache_hits += 1; return true; }
         let result = self.shift_eq_aux(a, b, 0, 0);
@@ -1292,8 +1292,8 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         // Direct-mapped cache lookup: avoids re-comparing same (a,b,delta,cutoff) pairs
         // that arise from DAG sharing (same sub-expression referenced by multiple parents).
         let se_tag = {
-            let ak = (a.dag_marker as u64) << 32 | a.idx as u64;
-            let bk = (b.dag_marker as u64) << 32 | b.idx as u64;
+            let ak = a.get_hash();
+            let bk = b.get_hash();
             let dc = (delta as u16 as u64) << 16 | cutoff as u64;
             ak.wrapping_mul(0x9e3779b97f4a7c15).wrapping_add(bk).wrapping_mul(0x517cc1b727220a95).wrapping_add(dc)
         };
@@ -1397,8 +1397,8 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
 
         // Direct-mapped cache: hash all 10 parameters (lazily allocated)
         let sep_tag = {
-            let ak = (a.dag_marker as u64) << 32 | a.idx as u64;
-            let bk = (b.dag_marker as u64) << 32 | b.idx as u64;
+            let ak = a.get_hash();
+            let bk = b.get_hash();
             let shifts_a = (a1 as u64) | ((as1 as u64) << 16) | ((a2 as u64) << 32) | ((as2 as u64) << 48);
             let shifts_b = (b1 as u64) | ((bs1 as u64) << 16) | ((b2 as u64) << 32) | ((bs2 as u64) << 48);
             ak.wrapping_mul(0x9e3779b97f4a7c15)

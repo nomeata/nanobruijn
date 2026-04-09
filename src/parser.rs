@@ -423,31 +423,31 @@ impl<'a, R: BufRead> Parser<'a, R> {
     }
 
     fn num_loose_bvars(&self, e: ExprPtr<'a>) -> u16 {
-        self.dag.expr_nlbv[e.idx as usize]
+        self.dag.expr_nlbv[e.idx()]
     }
 
-    fn has_fvars(&self, e: ExprPtr<'a>) -> bool { self.dag.exprs.get_index(e.idx as usize).unwrap().has_fvars() }
+    fn has_fvars(&self, e: ExprPtr<'a>) -> bool { self.dag.exprs.get_index(e.idx()).unwrap().has_fvars() }
 
     fn struct_hash(&self, e: ExprPtr<'a>) -> u64 {
-        self.dag.exprs.get_index(e.idx as usize).unwrap().get_struct_hash()
+        self.dag.exprs.get_index(e.idx()).unwrap().get_struct_hash()
     }
 
     fn bloom(&self, e: ExprPtr<'a>) -> u32 {
-        self.dag.exprs.get_index(e.idx as usize).unwrap().get_fvar_bloom()
+        self.dag.exprs.get_index(e.idx()).unwrap().get_fvar_bloom()
     }
 
     fn expr_fvar_lb(&self, e: ExprPtr<'a>) -> u16 {
-        self.dag.exprs.get_index(e.idx as usize).unwrap().get_fvar_lb()
+        self.dag.exprs.get_index(e.idx()).unwrap().get_fvar_lb()
     }
 
     fn get_name_ptr(&self, idx: u32) -> NamePtr<'a> {
-        let out = crate::util::Ptr { idx, dag_marker: DagMarker::ExportFile, ph: std::marker::PhantomData };
+        let out = crate::util::Ptr::from(DagMarker::ExportFile, idx as usize);
         assert!((idx as usize) < self.dag.names.len());
         out
     }
 
     fn get_level_ptr(&self, idx: u32) -> LevelPtr<'a> {
-        let out = crate::util::Ptr { idx, dag_marker: DagMarker::ExportFile, ph: std::marker::PhantomData };
+        let out = crate::util::Ptr::from(DagMarker::ExportFile, idx as usize);
         assert!((idx as usize) < self.dag.levels.len());
         out
     }
@@ -489,7 +489,7 @@ impl<'a, R: BufRead> Parser<'a, R> {
     }
 
     fn get_expr_ptr(&self, idx: u32) -> ExprPtr<'a> {
-        let out = crate::util::Ptr { idx, dag_marker: DagMarker::ExportFile, ph: std::marker::PhantomData };
+        let out = crate::util::Ptr::from(DagMarker::ExportFile, idx as usize);
         assert!((idx as usize) < self.dag.exprs.len());
         out
     }

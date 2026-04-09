@@ -358,6 +358,23 @@ These approaches were tried and found counterproductive, unsound, or out of scop
   `fvar_list.is_none()`. No measurable improvement — the compiler already optimizes
   `fvar_normalize_hash(None)` to return 0 quickly.
 
+## Upstream nanoda porting
+
+Reviewed all nanoda_lib commits from fork point `68d5ca9` through `6d2f037` (2026-04-07).
+
+Applied:
+- **`4219437` — Encode DagMarker in bit 31 of Ptr** (by Mark Ruvald Pedersen):
+  Ptr goes from 5-byte repr(packed) to 4-byte naturally-aligned u32.
+  Upstream reported +12% improvement from better cache density and aligned loads.
+- **`9557f24` / `2097cc6` — Remove truncating casts** (by Luca Bruno / ammkrn):
+  `pos as u16` → `u16::try_from(pos).unwrap()` in abstr_aux,
+  `ind_type_idx as usize` → `usize::try_from(ind_type_idx).unwrap()` in inductive.rs.
+
+Not applicable:
+- `3e705b3` — nix flake (dev tooling)
+- `7981ff6` / `224b7c1` — README update for JSON export format
+- `514a1a5` / `14bbb5c` — semver bumps
+
 ## TODO
 - **Remove remaining dead code**: thread_local profiling counters, dead locally-nameless
   code (Local variant, FVarId, abstr, etc.)
