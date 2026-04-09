@@ -312,6 +312,18 @@ These approaches were tried and found counterproductive, unsound, or out of scop
   `fvar_lb: u16` in every Expr variant, replacing FVarList entirely.
   **~2.3% improvement on Mathlib 100K** (fvar_union went from 6.33%+14% children = 20% to 0%).
 
+- **OSNF expression rewriting** (Outermost-Shift Normal Form): For expression `e` with
+  `fvar_lb = k > 0`, pre-compute `core = shift_down(e, k, 0)` (fvar_lb = 0). In
+  mk_shift_cutoff, rewrite `Shift(e, amount, 0)` → `Shift(core, fvar_lb+amount, 0)`.
+  Statistics show 1.99x core sharing on Mathlib 100K (47M → 23.6M unique cores). But
+  the rewriting breaks pointer equality during TC: expressions that were identical pointers
+  now differ (one has Shift(core, ...) wrapper). When these Shift(core, amt, c=0) nodes
+  are compared inside Lambda bodies (tracking cutoff > 0), the cutoff mismatch (0 vs N)
+  triggers expensive shift_eq_pending comparisons. **60% regression on Mathlib 100K**
+  (2m10s → 3m28s). Also found a pre-existing bug: the `fvar_lb` optimization for
+  mismatched Shift cutoffs was using the Shift node's fvar_lb (= inner.fvar_lb + amount)
+  instead of inner's fvar_lb, causing false negatives in def_eq. Bug fixed.
+  Infrastructure kept (osnf.rs, osnf_core field) for potential cache-key-based approach.
 - **Cached constant ExprPtrs** (Bool.true/false, Nat.zero/succ, Nat, String): Cache the
   ExprPtrs for common constants used in nat/bool/string reduction to avoid repeated
   `alloc_levels_slice(&[]) + mk_const` hash table lookups. No measurable improvement —
@@ -332,20 +344,6 @@ These approaches were tried and found counterproductive, unsound, or out of scop
   `fvar_normalize_hash(None)` to return 0 quickly.
 
 ## TODO
-
-- **OSNF (Outermost-Shift Normal Form)**: For expression `e` with `fvar_lb = k > 0`,
-  represent as `Shift(core, k, 0)` where `core = shift_down(e, k, 0)` has `fvar_lb = 0`.
-  Two expressions differing only by a uniform bvar offset share the same core.
-  Statistics (cutoff-0 only):
-  - Init: 2.9M candidates → 1.9M unique cores (1.51x sharing, ~973K fewer exprs)
-  - Mathlib 100K: 47M candidates → 23.6M unique cores (1.99x sharing, ~23.4M fewer exprs)
-  - Largest sharing group: 1031 (Mathlib), 128 (Init)
-  - Cores already in DAG at fvar_lb=0: ~0% (normalization creates new expressions)
-  Next steps:
-  - **Prove uniqueness of OSNF** (new proof obligation for Theory.lean)
-  - Implement as a parse-time transformation (not just statistics)
-  - Measure impact on TC caching (does explicit core sharing beat canonical_hash alone?)
-  - Only cutoff-0 for now; general shifts are more complex and the normal form is less clear
 - **Remove remaining dead code**: thread_local profiling counters, dead locally-nameless
   code (Local variant, FVarId, abstr, etc.)
 - **Fill in Theory.lean sorry's**: `decode_shift`, `fvars_shift_zero`
