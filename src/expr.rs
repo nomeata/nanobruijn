@@ -824,19 +824,23 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         }
     }
 
-    /// From `f a_0 .. a_N`, return `(f, [a_0, ..a_N])`
+    /// From `f a_0 .. a_N`, return `(f, [a_0, ..a_N], shifted)`
     /// Accumulates Shift through the App spine; returns lazy (Shift-wrapped) args and fun.
-    pub fn unfold_apps(&mut self, mut e: ExprPtr<'t>) -> (ExprPtr<'t>, AppArgs<'t>) {
+    /// `shifted` is true if any Shift nodes were encountered (args/fun may differ from original).
+    pub fn unfold_apps(&mut self, mut e: ExprPtr<'t>) -> (ExprPtr<'t>, AppArgs<'t>, bool) {
         let mut args = AppArgs::new();
         let mut pending_shift: i16 = 0;
+        let mut shifted = false;
         loop {
             match self.read_expr(e) {
                 Shift { inner, amount, cutoff: 0, .. } => {
                     pending_shift += amount;
+                    shifted = true;
                     e = inner;
                 }
                 Shift { inner, amount, cutoff, .. } => {
                     let forced = self.push_shift(inner, amount, cutoff);
+                    shifted = true;
                     if pending_shift != 0 {
                         e = self.mk_shift(forced, pending_shift);
                         pending_shift = 0;
@@ -862,7 +866,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
             }
         }
         args.reverse();
-        (e, args)
+        (e, args, shifted)
     }
 
     /// If this is a const application, return (Const {..}, name, levels, args)
@@ -870,7 +874,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         &mut self,
         e: ExprPtr<'t>,
     ) -> Option<(ExprPtr<'t>, NamePtr<'t>, LevelsPtr<'t>, AppArgs<'t>)> {
-        let (f, args) = self.unfold_apps(e);
+        let (f, args, _) = self.unfold_apps(e);
         match self.read_expr(f) {
             Const { name, levels, .. } => Some((f, name, levels, args)),
             _ => None,

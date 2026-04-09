@@ -85,7 +85,7 @@ impl<'p> ExportFile<'p> {
     /// The entry point for checking a declaration `d`.
     pub fn check_declar(&self, d: &Declar<'p>) -> crate::util::TcTrace {
         if self.config.use_nanoda_tc {
-            self.check_declar_nanoda(d)
+            self.check_declar_nanoda(d, crate::util::ReusableDag::new(&self.config)).0
         } else {
             self.check_declar_shift(d, crate::util::ReusableCaches::new(), crate::util::ReusableDag::new(&self.config)).0
         }
@@ -125,29 +125,34 @@ impl<'p> ExportFile<'p> {
     }
 
     /// Check using nanoda's original locally-nameless TC.
-    fn check_declar_nanoda(&self, d: &Declar<'p>) -> crate::util::TcTrace {
+    fn check_declar_nanoda(&self, d: &Declar<'p>, dag: crate::util::ReusableDag) -> (crate::util::TcTrace, crate::util::ReusableDag) {
         use Declar::*;
         match d {
-            Axiom { .. } => self.with_nanoda_tc_and_declar(*d.info(), |tc| tc.check_declar_info(d).unwrap()).1,
-            Inductive(..) => { self.check_inductive_declar(d); crate::util::TcTrace::default() },
-            Quot { .. } => { self.with_ctx(|ctx| crate::quot::check_quot(ctx, d)); crate::util::TcTrace::default() },
-            Definition { val, .. } | Theorem { val, .. } | Opaque { val, .. } =>
-                self.with_nanoda_tc_and_declar(*d.info(), |tc| {
+            Axiom { .. } => {
+                let (r, dag) = self.with_nanoda_tc_and_declar_reusing(*d.info(), dag, |tc| tc.check_declar_info(d).unwrap());
+                (r.1, dag)
+            }
+            Inductive(..) => { self.check_inductive_declar(d); (crate::util::TcTrace::default(), dag) },
+            Quot { .. } => { self.with_ctx(|ctx| crate::quot::check_quot(ctx, d)); (crate::util::TcTrace::default(), dag) },
+            Definition { val, .. } | Theorem { val, .. } | Opaque { val, .. } => {
+                let (r, dag) = self.with_nanoda_tc_and_declar_reusing(*d.info(), dag, |tc| {
                     tc.check_declar_info(d).unwrap();
                     let inferred_type = tc.infer(*val, crate::nanoda_tc::InferFlag::Check);
                     tc.assert_def_eq(inferred_type, d.info().ty);
-                }).1,
+                });
+                (r.1, dag)
+            }
             Constructor(ctor_data) => {
-                let trace = self.with_nanoda_tc_and_declar(*d.info(), |tc| tc.check_declar_info(d).unwrap()).1;
+                let (r, dag) = self.with_nanoda_tc_and_declar_reusing(*d.info(), dag, |tc| tc.check_declar_info(d).unwrap());
                 assert!(self.declars.get(&ctor_data.inductive_name).is_some());
-                trace
+                (r.1, dag)
             }
             Recursor(recursor_data) => {
-                let trace = self.with_nanoda_tc_and_declar(*d.info(), |tc| tc.check_declar_info(d).unwrap()).1;
+                let (r, dag) = self.with_nanoda_tc_and_declar_reusing(*d.info(), dag, |tc| tc.check_declar_info(d).unwrap());
                 for ind_name in recursor_data.all_inductives.iter() {
                     assert!(self.declars.get(ind_name).is_some())
                 }
-                trace
+                (r.1, dag)
             }
         }
     }
@@ -179,7 +184,9 @@ impl<'p> ExportFile<'p> {
             }
             let trace;
             if self.config.use_nanoda_tc {
-                trace = self.check_declar_nanoda(declar);
+                let (t, d) = self.check_declar_nanoda(declar, dag);
+                trace = t;
+                dag = d;
             } else if timeout_secs > 0 {
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     self.check_declar_shift(declar, reusable, dag)
@@ -235,7 +242,8 @@ impl<'p> ExportFile<'p> {
                                 let idx = task_num.fetch_add(1, Relaxed);
                                 if let Some((_, declar)) = self.declars.get_index(idx) {
                                     if self.config.use_nanoda_tc {
-                                        let _ = self.check_declar_nanoda(declar);
+                                        let (_, d) = self.check_declar_nanoda(declar, dag);
+                                        dag = d;
                                     } else {
                                         let (_, r, d) = self.check_declar_shift(declar, reusable, dag);
                                         reusable = r;
@@ -523,7 +531,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         if self.ctx.num_loose_bvars(e) > 0 {
             return None
         }
-        let (f, args) = self.ctx.unfold_apps(e);
+        let (f, args, _) = self.ctx.unfold_apps(e);
         let out = match (self.ctx.read_expr(f), args.as_slice()) {
             (Const { name, .. }, [arg]) if Some(name) == self.ctx.export_file.name_cache.nat_succ => {
                 let v_expr = self.whnf(*arg);
@@ -1233,7 +1241,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                     self.ctx.trace.wnu_cache_no_bucket += 1;
                 }
             }
-            let (mut e_fun, args) = self.ctx.unfold_apps(cur);
+            let (mut e_fun, args, shifted) = self.ctx.unfold_apps(cur);
             // Force any Shift wrapper on the head so the match sees real constructors.
             // unfold_apps handles Shift for App spines but wraps non-App heads in mk_shift.
             if let Expr::Shift { inner, amount, cutoff, .. } = self.ctx.read_expr(e_fun) {
@@ -1247,7 +1255,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                         cur = next;
                         continue;
                     } else {
-                        let r = self.ctx.foldl_apps(e_fun, args.into_iter());
+                        let r = if !shifted { cur } else { self.ctx.foldl_apps(e_fun, args.into_iter()) };
                         // Identity cache: safe even for cheap_proj (no reduction applied)
                         cache_entries.push(cur);
                         break r;
@@ -1273,7 +1281,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                 }
                 Lambda { .. } => {
                     debug_assert!(args.is_empty());
-                    let r = self.ctx.foldl_apps(e_fun, args.into_iter());
+                    let r = if !shifted { cur } else { self.ctx.foldl_apps(e_fun, args.into_iter()) };
                     cache_entries.push(cur);
                     break r;
                 }
@@ -1309,7 +1317,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                         cur = reduced;
                         continue;
                     } else {
-                        let r = self.ctx.foldl_apps(e_fun, args.into_iter());
+                        let r = if !shifted { cur } else { self.ctx.foldl_apps(e_fun, args.into_iter()) };
                         // Identity cache: safe even for cheap_proj (no reduction applied)
                         cache_entries.push(cur);
                         break r;
@@ -1322,7 +1330,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                         cur = next;
                         continue;
                     }
-                    let r = self.ctx.foldl_apps(e_fun, args.into_iter());
+                    let r = if !shifted { cur } else { self.ctx.foldl_apps(e_fun, args.into_iter()) };
                     // Identity cache: safe even for cheap_proj (no reduction applied)
                     cache_entries.push(cur);
                     break r;
@@ -1334,7 +1342,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                 }
                 App { .. } => panic!(),
                 Local { .. } | NatLit { .. } | StringLit { .. } => {
-                    let r = self.ctx.foldl_apps(e_fun, args.into_iter());
+                    let r = if !shifted { cur } else { self.ctx.foldl_apps(e_fun, args.into_iter()) };
                     cache_entries.push(cur);
                     break r;
                 }
@@ -1507,12 +1515,12 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
     }
 
     fn def_eq_app(&mut self, x: ExprPtr<'t>, y: ExprPtr<'t>) -> bool {
-        let (f1, args1) = self.ctx.unfold_apps(x);
+        let (f1, args1, _) = self.ctx.unfold_apps(x);
         if args1.is_empty() {
             return false
         }
 
-        let (f2, args2) = self.ctx.unfold_apps(y);
+        let (f2, args2, _) = self.ctx.unfold_apps(y);
         if args2.is_empty() {
             return false
         }
@@ -1782,7 +1790,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                 self.iota_try_eta_struct(ind_rec_name_prefix, major)
             }
         };
-        let (major_ctor, major_ctor_args) = self.ctx.unfold_apps(major);
+        let (major_ctor, major_ctor_args, _) = self.ctx.unfold_apps(major);
         let rec_rule = self.get_rec_rule(rec_rules, major_ctor)?;
 
         // The number of parameters in the constructor is not necessarily
@@ -1811,7 +1819,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             return None
         };
         {
-            let (qmk_const, qmk_args) = self.ctx.unfold_apps(qmk);
+            let (qmk_const, qmk_args, _) = self.ctx.unfold_apps(qmk);
             match self.ctx.read_expr(qmk_const) {
                 Const { name, .. } if name == self.ctx.export_file.name_cache.quot_mk? && qmk_args.len() == 3 => (),
                 _ => return None,
@@ -1848,7 +1856,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
     /// Try to unfold the base `Const` and re-fold applications, but don't
     /// do any further reduction.
     fn unfold_def(&mut self, e: ExprPtr<'t>) -> Option<ExprPtr<'t>> {
-        let (fun, args) = self.ctx.unfold_apps(e);
+        let (fun, args, _) = self.ctx.unfold_apps(e);
         let (name, levels) = self.ctx.try_const_info(fun)?;
         let (def_uparams, def_value) = self.env.get_declar_val(&name)?;
         if self.ctx.read_levels(levels).len() == self.ctx.read_levels(def_uparams).len() {
@@ -2099,8 +2107,8 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
 
         match self.ctx.read_expr_pair(x, y) {
             (App { .. }, App { .. }) if (x_defname == y_defname) => {
-                let (l_fun, l_args) = self.ctx.unfold_apps(x);
-                let (r_fun, r_args) = self.ctx.unfold_apps(y);
+                let (l_fun, l_args, _) = self.ctx.unfold_apps(x);
+                let (r_fun, r_args, _) = self.ctx.unfold_apps(y);
                 match self.ctx.read_expr_pair(l_fun, r_fun) {
                     (Const { levels: l_levels, .. }, Const { levels: r_levels, .. })
                         if l_args.len() == r_args.len()

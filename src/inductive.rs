@@ -699,7 +699,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         ind_ty_app: ExprPtr<'t>,
     ) -> bool {
         // The arguments applied to the constructor are the params + indices.
-        let (base_const, ctor_apps) = self.ctx.unfold_apps(ind_ty_app);
+        let (base_const, ctor_apps, _) = self.ctx.unfold_apps(ind_ty_app);
         let (ind_name, appd_levels) = match self.ctx.read_expr(base_const) {
             Const { name, levels, .. } if name == parent_ind_name => (name, levels),
             _ => return false,
@@ -870,7 +870,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             }
         }
 
-        let (_, ind_ty_params_and_indices) = self.ctx.unfold_apps(ctor_type_cursor);
+        let (_, ind_ty_params_and_indices, _) = self.ctx.unfold_apps(ctor_type_cursor);
 
         // Check whether `non_prop_ctor_telescope_elems` is a subset of
         // `ind_ty params ++ ind_ty indices`
@@ -1502,7 +1502,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
 
         debug_assert!(e_args.len() >= st.num_params as usize);
         let nested_inst = self.ctx.inst(nested_no_inst, local_params);
-        let (nested_f, i_args) = self.ctx.unfold_apps(nested_inst);
+        let (nested_f, i_args, _) = self.ctx.unfold_apps(nested_inst);
         // Replace one of the nested constructor applications with a regular ctor application.
         //
         // replacing(3) c := _nested.Array_3.mk, auxI_name := _nested.Array_3, I_c := Array, c' := Array.mk.{0}

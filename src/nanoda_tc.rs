@@ -340,7 +340,7 @@ impl<'x, 't: 'x, 'p: 't> NanodaTypeChecker<'x, 't, 'p> {
         if self.ctx.has_fvars(e) {
             return None
         }
-        let (f, args) = self.ctx.unfold_apps(e);
+        let (f, args, _) = self.ctx.unfold_apps(e);
         let out = match (self.ctx.read_expr(f), args.as_slice()) {
             (Const { name, .. }, [arg]) if Some(name) == self.ctx.export_file.name_cache.nat_succ => {
                 let v_expr = self.whnf(*arg);
@@ -740,7 +740,7 @@ impl<'x, 't: 'x, 'p: 't> NanodaTypeChecker<'x, 't, 'p> {
         if let Some(cached) = self.tc_cache.whnf_no_unfolding_cache.get(&e).copied() {
             return cached
         }
-        let (e_fun, args) = self.ctx.unfold_apps(e);
+        let (e_fun, args, _) = self.ctx.unfold_apps(e);
         let (should_cache, eprime) = match self.ctx.read_expr(e_fun) {
             Proj { idx, structure, .. } =>
                 if let Some(e) = self.reduce_proj(idx as usize, structure, cheap_proj) {
@@ -875,12 +875,12 @@ impl<'x, 't: 'x, 'p: 't> NanodaTypeChecker<'x, 't, 'p> {
     }
 
     fn def_eq_app(&mut self, x: ExprPtr<'t>, y: ExprPtr<'t>) -> bool {
-        let (f1, args1) = self.ctx.unfold_apps(x);
+        let (f1, args1, _) = self.ctx.unfold_apps(x);
         if args1.is_empty() {
             return false
         }
 
-        let (f2, args2) = self.ctx.unfold_apps(y);
+        let (f2, args2, _) = self.ctx.unfold_apps(y);
         if args2.is_empty() {
             return false
         }
@@ -1038,7 +1038,7 @@ impl<'x, 't: 'x, 'p: 't> NanodaTypeChecker<'x, 't, 'p> {
                 self.iota_try_eta_struct(ind_rec_name_prefix, major)
             }
         };
-        let (major_ctor, major_ctor_args) = self.ctx.unfold_apps(major);
+        let (major_ctor, major_ctor_args, _) = self.ctx.unfold_apps(major);
         let rec_rule = self.get_rec_rule(rec_rules, major_ctor)?;
 
         // The number of parameters in the constructor is not necessarily
@@ -1067,7 +1067,7 @@ impl<'x, 't: 'x, 'p: 't> NanodaTypeChecker<'x, 't, 'p> {
             return None
         };
         {
-            let (qmk_const, qmk_args) = self.ctx.unfold_apps(qmk);
+            let (qmk_const, qmk_args, _) = self.ctx.unfold_apps(qmk);
             match self.ctx.read_expr(qmk_const) {
                 Const { name, .. } if name == self.ctx.export_file.name_cache.quot_mk? && qmk_args.len() == 3 => (),
                 _ => return None,
@@ -1104,7 +1104,7 @@ impl<'x, 't: 'x, 'p: 't> NanodaTypeChecker<'x, 't, 'p> {
     /// Try to unfold the base `Const` and re-fold applications, but don't
     /// do any further reduction.
     fn unfold_def(&mut self, e: ExprPtr<'t>) -> Option<ExprPtr<'t>> {
-        let (fun, args) = self.ctx.unfold_apps(e);
+        let (fun, args, _) = self.ctx.unfold_apps(e);
         let (name, levels) = self.ctx.try_const_info(fun)?;
         let (def_uparams, def_value) = self.env.get_declar_val(&name)?;
         if self.ctx.read_levels(levels).len() == self.ctx.read_levels(def_uparams).len() {
@@ -1173,8 +1173,8 @@ impl<'x, 't: 'x, 'p: 't> NanodaTypeChecker<'x, 't, 'p> {
 
         match self.ctx.read_expr_pair(x, y) {
             (App { .. }, App { .. }) if (x_defname == y_defname) => {
-                let (l_fun, l_args) = self.ctx.unfold_apps(x);
-                let (r_fun, r_args) = self.ctx.unfold_apps(y);
+                let (l_fun, l_args, _) = self.ctx.unfold_apps(x);
+                let (r_fun, r_args, _) = self.ctx.unfold_apps(y);
                 match self.ctx.read_expr_pair(l_fun, r_fun) {
                     (Const { levels: l_levels, .. }, Const { levels: r_levels, .. })
                         if l_args.len() == r_args.len()
