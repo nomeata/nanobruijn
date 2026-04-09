@@ -397,7 +397,8 @@ pub(crate) fn parse_export_file<'p, R: BufRead>(
         notations: parser.notations,
         name_cache,
         config: parser.config,
-        mutual_block_sizes: parser.mutual_block_sizes
+        mutual_block_sizes: parser.mutual_block_sizes,
+        osnf_core: None,
     };
     Ok((export_file, parser.skipped))
 }

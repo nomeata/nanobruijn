@@ -291,6 +291,10 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
     /// `sh_amt`/`sh_cut` represent a pending outer Shift that is applied to `e` before
     /// instantiation, without creating intermediate Shift wrapper expressions.
     fn inst_aux(&mut self, e: ExprPtr<'t>, substs: &[ExprPtr<'t>], offset: u16, shift_down: bool, sh_amt: i16, sh_cut: u16) -> ExprPtr<'t> {
+        stacker::maybe_grow(64 * 1024, 2 * 1024 * 1024, || self.inst_aux_body(e, substs, offset, shift_down, sh_amt, sh_cut))
+    }
+
+    fn inst_aux_body(&mut self, e: ExprPtr<'t>, substs: &[ExprPtr<'t>], offset: u16, shift_down: bool, sh_amt: i16, sh_cut: u16) -> ExprPtr<'t> {
         self.trace.inst_aux_calls += 1;
         if sh_amt != 0 { self.trace.inst_aux_shifted_path += 1; }
         self.check_heartbeat();
@@ -593,6 +597,10 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
     }
 
     fn abstr_aux(&mut self, e: ExprPtr<'t>, locals: &[ExprPtr<'t>], offset: u16) -> ExprPtr<'t> {
+        stacker::maybe_grow(64 * 1024, 2 * 1024 * 1024, || self.abstr_aux_body(e, locals, offset))
+    }
+
+    fn abstr_aux_body(&mut self, e: ExprPtr<'t>, locals: &[ExprPtr<'t>], offset: u16) -> ExprPtr<'t> {
         if !self.has_fvars(e) {
             e
         } else if let Some(cached) = self.expr_cache.abstr_cache.get(&(e, offset)) {
@@ -649,6 +657,10 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
     /// Abstraction by deBruijn level: converts DbjLevel locals back to Var.
     /// Used by nanoda's locally-nameless TC.
     fn abstr_aux_levels(&mut self, e: ExprPtr<'t>, start_pos: u16, num_open_binders: u16) -> ExprPtr<'t> {
+        stacker::maybe_grow(64 * 1024, 2 * 1024 * 1024, || self.abstr_aux_levels_body(e, start_pos, num_open_binders))
+    }
+
+    fn abstr_aux_levels_body(&mut self, e: ExprPtr<'t>, start_pos: u16, num_open_binders: u16) -> ExprPtr<'t> {
         if !self.has_fvars(e) {
             e
         } else if let Some(cached) = self.expr_cache.abstr_cache_levels.get(&(e, start_pos, num_open_binders)) {
@@ -707,6 +719,10 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
     }
 
     fn subst_aux(&mut self, e: ExprPtr<'t>, ks: LevelsPtr<'t>, vs: LevelsPtr<'t>) -> ExprPtr<'t> {
+        stacker::maybe_grow(64 * 1024, 2 * 1024 * 1024, || self.subst_aux_body(e, ks, vs))
+    }
+
+    fn subst_aux_body(&mut self, e: ExprPtr<'t>, ks: LevelsPtr<'t>, vs: LevelsPtr<'t>) -> ExprPtr<'t> {
         if let Some(cached) = self.expr_cache.subst_cache.get(&(e, ks, vs)) {
             *cached
         } else {
@@ -1292,13 +1308,17 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         // This must come before the nlbv early-outs since Shift nodes change
         // the effective delta.
         match (self.read_expr(a), self.read_expr(b)) {
-            // a-side Shift: absorb amount into delta
+            // a-side Shift: absorb amount into delta.
+            // Convention: shift_eq_aux(a, b, delta, cutoff) checks b = shift(a, delta, cutoff).
+            // a = Shift(inner, amount, cutoff) = shift(inner, amount, cutoff).
+            // b = shift(a, delta) = shift(shift(inner, amount), delta) = shift(inner, amount + delta).
+            // So: shift_eq_aux(inner, b, delta + amount, cutoff).
             (Shift { inner, amount, cutoff: sc, .. }, _) if sc == cutoff =>
                 return self.shift_eq_aux(inner, b, delta + amount, cutoff),
-            // a-side Shift with mismatched cutoff: if all vars are above both cutoffs,
+            // a-side Shift with mismatched cutoff: if all vars of inner are above both cutoffs,
             // the shift only affects free vars and is equivalent to Shift(inner, amount, cutoff)
-            (Shift { inner, amount, cutoff: sc, fvar_lb, .. }, _) if sc != cutoff
-                && fvar_lb >= cutoff.max(sc) =>
+            (Shift { inner, amount, cutoff: sc, .. }, _) if sc != cutoff
+                && self.read_expr(inner).get_fvar_lb() >= cutoff.max(sc) =>
                 return self.shift_eq_aux(inner, b, delta + amount, cutoff),
             // a-side Shift with mismatched cutoff, general case: use pending-shift comparison
             (Shift { inner, amount, cutoff: sc, .. }, _) if sc != cutoff =>
@@ -1307,19 +1327,20 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
                     amount, sc, delta, cutoff,  // a-side: inner shift (amount, sc), outer (delta, cutoff)
                     0, 0, 0, 0,                 // b-side: no pending shifts
                 ),
-            // b-side Shift: subtract from delta or reverse comparison
+            // b-side Shift: b = Shift(inner, amount, cutoff) = shift(inner, amount).
+            // b = shift(a, delta) → shift(inner, amount) = shift(a, delta) → inner = shift(a, delta - amount).
+            // shift_eq_aux(a, inner, delta - amount, cutoff).
             (_, Shift { inner, amount, cutoff: sc, .. }) if sc == cutoff => {
                 return if amount <= delta {
                     self.shift_eq_aux(a, inner, delta - amount, cutoff)
                 } else {
-                    // amount > delta: shift(a, delta) == shift(inner, amount)
-                    // iff shift(inner, amount - delta) == a
+                    // Swap: inner = shift(a, delta - amount) ⟺ a = shift(inner, amount - delta).
                     self.shift_eq_aux(inner, a, amount - delta, cutoff)
                 };
             }
-            // b-side Shift with mismatched cutoff: same optimization
-            (_, Shift { inner, amount, cutoff: sc, fvar_lb, .. }) if sc != cutoff
-                && fvar_lb >= cutoff.max(sc) => {
+            // b-side Shift with mismatched cutoff: same optimization (check inner's fvar_lb)
+            (_, Shift { inner, amount, cutoff: sc, .. }) if sc != cutoff
+                && self.read_expr(inner).get_fvar_lb() >= cutoff.max(sc) => {
                 return if amount <= delta {
                     self.shift_eq_aux(a, inner, delta - amount, cutoff)
                 } else {

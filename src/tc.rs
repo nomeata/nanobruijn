@@ -1536,7 +1536,47 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
     }
 
     pub fn assert_def_eq(&mut self, u: ExprPtr<'t>, v: ExprPtr<'t>) {
-        assert!(self.def_eq(u, v))
+        if !self.def_eq(u, v) {
+            let sem = self.ctx.sem_eq(u, v);
+            let u_ch = self.ctx.canonical_hash(u);
+            let v_ch = self.ctx.canonical_hash(v);
+            eprintln!("  assert_def_eq FAILED (sem_eq={}, chash u={:016x} v={:016x} eq={}):", sem, u_ch, v_ch, u_ch == v_ch);
+            eprintln!("    u = {} (marker={:?} idx={})", self.ctx.expr_desc(u, 15), u.dag_marker(), u.idx());
+            eprintln!("    v = {} (marker={:?} idx={})", self.ctx.expr_desc(v, 15), v.dag_marker(), v.idx());
+            // Try to find first difference
+            self.find_diff(u, v, 0);
+            panic!("assert_def_eq failed");
+        }
+    }
+
+    fn find_diff(&mut self, u: ExprPtr<'t>, v: ExprPtr<'t>, depth: u32) {
+        if depth > 20 { return; }
+        if u == v { return; }
+        let ue = self.ctx.view_expr(u);
+        let ve = self.ctx.view_expr(v);
+        let prefix = "    ".repeat(depth as usize + 1);
+        match (ue, ve) {
+            (Expr::App { fun: f1, arg: a1, .. }, Expr::App { fun: f2, arg: a2, .. }) => {
+                if f1 != f2 || a1 != a2 {
+                    eprintln!("{}DIFF App at depth {}:", prefix, depth);
+                    if f1 != f2 { self.find_diff(f1, f2, depth+1); }
+                    if a1 != a2 { self.find_diff(a1, a2, depth+1); }
+                }
+            }
+            (Expr::Pi { binder_type: t1, body: b1, .. }, Expr::Pi { binder_type: t2, body: b2, .. })
+            | (Expr::Lambda { binder_type: t1, body: b1, .. }, Expr::Lambda { binder_type: t2, body: b2, .. }) => {
+                if t1 != t2 || b1 != b2 {
+                    let kind = if matches!(ue, Expr::Pi { .. }) { "Pi" } else { "Lam" };
+                    eprintln!("{}DIFF {} at depth {}:", prefix, kind, depth);
+                    if t1 != t2 { self.find_diff(t1, t2, depth+1); }
+                    if b1 != b2 { self.find_diff(b1, b2, depth+1); }
+                }
+            }
+            _ => {
+                eprintln!("{}LEAF DIFF at depth {}: {} vs {}", prefix, depth,
+                    self.ctx.expr_desc(u, 5), self.ctx.expr_desc(v, 5));
+            }
+        }
     }
     pub fn def_eq(&mut self, x: ExprPtr<'t>, y: ExprPtr<'t>) -> bool {
         self.ctx.trace.def_eq_calls += 1;

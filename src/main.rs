@@ -34,9 +34,9 @@ fn use_config(config_path: &Path) -> Result<Option<String>, Box<dyn Error>> {
     let cfg = Config::try_from(config_path)?;
     // Make sure the target pretty printer destination is accessible before doing any real work.
     let mut pp_destination = cfg.get_pp_destination()?;
-    let (export_file, skipped_axioms) = cfg.to_export_file()?;
-    // OSNF sharing analysis
-    nanobruijn::osnf::compute_osnf_stats(&export_file);
+    let (mut export_file, skipped_axioms) = cfg.to_export_file()?;
+    // OSNF: normalize export DAG to outermost-shift normal form
+    nanobruijn::osnf::osnf_normalize(&mut export_file);
     // Check the environment
     let panic_count = export_file.check_all_declars();
     // Pretty print as necessary

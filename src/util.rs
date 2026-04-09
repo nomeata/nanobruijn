@@ -481,7 +481,11 @@ pub struct ExportFile<'p> {
     pub name_cache: NameCache<'p>,
     pub config: Config,
     // Information used for setting EnvLimit during inductive checking.
-    pub mutual_block_sizes: FxHashMap<NamePtr<'p>, (usize, usize)>
+    pub mutual_block_sizes: FxHashMap<NamePtr<'p>, (usize, usize)>,
+    /// OSNF core map: for each export file expression, the index of its OSNF core in the DAG.
+    /// osnf_core[i] = i means no OSNF normalization needed (fvar_lb == 0 or closed).
+    /// osnf_core[i] = j (j != i) means expression i has OSNF core at j with fvar_lb shift.
+    pub(crate) osnf_core: Option<Vec<u32>>,
 }
 
 impl<'p> ExportFile<'p> {
@@ -669,6 +673,7 @@ pub struct TcTrace {
     pub def_eq_deep_calls: u64,  // survived both quick_checks, entering lazy_delta
     pub sem_eq_cache_hits: u64,
     pub shift_dedup_hits: u64,
+    pub osnf_canon_hits: u64,
     // wnu cache miss breakdown
     pub wnu_cache_no_bucket: u64,
     pub wnu_cache_no_entry: u64,
@@ -737,6 +742,7 @@ impl std::fmt::Display for TcTrace {
                 self.eq_cache_cross_depth_hits)?;
         }
         write!(f, " | wnu_st={}/{}/{}/{}", self.wnu_cache_new_inserts, self.wnu_cache_update_lower, self.wnu_cache_update_higher, self.wnu_cache_update_skip)?;
+        if self.osnf_canon_hits > 0 { write!(f, " | osnf={}", self.osnf_canon_hits)?; }
         write!(f, " | mka={}/{} mkp={} mkl={} mklt={} mkv={} mks={} mkpr={} mko={}",
             self.alloc_mk_app, self.alloc_mk_app_cache_hit,
             self.alloc_mk_pi, self.alloc_mk_lambda, self.alloc_mk_let,
@@ -1452,6 +1458,23 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         let inner_lb = inner_expr.get_fvar_lb();
         let inner_bloom = inner_expr.get_fvar_bloom();
         let cutoff = if cutoff > 0 && inner_lb >= cutoff { 0 } else { cutoff };
+        // OSNF canonicalization: for cutoff=0 shifts on export file expressions with a known core,
+        // redirect Shift(e, amount, 0) → Shift(core, fvar_lb + amount, 0).
+        // This ensures expressions sharing a core produce the same Shift nodes.
+        if cutoff == 0 && inner.dag_marker() == DagMarker::ExportFile {
+            if let Some(ref osnf_core) = self.export_file.osnf_core {
+                let idx = inner.idx();
+                if idx < osnf_core.len() {
+                    let core_idx = osnf_core[idx] as usize;
+                    if core_idx != idx {
+                        self.trace.osnf_canon_hits += 1;
+                        let core_ptr: ExprPtr<'t> = Ptr::from(DagMarker::ExportFile, core_idx);
+                        let new_amount = amount + inner_lb as i16;
+                        return self.mk_shift_cutoff(core_ptr, new_amount, 0);
+                    }
+                }
+            }
+        }
         // For negative shifts with cutoff=0, validate that fvar_lb won't go negative.
         debug_assert!(amount >= 0 || cutoff > 0 || (inner_lb as i16) + amount >= 0,
             "mk_shift: negative shift would produce invalid fvar indices: fvar_lb={}, amount={}, cutoff={}",

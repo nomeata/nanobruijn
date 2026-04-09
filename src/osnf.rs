@@ -9,9 +9,9 @@
 //! This module computes statistics on potential OSNF sharing in the export file DAG
 //! without modifying the DAG.
 
-use crate::expr::{Expr, APP_HASH, LAMBDA_HASH, LET_HASH, PI_HASH, PROJ_HASH, VAR_HASH};
+use crate::expr::{self, Expr, APP_HASH, LAMBDA_HASH, LET_HASH, PI_HASH, PROJ_HASH, SHIFT_HASH, VAR_HASH};
 use crate::hash64;
-use crate::util::{ExportFile, FxHashMap, LeanDag};
+use crate::util::{DagMarker, ExportFile, ExprPtr, FxHashMap, LeanDag, Ptr};
 
 /// Compute and print OSNF sharing statistics for the export file DAG.
 ///
@@ -194,4 +194,282 @@ fn core_hash(
 
     memo.insert((idx, shift, cutoff), h);
     h
+}
+
+// ---- OSNF transformation ----
+
+/// OSNF-normalize the export file DAG in place.
+///
+/// For each expression with `fvar_lb > 0`, computes its core (shifted-down version
+/// with `fvar_lb = 0`), inserts the core into the DAG, creates a `Shift(core, fvar_lb, 0)`
+/// wrapper, and records the mapping in `ExportFile::osnf_remap`.
+///
+/// After this, `read_expr` on ExportFile expressions transparently returns the
+/// OSNF-normalized version.
+pub fn osnf_normalize(export_file: &mut ExportFile) {
+    let dag = &mut export_file.dag;
+    let original_len = dag.exprs.len();
+    let mut osnf_core: Vec<u32> = (0..original_len as u32).collect(); // identity initially
+    // memo: (original_idx, shift, cutoff) -> index of core expr in the dag
+    let mut core_memo: FxHashMap<(usize, u16, u16), usize> = FxHashMap::default();
+
+    let mut normalized_count = 0u32;
+    let mut core_reuse_count = 0u32;
+
+    for idx in 0..original_len {
+        let nlbv = dag.expr_nlbv[idx];
+        if nlbv == 0 {
+            continue;
+        }
+        let fvar_lb = dag.exprs.get_index(idx).unwrap().get_fvar_lb();
+        if fvar_lb == 0 {
+            continue;
+        }
+
+        // Compute the core: shift_down(expr, fvar_lb, 0)
+        let (core_idx, was_new) = compute_core(dag, idx, fvar_lb, 0, &mut core_memo);
+
+        if !was_new {
+            core_reuse_count += 1;
+        }
+
+        osnf_core[idx] = u32::try_from(core_idx).unwrap();
+        normalized_count += 1;
+    }
+
+    // Also compute cores for newly created core expressions.
+    // Core expressions under binders can have fvar_lb > 0 and need their own cores
+    // for consistent canonicalization in mk_shift_cutoff.
+    // Iterate until fixpoint (no new expressions created).
+    let mut wave = 0u32;
+    let mut wave_normalized = 0u32;
+    loop {
+        let current_len = dag.exprs.len();
+        // Extend osnf_core for newly added expressions (identity mapping initially)
+        while osnf_core.len() < current_len {
+            osnf_core.push(osnf_core.len() as u32);
+        }
+        let mut new_in_wave = 0u32;
+        for idx in original_len..current_len {
+            // Skip if already has a non-identity core
+            if (osnf_core[idx] as usize) != idx {
+                continue;
+            }
+            let nlbv = dag.expr_nlbv[idx];
+            if nlbv == 0 { continue; }
+            let fvar_lb = dag.exprs.get_index(idx).unwrap().get_fvar_lb();
+            if fvar_lb == 0 { continue; }
+            let (core_idx, was_new) = compute_core(dag, idx, fvar_lb, 0, &mut core_memo);
+            if !was_new { core_reuse_count += 1; }
+            osnf_core[idx] = u32::try_from(core_idx).unwrap();
+            new_in_wave += 1;
+            wave_normalized += 1;
+        }
+        // Extend for any newly created expressions in this wave
+        let after_len = dag.exprs.len();
+        while osnf_core.len() < after_len {
+            osnf_core.push(osnf_core.len() as u32);
+        }
+        wave += 1;
+        if new_in_wave == 0 || after_len == current_len {
+            break;
+        }
+    }
+
+    let new_len = dag.exprs.len();
+    eprintln!("OSNF normalize: {} + {} expressions normalized ({} waves), {} core reuses, DAG grew from {} to {} ({:+})",
+        normalized_count, wave_normalized, wave, core_reuse_count, original_len, new_len,
+        new_len as isize - original_len as isize);
+
+    export_file.osnf_core = Some(osnf_core);
+}
+
+/// Remap child ExprPtrs in an expression according to the OSNF remap table.
+/// Only remaps ExportFile ExprPtrs; TcCtx ptrs are left unchanged.
+/// Recursively compute the core of expression `dag[idx]` shifted down by `shift` with `cutoff`.
+/// Inserts core expressions into `dag`. Returns (core_index, was_newly_created).
+fn compute_core(
+    dag: &mut LeanDag,
+    idx: usize,
+    shift: u16,
+    cutoff: u16,
+    memo: &mut FxHashMap<(usize, u16, u16), usize>,
+) -> (usize, bool) {
+    if let Some(&core_idx) = memo.get(&(idx, shift, cutoff)) {
+        return (core_idx, false);
+    }
+
+    let expr = *dag.exprs.get_index(idx).unwrap();
+    let nlbv = dag.expr_nlbv[idx];
+
+    // Fast path: no free bvars above cutoff — shift doesn't affect this expression
+    if nlbv <= cutoff {
+        memo.insert((idx, shift, cutoff), idx);
+        return (idx, false);
+    }
+
+    let (core_idx, was_new) = match expr {
+        Expr::Var { dbj_idx, .. } => {
+            let new_idx = if dbj_idx >= cutoff { dbj_idx - shift } else { dbj_idx };
+            let hash = hash64!(VAR_HASH, new_idx);
+            let bloom = expr::bloom_single(new_idx);
+            let new_var = Expr::Var {
+                dbj_idx: new_idx,
+                hash,
+                struct_hash: expr::VAR_HASH,
+                fvar_bloom: bloom,
+                fvar_lb: new_idx,
+            };
+            let (vi, inserted) = dag.exprs.insert_full(new_var);
+            if inserted {
+                dag.expr_nlbv.push(new_idx + 1);
+            }
+            (vi, inserted)
+        }
+        Expr::App { fun, arg, num_loose_bvars: _, has_fvars, .. } => {
+            let (fun_core, _) = compute_core(dag, fun.idx(), shift, cutoff, memo);
+            let (arg_core, _) = compute_core(dag, arg.idx(), shift, cutoff, memo);
+            let fun_ptr: ExprPtr = Ptr::from(DagMarker::ExportFile, fun_core);
+            let arg_ptr: ExprPtr = Ptr::from(DagMarker::ExportFile, arg_core);
+            let fun_nlbv = dag.expr_nlbv[fun_core];
+            let arg_nlbv = dag.expr_nlbv[arg_core];
+            let new_nlbv = fun_nlbv.max(arg_nlbv);
+            let fun_expr = dag.exprs.get_index(fun_core).unwrap();
+            let arg_expr = dag.exprs.get_index(arg_core).unwrap();
+            let hash = hash64!(APP_HASH, fun_ptr, arg_ptr);
+            let struct_hash = hash64!(APP_HASH, fun_expr.get_struct_hash(), arg_expr.get_struct_hash());
+            let bloom = expr::bloom_union(fun_expr.get_fvar_bloom(), arg_expr.get_fvar_bloom());
+            let fvar_lb = if new_nlbv == 0 { 0 } else {
+                if fun_nlbv == 0 { arg_expr.get_fvar_lb() }
+                else if arg_nlbv == 0 { fun_expr.get_fvar_lb() }
+                else { fun_expr.get_fvar_lb().min(arg_expr.get_fvar_lb()) }
+            };
+            let app = Expr::App {
+                fun: fun_ptr, arg: arg_ptr, num_loose_bvars: new_nlbv,
+                has_fvars, hash, struct_hash, fvar_bloom: bloom, fvar_lb,
+            };
+            let (ai, inserted) = dag.exprs.insert_full(app);
+            if inserted { dag.expr_nlbv.push(new_nlbv); }
+            (ai, inserted)
+        }
+        Expr::Lambda { binder_name, binder_style, binder_type, body, has_fvars, .. } => {
+            let (ty_core, _) = compute_core(dag, binder_type.idx(), shift, cutoff, memo);
+            let (body_core, _) = compute_core(dag, body.idx(), shift, cutoff + 1, memo);
+            make_binder_core(dag, true, binder_name, binder_style, ty_core, body_core, has_fvars)
+        }
+        Expr::Pi { binder_name, binder_style, binder_type, body, has_fvars, .. } => {
+            let (ty_core, _) = compute_core(dag, binder_type.idx(), shift, cutoff, memo);
+            let (body_core, _) = compute_core(dag, body.idx(), shift, cutoff + 1, memo);
+            make_binder_core(dag, false, binder_name, binder_style, ty_core, body_core, has_fvars)
+        }
+        Expr::Let { binder_name, binder_type, val, body, nondep, has_fvars, .. } => {
+            let (ty_core, _) = compute_core(dag, binder_type.idx(), shift, cutoff, memo);
+            let (val_core, _) = compute_core(dag, val.idx(), shift, cutoff, memo);
+            let (body_core, _) = compute_core(dag, body.idx(), shift, cutoff + 1, memo);
+            let ty_ptr: ExprPtr = Ptr::from(DagMarker::ExportFile, ty_core);
+            let val_ptr: ExprPtr = Ptr::from(DagMarker::ExportFile, val_core);
+            let body_ptr: ExprPtr = Ptr::from(DagMarker::ExportFile, body_core);
+            let ty_e = dag.exprs.get_index(ty_core).unwrap();
+            let val_e = dag.exprs.get_index(val_core).unwrap();
+            let body_e = dag.exprs.get_index(body_core).unwrap();
+            let ty_nlbv = dag.expr_nlbv[ty_core];
+            let val_nlbv = dag.expr_nlbv[val_core];
+            let body_nlbv = dag.expr_nlbv[body_core];
+            let new_nlbv = ty_nlbv.max(val_nlbv.max(body_nlbv.saturating_sub(1)));
+            let hash = hash64!(LET_HASH, binder_name, ty_ptr, val_ptr, body_ptr, nondep);
+            let struct_hash = hash64!(LET_HASH, binder_name, ty_e.get_struct_hash(), val_e.get_struct_hash(), body_e.get_struct_hash(), nondep);
+            let body_bloom = expr::bloom_unbind(body_e.get_fvar_bloom());
+            let bloom = expr::bloom_union(expr::bloom_union(ty_e.get_fvar_bloom(), val_e.get_fvar_bloom()), body_bloom);
+            let fvar_lb = if new_nlbv == 0 { 0 } else {
+                let mut lb = u16::MAX;
+                if ty_nlbv > 0 { lb = lb.min(ty_e.get_fvar_lb()); }
+                if val_nlbv > 0 { lb = lb.min(val_e.get_fvar_lb()); }
+                if body_nlbv > 1 || (body_nlbv == 1 && body_e.get_fvar_lb() > 0) {
+                    lb = lb.min(body_e.get_fvar_lb().saturating_sub(1));
+                }
+                if lb == u16::MAX { 0 } else { lb }
+            };
+            let let_e = Expr::Let {
+                binder_name, binder_type: ty_ptr, val: val_ptr, body: body_ptr,
+                num_loose_bvars: new_nlbv, has_fvars, hash, nondep, struct_hash,
+                fvar_bloom: bloom, fvar_lb,
+            };
+            let (li, inserted) = dag.exprs.insert_full(let_e);
+            if inserted { dag.expr_nlbv.push(new_nlbv); }
+            (li, inserted)
+        }
+        Expr::Proj { ty_name, idx: proj_idx, structure, has_fvars, .. } => {
+            let (struct_core, _) = compute_core(dag, structure.idx(), shift, cutoff, memo);
+            let struct_ptr: ExprPtr = Ptr::from(DagMarker::ExportFile, struct_core);
+            let struct_e = dag.exprs.get_index(struct_core).unwrap();
+            let struct_nlbv = dag.expr_nlbv[struct_core];
+            let hash = hash64!(PROJ_HASH, ty_name, proj_idx, struct_ptr);
+            let struct_hash = hash64!(PROJ_HASH, ty_name, proj_idx, struct_e.get_struct_hash());
+            let bloom = struct_e.get_fvar_bloom();
+            let fvar_lb = struct_e.get_fvar_lb();
+            let proj = Expr::Proj {
+                ty_name, idx: proj_idx, structure: struct_ptr,
+                num_loose_bvars: struct_nlbv, has_fvars, hash, struct_hash,
+                fvar_bloom: bloom, fvar_lb,
+            };
+            let (pi, inserted) = dag.exprs.insert_full(proj);
+            if inserted { dag.expr_nlbv.push(struct_nlbv); }
+            (pi, inserted)
+        }
+        // Closed expressions — already handled by nlbv <= cutoff fast path
+        Expr::Sort { .. } | Expr::Const { .. } | Expr::NatLit { .. }
+        | Expr::StringLit { .. } | Expr::Local { .. } => (idx, false),
+        Expr::Shift { .. } => panic!("Shift nodes should not appear in export file DAG"),
+    };
+
+    memo.insert((idx, shift, cutoff), core_idx);
+    (core_idx, was_new)
+}
+
+/// Helper: construct a Lambda or Pi core expression from already-computed children.
+fn make_binder_core<'a>(
+    dag: &mut LeanDag<'a>,
+    is_lambda: bool,
+    binder_name: crate::util::NamePtr<'a>,
+    binder_style: crate::expr::BinderStyle,
+    ty_core: usize,
+    body_core: usize,
+    has_fvars: bool,
+) -> (usize, bool) {
+    let ty_ptr: ExprPtr<'a> = Ptr::from(DagMarker::ExportFile, ty_core);
+    let body_ptr: ExprPtr<'a> = Ptr::from(DagMarker::ExportFile, body_core);
+    let ty_e = dag.exprs.get_index(ty_core).unwrap();
+    let body_e = dag.exprs.get_index(body_core).unwrap();
+    let ty_nlbv = dag.expr_nlbv[ty_core];
+    let body_nlbv = dag.expr_nlbv[body_core];
+    let new_nlbv = ty_nlbv.max(body_nlbv.saturating_sub(1));
+    let tag = if is_lambda { LAMBDA_HASH } else { PI_HASH };
+    let hash = hash64!(tag, binder_name, binder_style, ty_ptr, body_ptr);
+    let struct_hash = hash64!(tag, binder_name, binder_style, ty_e.get_struct_hash(), body_e.get_struct_hash());
+    let body_bloom = expr::bloom_unbind(body_e.get_fvar_bloom());
+    let bloom = expr::bloom_union(ty_e.get_fvar_bloom(), body_bloom);
+    let fvar_lb = if new_nlbv == 0 { 0 } else {
+        let b_nlbv = body_nlbv;
+        let b_lb = body_e.get_fvar_lb().saturating_sub(1);
+        if ty_nlbv == 0 && b_nlbv <= 1 { 0 }
+        else if ty_nlbv == 0 { b_lb }
+        else if b_nlbv <= 1 { ty_e.get_fvar_lb() }
+        else { ty_e.get_fvar_lb().min(b_lb) }
+    };
+    let expr = if is_lambda {
+        Expr::Lambda {
+            binder_name, binder_style, binder_type: ty_ptr, body: body_ptr,
+            num_loose_bvars: new_nlbv, has_fvars, hash, struct_hash,
+            fvar_bloom: bloom, fvar_lb,
+        }
+    } else {
+        Expr::Pi {
+            binder_name, binder_style, binder_type: ty_ptr, body: body_ptr,
+            num_loose_bvars: new_nlbv, has_fvars, hash, struct_hash,
+            fvar_bloom: bloom, fvar_lb,
+        }
+    };
+    let (bi, inserted) = dag.exprs.insert_full(expr);
+    if inserted { dag.expr_nlbv.push(new_nlbv); }
+    (bi, inserted)
 }
