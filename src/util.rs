@@ -553,6 +553,24 @@ impl<'p> ExportFile<'p> {
         (result, trace)
     }
 
+    /// Like `with_nanoda_tc_and_declar`, but reuses pre-allocated dag across declarations.
+    pub fn with_nanoda_tc_and_declar_reusing<F, A>(&self, d: crate::env::DeclarInfo<'p>, reusable_dag: ReusableDag, f: F) -> ((A, TcTrace), ReusableDag)
+    where
+        F: FnOnce(&mut crate::nanoda_tc::NanodaTypeChecker<'_, '_, 'p>) -> A, {
+        let mut dag_storage = std::mem::ManuallyDrop::new(reusable_dag.0);
+        let dag_ref: &mut LeanDag<'_> = unsafe { &mut *(&mut *dag_storage as *mut LeanDag<'static>).cast() };
+        dag_ref.clear_for_reuse();
+        let mut ctx = TcCtx::new(self, dag_ref, ReusableCaches::new());
+        let env = self.new_env(EnvLimit::ByName(d.name));
+        let mut tc = crate::nanoda_tc::NanodaTypeChecker::new(&mut ctx, &env, Some(d));
+        let result = f(&mut tc);
+        let trace = tc.ctx.trace;
+        drop(tc);
+        drop(ctx);
+        let reusable_dag = ReusableDag(std::mem::ManuallyDrop::into_inner(dag_storage));
+        ((result, trace), reusable_dag)
+    }
+
     pub fn with_pp<F, A>(&self, f: F) -> A
     where
         F: FnOnce(&mut PrettyPrinter<'_, '_, 'p>) -> A, {
