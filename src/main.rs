@@ -36,7 +36,9 @@ fn use_config(config_path: &Path) -> Result<Option<String>, Box<dyn Error>> {
     let mut pp_destination = cfg.get_pp_destination()?;
     let (mut export_file, skipped_axioms) = cfg.to_export_file()?;
     // OSNF: normalize export DAG to outermost-shift normal form
-    nanobruijn::osnf::osnf_normalize(&mut export_file);
+    // Disabled: mk_shift_cutoff canonicalization causes ~60% slowdown on Mathlib 100K.
+    // TODO: re-enable with cache-based approach instead of expression rewriting.
+    // nanobruijn::osnf::osnf_normalize(&mut export_file);
     // Check the environment
     let panic_count = export_file.check_all_declars();
     // Pretty print as necessary

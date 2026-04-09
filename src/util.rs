@@ -1458,23 +1458,11 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         let inner_lb = inner_expr.get_fvar_lb();
         let inner_bloom = inner_expr.get_fvar_bloom();
         let cutoff = if cutoff > 0 && inner_lb >= cutoff { 0 } else { cutoff };
-        // OSNF canonicalization: for cutoff=0 shifts on export file expressions with a known core,
-        // redirect Shift(e, amount, 0) → Shift(core, fvar_lb + amount, 0).
-        // This ensures expressions sharing a core produce the same Shift nodes.
-        if cutoff == 0 && inner.dag_marker() == DagMarker::ExportFile {
-            if let Some(ref osnf_core) = self.export_file.osnf_core {
-                let idx = inner.idx();
-                if idx < osnf_core.len() {
-                    let core_idx = osnf_core[idx] as usize;
-                    if core_idx != idx {
-                        self.trace.osnf_canon_hits += 1;
-                        let core_ptr: ExprPtr<'t> = Ptr::from(DagMarker::ExportFile, core_idx);
-                        let new_amount = amount + inner_lb as i16;
-                        return self.mk_shift_cutoff(core_ptr, new_amount, 0);
-                    }
-                }
-            }
-        }
+        // OSNF canonicalization: disabled for now. Rewriting Shift(e, amount, 0) →
+        // Shift(core, fvar_lb + amount, 0) during TC breaks pointer equality and triggers
+        // expensive shift_eq_pending comparisons when encountered inside Lambda bodies
+        // (where tracking cutoff > 0 but Shift cutoff is 0). This causes a ~60% slowdown
+        // on Mathlib 100K. TODO: use OSNF cores for cache-based lookups instead.
         // For negative shifts with cutoff=0, validate that fvar_lb won't go negative.
         debug_assert!(amount >= 0 || cutoff > 0 || (inner_lb as i16) + amount >= 0,
             "mk_shift: negative shift would produce invalid fvar indices: fvar_lb={}, amount={}, cutoff={}",
