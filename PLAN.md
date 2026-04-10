@@ -203,7 +203,12 @@ Standalone nanobruijn (parsing + TC, 4 threads) with OSNF parse-time normalizati
 | Benchmark | without OSNF | with OSNF | Change |
 |-----------|-------------|-----------|--------|
 | Init | 6.5s | 7.6s | +17% |
-| Mathlib | 440s / 7.8GB | 311s / 9.4GB | **-29%** wall, +20% RSS |
+| Mathlib (user) | 1175s avg | 1095s | **-7%** user time |
+| Mathlib (RSS) | 7.9GB | 9.3GB | +18% RSS |
+
+A/B/A test (baseline, OSNF, baseline): wall times 359s/315s/297s, user times
+1297s/1095s/1053s. Baseline run 2 faster than run 1 due to OS page cache warming.
+User time (CPU-bound) is the fairer metric: baseline avg 1175s, OSNF 1095s = **-7%**.
 
 Previous table had Init at 24.2s/20.1s — those were standalone binaries with different
 IndexSet implementations. The in-binary comparison is fair: same parsing, same dag, same
