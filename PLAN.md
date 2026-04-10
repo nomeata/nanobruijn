@@ -344,11 +344,11 @@ These approaches were tried and found counterproductive, unsound, or out of scop
   core into DAG (may dedup with shift-equivalent cores), wrap in `Shift(fvar_lb, core_ptr)`,
   and insert the Shift as the expression's DAG entry. Uses `expr_remap: Vec<usize>` to map
   parser indices to DAG indices (no longer 1:1). Results on Init: 2.87M of 5.68M parser
-  expressions normalized (50.5%), 10% core dedup (5.68M+2.87M entries → 7.77M), parsing
-  overhead ~18% (6.5s → 7.7s). However, **TC is 3x slower** (6.5s → 19.6s total) — the TC
-  encounters Shift nodes in the export DAG where it previously saw plain expressions, causing
-  the same pointer-equality and cutoff-mismatch issues as the mk_shift_cutoff OSNF approach.
-  The TC needs shift-aware cache lookups to benefit from parse-time OSNF.
+  expressions normalized (50.5%), 10% core dedup (5.68M+2.87M entries → 7.77M).
+  **17% total overhead** (6.5s → 7.6s) including both parsing and TC. The TC handles
+  export-file Shift nodes correctly via existing view_expr/push_shift machinery. The overhead
+  is from extra DAG inserts during parsing and additional push_shift operations during TC.
+  Core dedup provides structural sharing; benefit may show on maxrss for large inputs.
 - **Cached constant ExprPtrs** (Bool.true/false, Nat.zero/succ, Nat, String): Cache the
   ExprPtrs for common constants used in nat/bool/string reduction to avoid repeated
   `alloc_levels_slice(&[]) + mk_const` hash table lookups. No measurable improvement —
