@@ -127,6 +127,39 @@ sides are Shift nodes with matching amounts, also union inner expressions.
 **DefEq cache (open)**: Stack-of-maps like infer cache. Separate positive/negative stacks.
 `bucket_idx = depth - min(fvar_lb(x), fvar_lb(y))`.
 
+### OSNF parse-time normalization
+
+Outermost-Shift Normal Form (OSNF): every expression in the export file DAG with
+`fvar_lb > 0` is stored as `Shift(fvar_lb, core)` where `core` has `fvar_lb = 0`.
+The core is the expression with all free bvar indices uniformly shifted down by `fvar_lb`.
+Two expressions that differ only by a uniform shift of their free variables share the
+same core — this is the structural sharing benefit.
+
+**Parse-time core extraction**: During parsing, for each compound expression (App, Lambda,
+Pi, Let, Proj) with `fvar_lb > 0`:
+1. Adjust each child for core extraction via `adjust_child(child, fvar_lb, cutoff)`:
+   - BVar(n) → BVar(n - fvar_lb) (insert adjusted BVar into DAG)
+   - Shift(k, inner_core) → Shift(k - fvar_lb, inner_core) or just inner_core if k = fvar_lb
+   - Compound with fvar_lb=0 → use as-is (already a core)
+   - nlbv ≤ cutoff → use as-is (bound variable, unaffected)
+2. Insert core expression into DAG (may dedup with shift-equivalent cores)
+3. Insert `Shift(fvar_lb, core_ptr)` into DAG — this is the expression's entry
+
+Uses `expr_remap: Vec<usize>` to map sequential parser indices to DAG indices (no longer
+1:1, since cores and intermediate Shift nodes create additional DAG entries).
+
+**Why parse-time works but TC-time didn't**: The earlier attempt rewrote `Shift(e, amount)`
+→ `Shift(core, fvar_lb+amount)` inside `mk_shift_cutoff` during TC. This broke pointer
+equality: expressions that were identical pointers now differed. At parse time, the
+expressions start in OSNF from the beginning — all caches, pointer comparisons, and
+`sem_eq` checks see a consistent representation from the start. No pointer equality is
+broken because nothing was rewritten mid-computation.
+
+**Results** (A/B/A test on full Mathlib, 630K declarations):
+- 47M of 88M parser expressions normalized (53%), 14% core dedup
+- **-7% user time** (baseline avg 1175s → 1095s), +18% RSS (7.9GB → 9.3GB)
+- Init: +17% overhead (6.5s → 7.6s) — parsing overhead dominates on smaller input
+
 ### Speculative app congruence in def_eq
 
 Before expensive whnf/delta work in `def_eq_inner`, speculatively try structural App
@@ -216,7 +249,9 @@ thread pool, only the TC algorithm differs.
 
 ### Gap analysis
 
-On Init nanobruijn is 14% slower. On full Mathlib it's 8% slower (25s gap).
+On Init nanobruijn is 14% slower (in-binary TC comparison). On full Mathlib standalone
+with OSNF, nanobruijn is ~7% faster in user time than without OSNF (1175s → 1095s).
+The in-binary comparison (320s nanoda vs 345s nanobruijn = 1.08x) predates OSNF.
 
 Key optimization: `infer_app` preserves lazy Shift wrappers (using `unfold_apps` instead
 of `unfold_apps_stack`), allowing infer's shift-peel to strip shifts and infer inner
@@ -351,20 +386,9 @@ These approaches were tried and found counterproductive, unsound, or out of scop
   mismatched Shift cutoffs was using the Shift node's fvar_lb (= inner.fvar_lb + amount)
   instead of inner's fvar_lb, causing false negatives in def_eq. Bug fixed.
   Infrastructure kept (osnf.rs, osnf_core field) for potential cache-key-based approach.
-- **OSNF at parse time** (parse-time core extraction + Shift wrapping): For each compound
-  expression with `fvar_lb > 0`, extract the core (adjust children down by fvar_lb), insert
-  core into DAG (may dedup with shift-equivalent cores), wrap in `Shift(fvar_lb, core_ptr)`,
-  and insert the Shift as the expression's DAG entry. Uses `expr_remap: Vec<usize>` to map
-  parser indices to DAG indices (no longer 1:1). Results on Init: 2.87M of 5.68M parser
-  expressions normalized (50.5%), 10% core dedup (5.68M+2.87M entries → 7.77M).
-  **17% total overhead** (6.5s → 7.6s) including both parsing and TC. The TC handles
-  export-file Shift nodes correctly via existing view_expr/push_shift machinery. The overhead
-  is from extra DAG inserts during parsing and additional push_shift operations during TC.
-  Core dedup provides structural sharing. **On full Mathlib: -29% wall time** (440s → 311s),
-  -33% user time (1610s → 1079s), +20% maxrss (7.8GB → 9.4GB). 47M/88M expressions
-  normalized (53%), 14% core dedup. The TC benefits from shared cores — shift-equivalent
-  expressions that previously required separate processing now share the same core, giving
-  much better cache hit rates across depths.
+- **OSNF at parse time via mk_shift_cutoff rewriting**: Same approach as above but applied
+  during TC rather than at parse time. Same 60% regression — moved to parse-time approach
+  below (see Design section: OSNF parse-time normalization).
 - **Cached constant ExprPtrs** (Bool.true/false, Nat.zero/succ, Nat, String): Cache the
   ExprPtrs for common constants used in nat/bool/string reduction to avoid repeated
   `alloc_levels_slice(&[]) + mk_const` hash table lookups. No measurable improvement —
