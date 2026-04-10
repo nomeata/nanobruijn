@@ -187,8 +187,9 @@ fn core_hash(
         | Expr::NatLit { .. }
         | Expr::StringLit { .. }
         | Expr::Local { .. } => expr.get_hash(),
-        Expr::Shift { .. } => {
-            panic!("Shift nodes should not appear in export file DAG")
+        Expr::Shift { inner, amount, .. } => {
+            // OSNF Shift nodes from parse-time normalization: hash the inner core shifted
+            core_hash(dag, inner.idx(), shift + amount as u16, cutoff, memo)
         }
     };
 
@@ -419,7 +420,11 @@ fn compute_core(
         // Closed expressions — already handled by nlbv <= cutoff fast path
         Expr::Sort { .. } | Expr::Const { .. } | Expr::NatLit { .. }
         | Expr::StringLit { .. } | Expr::Local { .. } => (idx, false),
-        Expr::Shift { .. } => panic!("Shift nodes should not appear in export file DAG"),
+        Expr::Shift { inner, amount, .. } => {
+            // OSNF Shift nodes from parse-time normalization: recurse into inner with combined shift
+            let (core_idx, was_new) = compute_core(dag, inner.idx(), shift + amount as u16, cutoff, memo);
+            (core_idx, was_new)
+        }
     };
 
     memo.insert((idx, shift, cutoff), core_idx);

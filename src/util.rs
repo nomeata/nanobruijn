@@ -1528,7 +1528,8 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
             if amount > 0 { low | high.checked_shl(amount as u32).unwrap_or(0) | (if high & 0x80000000 != 0 { 0x80000000 } else { 0 }) }
             else { low | (high >> ((-amount) as u32)) }
         };
-        // Shift nodes never exist in the export_file dag — always use tc-only alloc.
+        // Shift nodes may exist in the export_file dag (from OSNF parse-time normalization).
+        // TC-created Shift nodes use tc-only alloc.
         let result = self.alloc_expr_tc(Expr::Shift { hash, struct_hash, fvar_bloom, fvar_lb, inner, amount, cutoff, num_loose_bvars: new_nlbv, has_fvars });
         self.expr_cache.shift_dedup.insert(dedup_key, result);
         result
