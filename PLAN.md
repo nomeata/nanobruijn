@@ -198,6 +198,13 @@ Fair in-binary comparison (same binary, both TC paths with ReusableDag, 4 thread
 | app-lam N=4000 | 8.3s | 10ms | 0.001x |
 | Mathlib (630k decls, 5.0GB) | 320s | 345s | **1.08x** |
 
+Standalone nanobruijn (parsing + TC, 4 threads) with OSNF parse-time normalization:
+
+| Benchmark | without OSNF | with OSNF | Change |
+|-----------|-------------|-----------|--------|
+| Init | 6.5s | 7.6s | +17% |
+| Mathlib | 440s / 7.8GB | 311s / 9.4GB | **-29%** wall, +20% RSS |
+
 Previous table had Init at 24.2s/20.1s — those were standalone binaries with different
 IndexSet implementations. The in-binary comparison is fair: same parsing, same dag, same
 thread pool, only the TC algorithm differs.
@@ -348,7 +355,11 @@ These approaches were tried and found counterproductive, unsound, or out of scop
   **17% total overhead** (6.5s → 7.6s) including both parsing and TC. The TC handles
   export-file Shift nodes correctly via existing view_expr/push_shift machinery. The overhead
   is from extra DAG inserts during parsing and additional push_shift operations during TC.
-  Core dedup provides structural sharing; benefit may show on maxrss for large inputs.
+  Core dedup provides structural sharing. **On full Mathlib: -29% wall time** (440s → 311s),
+  -33% user time (1610s → 1079s), +20% maxrss (7.8GB → 9.4GB). 47M/88M expressions
+  normalized (53%), 14% core dedup. The TC benefits from shared cores — shift-equivalent
+  expressions that previously required separate processing now share the same core, giving
+  much better cache hit rates across depths.
 - **Cached constant ExprPtrs** (Bool.true/false, Nat.zero/succ, Nat, String): Cache the
   ExprPtrs for common constants used in nat/bool/string reduction to avoid repeated
   `alloc_levels_slice(&[]) + mk_const` hash table lookups. No measurable improvement —
