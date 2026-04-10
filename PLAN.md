@@ -376,6 +376,11 @@ Not applicable:
 - `514a1a5` / `14bbb5c` — semver bumps
 
 ## TODO
+- **Bloom filter vs FVarList**: Investigate whether replacing nanoda's FVarList with a
+  32-bit bloom filter (`fvar_bloom`) loses information under shifting. Shifting can lose
+  bits (shifted out the top), so shift-equivalent expressions might get different
+  `canonical_hash` values, causing cache misses. Consider going back to FVarList and
+  optimizing it without losing shift-invariance.
 - **Remove remaining dead code**: thread_local profiling counters, dead locally-nameless
   code (Local variant, FVarId, abstr, etc.)
 - **Fill in Theory.lean sorry's**: `decode_shift`, `fvars_shift_zero`
