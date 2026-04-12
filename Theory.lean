@@ -122,8 +122,8 @@ theorem decode_shift (k : Nat) (fvs : FVarList) :
   cases fvs with
   | nil => simp [shift, decode]
   | cons d rest =>
-    simp only [shift, decode]
-    sorry -- List.map composition: (· + (d+k) + 1) = (· + k) ∘ (· + d + 1)
+    simp only [shift, decode, List.map_cons, List.map_map, Function.comp_def]
+    congr 1; ext x; omega
 
 /-- Unbind commutes with shift when the bound variable is NOT free (lb > 0).
     When lb = 0 (bound var is free), they do NOT commute: shifting moves
@@ -289,3 +289,241 @@ private def deepBinder_shifted : Expr := deepBinder.shift 42 0
 -- (The 64-bit mask approach would have aliasing issues here!)
 
 end Expr
+
+/-! ## Expressions with explicit Shift nodes (OSNF theory)
+
+The implementation uses explicit `Shift` nodes to defer shifting. This section
+models that extended expression type and formalizes Outermost-Shift Normal Form (OSNF).
+
+We use cutoff = 0 only (the common case in the implementation's `mk_shift`).
+-/
+
+/-- Expression with explicit Shift nodes. Simplified model: cutoff is always 0. -/
+inductive SExpr where
+  | bvar (i : Nat)
+  | app (f a : SExpr)
+  | lam (body : SExpr)
+  | const (id : Nat)
+  | shift (amount : Nat) (inner : SExpr)  -- Shift(inner, amount), cutoff=0
+  deriving Repr, DecidableEq
+
+namespace SExpr
+
+/-! ### Erasure: interpret an SExpr as a plain Expr by pushing shifts through -/
+
+/-- Erase all Shift nodes, producing the plain Expr this SExpr denotes. -/
+def erase : SExpr → Expr
+  | bvar i => .bvar i
+  | app f a => .app f.erase a.erase
+  | lam body => .lam body.erase
+  | const id => .const id
+  | shift k inner => inner.erase.shift k 0
+
+/-- Two SExprs are shift-equivalent iff they erase to the same Expr. -/
+def equiv (e₁ e₂ : SExpr) : Prop := e₁.erase = e₂.erase
+
+/-! ### fvar_lb: the minimum free variable index -/
+
+/-- Lower bound on free variable indices (minimum free bvar index).
+    Returns `none` for closed expressions. -/
+def fvar_lb : SExpr → Option Nat
+  | bvar i => some i
+  | app f a =>
+    match f.fvar_lb, a.fvar_lb with
+    | none, r => r
+    | l, none => l
+    | some l, some r => some (min l r)
+  | lam body =>
+    match body.fvar_lb with
+    | none => none
+    | some 0 => none  -- bvar 0 is bound by this lambda
+    | some (n + 1) => some n
+  | const _ => none
+  | shift k inner =>
+    match inner.fvar_lb with
+    | none => none
+    | some lb => some (lb + k)
+
+/-- Convenience: fvar_lb as a Nat, returning 0 for closed expressions. -/
+def fvar_lb_val (e : SExpr) : Nat :=
+  match e.fvar_lb with
+  | none => 0
+  | some n => n
+
+/-! ### Predicates for OSNF classification -/
+
+/-- An expression is "compound" if it is not a bvar and not a shift. -/
+def isCompound : SExpr → Bool
+  | bvar _ => false
+  | shift _ _ => false
+  | _ => true
+
+/-- An expression is a "core": compound with fvar_lb_val = 0 (or closed). -/
+def isCore (e : SExpr) : Prop :=
+  e.isCompound ∧ e.fvar_lb_val = 0
+
+/-! ### OSNF definition -/
+
+/-- An expression is in Outermost-Shift Normal Form (OSNF) if it is one of:
+    1. A bare `bvar n`
+    2. A core (compound with fvar_lb_val = 0)
+    3. `shift n core` where `n > 0` and `core` is a core -/
+inductive IsOSNF : SExpr → Prop where
+  | bvar (i : Nat) : IsOSNF (bvar i)
+  | core (e : SExpr) (hc : e.isCompound) (hlb : e.fvar_lb_val = 0) :
+      IsOSNF e
+  | shifted (n : Nat) (core : SExpr) (hn : n > 0)
+      (hc : core.isCompound) (hlb : core.fvar_lb_val = 0) :
+      IsOSNF (shift n core)
+
+/-! ### adjust_child: subtract amount from free variable indices in a child -/
+
+/-- Adjust a child expression that is already in OSNF by subtracting `amount` from
+    its free variable lower bound. `cutoff` accounts for binders above this child.
+    Precondition: the child's effective fvar_lb >= amount + cutoff. -/
+def adjust_child (e : SExpr) (amount : Nat) (cutoff : Nat) : SExpr :=
+  match e with
+  | bvar i => if i ≥ cutoff then bvar (i - amount) else bvar i
+  | shift k inner => shift (k - amount) inner  -- k >= amount guaranteed by precondition
+  | other => other  -- compound with fvar_lb_val=0, or const: no free vars above cutoff
+
+/-! ### mk_osnf_compound: normalize a compound expression whose children are in OSNF -/
+
+/-- Given a compound expression (app or lam) whose children are already in OSNF,
+    compute its OSNF by extracting the common fvar_lb as an outer shift. -/
+def mk_osnf_compound (e : SExpr) : SExpr :=
+  let lb := e.fvar_lb_val
+  if lb = 0 then e
+  else
+    let core := match e with
+      | app f a => app (adjust_child f lb 0) (adjust_child a lb 0)
+      | lam body => lam (adjust_child body lb 1)
+      | other => other  -- const always has lb=0, won't reach here
+    shift lb core
+
+/-! ### to_osnf: compute the OSNF of an expression (recursive, bottom-up) -/
+
+/-- Compute the OSNF of an expression by recursively normalizing children first,
+    then applying OSNF normalization at the current node.
+    - bvar/const: already in OSNF
+    - shift: combine with inner's OSNF (collapse nested shifts)
+    - app/lam: recursively normalize children, then extract fvar_lb -/
+def to_osnf : SExpr → SExpr
+  | bvar i => bvar i
+  | const id => const id
+  | app f a => mk_osnf_compound (app f.to_osnf a.to_osnf)
+  | lam body => mk_osnf_compound (lam body.to_osnf)
+  | shift k inner =>
+    match inner.to_osnf with
+    | bvar i => bvar (i + k)
+    | shift k' core => if k + k' = 0 then core else shift (k + k') core
+    | e =>  -- compound (already a core from mk_osnf_compound)
+      if k = 0 then e else shift k e
+
+/-! ### OSNF theorems -/
+
+/-- The OSNF of a bvar is itself. -/
+theorem to_osnf_bvar (i : Nat) : to_osnf (bvar i) = bvar i := rfl
+
+/-- A const is already in OSNF (it's a closed core). -/
+theorem to_osnf_const (id : Nat) : to_osnf (const id) = const id := rfl
+
+/-- `to_osnf e` is in OSNF. -/
+theorem to_osnf_isOSNF (e : SExpr) : IsOSNF (to_osnf e) := by
+  sorry
+
+/-- Erasing a shift node gives the shifted erasure of the inner expression. -/
+theorem erase_shift (k : Nat) (inner : SExpr) :
+    (shift k inner).erase = inner.erase.shift k 0 := by
+  simp [erase]
+
+/-- `to_osnf` preserves denotation: `(to_osnf e).erase = e.erase`. -/
+theorem to_osnf_erase (e : SExpr) : (to_osnf e).erase = e.erase := by
+  sorry
+
+/-- **Uniqueness of OSNF**: If two expressions denote the same term and both
+    are in OSNF, they are syntactically equal. -/
+theorem osnf_unique (e₁ e₂ : SExpr) (h₁ : IsOSNF e₁) (h₂ : IsOSNF e₂)
+    (heq : e₁.erase = e₂.erase) : e₁ = e₂ := by
+  sorry
+
+/-- **Corollary**: `to_osnf` is idempotent. -/
+theorem to_osnf_idempotent (e : SExpr) : to_osnf (to_osnf e) = to_osnf e := by
+  sorry
+
+/-- **Corollary**: Two expressions are shift-equivalent iff they have the same OSNF. -/
+theorem equiv_iff_osnf_eq (e₁ e₂ : SExpr) :
+    equiv e₁ e₂ ↔ to_osnf e₁ = to_osnf e₂ := by
+  constructor
+  · intro heq
+    -- Both to_osnf's are in OSNF and erase to the same thing
+    have h1 := to_osnf_isOSNF e₁
+    have h2 := to_osnf_isOSNF e₂
+    have he1 := to_osnf_erase e₁
+    have he2 := to_osnf_erase e₂
+    exact osnf_unique _ _ h1 h2 (by rw [he1, he2]; exact heq)
+  · intro heq
+    -- If to_osnf's are equal, their erasures are equal, so original erasures are equal
+    unfold equiv
+    rw [← to_osnf_erase e₁, ← to_osnf_erase e₂, heq]
+
+/-! ### Shift-invariant caching via OSNF
+
+The key insight: if we normalize expressions to OSNF at parse time, then
+shifted variants automatically share the same core. The cache key for a
+`Shift(k, core)` can use `core`'s identity (pointer) directly — no need
+for hash-based canonical forms.
+
+Formally: `to_osnf (shift k e) = shift (k + lb) core` for compound e with
+fvar_lb_val = lb > 0, where the core is computed by `mk_osnf_compound`.
+-/
+
+/-- Shifting an OSNF expression produces an expression whose OSNF shares the same core. -/
+theorem to_osnf_shift_core (k : Nat) (e : SExpr) (hk : k > 0) :
+    to_osnf (shift k e) =
+    match to_osnf e with
+    | bvar i => bvar (i + k)
+    | shift k' core => if k + k' = 0 then core else shift (k + k') core
+    | core => shift k core := by
+  simp only [to_osnf]
+  split
+  · rfl
+  · rfl
+  · rename_i h1 h2
+    simp only [ite_eq_right_iff]
+    intro heq; omega
+
+/-! ### Examples -/
+
+-- Example: app (bvar 3) (bvar 5) has fvar_lb = 3
+-- OSNF = shift 3 (app (bvar 0) (bvar 2))
+private def ex1 : SExpr := app (bvar 3) (bvar 5)
+-- The shifted version: shift 2 (app (bvar 3) (bvar 5)) denotes app (bvar 5) (bvar 7)
+-- OSNF = shift 5 (app (bvar 0) (bvar 2)) — same core!
+private def ex1_shifted : SExpr := shift 2 ex1
+
+#eval ex1.to_osnf          -- shift 3 (app (bvar 0) (bvar 2))
+#eval ex1_shifted.to_osnf  -- shift 5 (app (bvar 0) (bvar 2))
+
+-- Both share the core `app (bvar 0) (bvar 2)` — only the shift amount differs.
+
+-- Example: const is closed, OSNF is itself
+#eval (const 42).to_osnf  -- const 42
+
+-- Example: nested shifts collapse
+private def ex2 : SExpr := shift 3 (shift 2 (bvar 1))
+#eval ex2.to_osnf  -- bvar 6
+
+-- Example: shift 0 is eliminated
+private def ex3 : SExpr := shift 0 (app (bvar 0) (const 1))
+#eval ex3.to_osnf  -- app (bvar 0) (const 1)
+
+-- Example: recursive normalization through app
+private def ex4 : SExpr := app (shift 2 (bvar 1)) (shift 4 (bvar 0))
+#eval ex4.to_osnf  -- shift 3 (app (bvar 0) (bvar 1))
+
+-- Example: lam with shifted body
+private def ex5 : SExpr := lam (shift 1 (bvar 2))
+#eval ex5.to_osnf  -- should normalize the body first
+
+end SExpr
