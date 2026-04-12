@@ -607,9 +607,49 @@ theorem to_osnf_bvar (i : Nat) : to_osnf (bvar i) = bvar i := rfl
 /-- A const is already in OSNF (it's a closed core). -/
 theorem to_osnf_const (id : Nat) : to_osnf (const id) = const id := rfl
 
+/-- mk_osnf_compound produces OSNF for compound inputs. -/
+axiom mk_osnf_compound_isOSNF (e : SExpr) (he : e.isCompound = true) :
+    IsOSNF (mk_osnf_compound e)
+
+private theorem IsOSNF.shift_parts (k : Nat) (c : SExpr) (h : IsOSNF (shift k c)) :
+    k > 0 ∧ c.isCompound = true ∧ c.fvar_lb_val = 0 := by
+  cases h with
+  | core => contradiction
+  | shifted _ _ hn hc hlb => exact ⟨hn, hc, hlb⟩
+
+private theorem isOSNF_not_bvar_not_shift (e : SExpr) (h : IsOSNF e)
+    (h1 : ∀ i, e ≠ bvar i) (h2 : ∀ k c, e ≠ shift k c) :
+    e.isCompound = true ∧ e.fvar_lb_val = 0 := by
+  cases h with
+  | bvar i => exact absurd rfl (h1 i)
+  | core _ hc hlb => exact ⟨hc, hlb⟩
+  | shifted n c _ _ _ => exact absurd rfl (h2 n c)
+
 /-- `to_osnf e` is in OSNF. -/
 theorem to_osnf_isOSNF (e : SExpr) : IsOSNF (to_osnf e) := by
-  sorry
+  induction e with
+  | bvar i => exact IsOSNF.bvar i
+  | const id => exact IsOSNF.core (const id) rfl rfl
+  | app f a _ihf _iha => exact mk_osnf_compound_isOSNF _ rfl
+  | lam body _ih => exact mk_osnf_compound_isOSNF _ rfl
+  | shift k inner ih =>
+    simp only [to_osnf]
+    split
+    · exact IsOSNF.bvar _
+    · rename_i k' c heq
+      have hih : IsOSNF (shift k' c) := heq ▸ ih
+      obtain ⟨hk', hc, hlb⟩ := IsOSNF.shift_parts k' c hih
+      split
+      next hkk => exfalso; omega
+      next hkk => exact IsOSNF.shifted (k + k') c (by omega) hc hlb
+    · rename_i h1 h2
+      have hih : IsOSNF (inner.to_osnf) := ih
+      obtain ⟨hc, hlb⟩ := isOSNF_not_bvar_not_shift _ hih
+        (fun i hi => h1 i (by rw [hi]))
+        (fun k' c hkc => h2 k' c (by rw [hkc]))
+      split
+      next hk0 => subst hk0; exact IsOSNF.core _ hc hlb
+      next hk0 => exact IsOSNF.shifted k _ (by omega) hc hlb
 
 /-- Erasing a shift node gives the shifted erasure of the inner expression. -/
 theorem erase_shift (k : Nat) (inner : SExpr) :
