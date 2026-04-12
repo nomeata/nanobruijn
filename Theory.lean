@@ -123,7 +123,7 @@ theorem decode_shift (k : Nat) (fvs : FVarList) :
   | nil => simp [shift, decode]
   | cons d rest =>
     simp only [shift, decode, List.map_cons, List.map_map, Function.comp_def]
-    congr 1; ext x; omega
+    congr 1; congr 1; ext x; omega
 
 /-- Unbind commutes with shift when the bound variable is NOT free (lb > 0).
     When lb = 0 (bound var is free), they do NOT commute: shifting moves
@@ -322,33 +322,26 @@ def erase : SExpr → Expr
 /-- Two SExprs are shift-equivalent iff they erase to the same Expr. -/
 def equiv (e₁ e₂ : SExpr) : Prop := e₁.erase = e₂.erase
 
-/-! ### fvar_lb: the minimum free variable index -/
+/-! ### Free variable tracking -/
+
+/-- Compute the delta-encoded free variable list for an SExpr.
+    Uses the FVarList operations to handle shifting and binding exactly. -/
+def fvars : SExpr → FVarList
+  | bvar i => [i]
+  | app f a => FVarList.union f.fvars a.fvars
+  | lam body => FVarList.unbind body.fvars
+  | const _ => []
+  | shift k inner => FVarList.shift k inner.fvars
 
 /-- Lower bound on free variable indices (minimum free bvar index).
-    Returns `none` for closed expressions. -/
-def fvar_lb : SExpr → Option Nat
-  | bvar i => some i
-  | app f a =>
-    match f.fvar_lb, a.fvar_lb with
-    | none, r => r
-    | l, none => l
-    | some l, some r => some (min l r)
-  | lam body =>
-    match body.fvar_lb with
-    | none => none
-    | some 0 => none  -- bvar 0 is bound by this lambda
-    | some (n + 1) => some n
-  | const _ => none
-  | shift k inner =>
-    match inner.fvar_lb with
-    | none => none
-    | some lb => some (lb + k)
+    Returns `none` for closed expressions. Derived from the exact `fvars` computation. -/
+def fvar_lb (e : SExpr) : Option Nat := FVarList.lb e.fvars
 
 /-- Convenience: fvar_lb as a Nat, returning 0 for closed expressions. -/
 def fvar_lb_val (e : SExpr) : Nat :=
-  match e.fvar_lb with
-  | none => 0
-  | some n => n
+  match e.fvars with
+  | [] => 0
+  | d :: _ => d
 
 /-! ### Predicates for OSNF classification -/
 
@@ -378,14 +371,23 @@ inductive IsOSNF : SExpr → Prop where
 
 /-! ### adjust_child: subtract amount from free variable indices in a child -/
 
-/-- Adjust a child expression that is already in OSNF by subtracting `amount` from
-    its free variable lower bound. `cutoff` accounts for binders above this child.
-    Precondition: the child's effective fvar_lb >= amount + cutoff. -/
+/-- Adjust a child expression by subtracting `amount` from free variable indices
+    at or above `cutoff`. Recurses into compound expressions (app/lam).
+    Precondition: all free variable indices >= cutoff are also >= cutoff + amount. -/
 def adjust_child (e : SExpr) (amount : Nat) (cutoff : Nat) : SExpr :=
   match e with
   | bvar i => if i ≥ cutoff then bvar (i - amount) else bvar i
-  | shift k inner => shift (k - amount) inner  -- k >= amount guaranteed by precondition
-  | other => other  -- compound with fvar_lb_val=0, or const: no free vars above cutoff
+  | app f a => app (adjust_child f amount cutoff) (adjust_child a amount cutoff)
+  | lam body => lam (adjust_child body amount (cutoff + 1))
+  | const id => const id
+  | shift k inner =>
+    if k ≥ cutoff then
+      -- All effective bvars >= k >= cutoff, just adjust the shift amount
+      let k' := k - amount
+      if k' = 0 then inner else shift k' inner
+    else
+      -- k < cutoff: push adjustment through to inner at adjusted cutoff
+      shift k (adjust_child inner amount (cutoff - k))
 
 /-! ### mk_osnf_compound: normalize a compound expression whose children are in OSNF -/
 
