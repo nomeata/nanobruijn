@@ -407,10 +407,27 @@ Profile hotspots (Init, profiling build):
   view_expr 1.6%, mk_shift_cutoff 1.2%
 - nanoda: mk_app 11.1%, HashMap::insert 12.9%, inst_aux 7.0%
 
-**Mathlib**: nanobruijn OOMs at 16GB (nanoda completes at 16GB in 4:18). Parser creates
-116M DAG entries vs nanoda's ~88M (30% increase from OSNF core sharing expansion). Likely
-compounded by TC DAG bloat from cache misses and repeated whnf computations due to
-TC-generated expressions not being in OSNF (different pointers for same structural expression).
+Mathlib standalone (1 thread, `ulimit -v 10G`, sequential A/B):
+
+| | nanobruijn | nanoda |
+|---|---|---|
+| Wall time | 19:25 (1165s) | 27:50 (1670s) |
+| Max RSS | 9.42 GB | 8.91 GB |
+
+nanobruijn is **30% faster** on Mathlib single-threaded. Memory difference is only 500MB.
+
+With 4 threads, nanobruijn OOMs at 16GB. Root cause: pathological declarations create
+massive TC DAGs (up to 46M entries ≈ 2.9GB). With 4 threads, 2-3 heavy declarations
+overlapping exhausts memory (9.4GB export DAG + 3×2.9GB = 18GB).
+
+**Pathological declaration analysis** — `Algebra.Generators.H1Cotangent.exact_δ_map`:
+- nanoda: 185ms, 664K alloc_expr
+- nanobruijn: 27,536ms (149x), 70.9M alloc_expr (107x), 46M TC DAG entries
+
+Similar 100x blowup on other algebraic geometry declarations (CotangentSpace,
+KaehlerDifferential, etc.). Root cause: TC-generated expressions aren't in OSNF, so
+shifted variants of the same structural expression get different pointers, causing
+cascading cache misses → repeated whnf/infer → more expression creation → more misses.
 
 ## TODO
 
