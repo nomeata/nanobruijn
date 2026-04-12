@@ -432,15 +432,112 @@ def isCore (e : SExpr) : Prop :=
 
 /-- An expression is in Outermost-Shift Normal Form (OSNF) if it is one of:
     1. A bare `bvar n`
-    2. A core (compound with fvar_lb_val = 0)
-    3. `shift n core` where `n > 0` and `core` is a core -/
+    2. A `const id`
+    3. `app f a` with children in OSNF and fvar_lb_val = 0
+    4. `lam body` with body in OSNF and fvar_lb_val = 0
+    5. `shift n core` where `n > 0`, `core` is compound, in OSNF,
+       has fvar_lb_val = 0, and fvars ≠ [] -/
 inductive IsOSNF : SExpr → Prop where
   | bvar (i : Nat) : IsOSNF (bvar i)
-  | core (e : SExpr) (hc : e.isCompound) (hlb : e.fvar_lb_val = 0) :
-      IsOSNF e
+  | const (id : Nat) : IsOSNF (const id)
+  | app (f a : SExpr) (hf : IsOSNF f) (ha : IsOSNF a)
+      (hlb : fvar_lb_val (app f a) = 0) : IsOSNF (app f a)
+  | lam (body : SExpr) (hb : IsOSNF body)
+      (hlb : fvar_lb_val (lam body) = 0) : IsOSNF (lam body)
   | shifted (n : Nat) (core : SExpr) (hn : n > 0)
-      (hc : core.isCompound) (hlb : core.fvar_lb_val = 0) :
+      (hc : IsOSNF core) (hcomp : core.isCompound)
+      (hlb : core.fvar_lb_val = 0)
+      (hfv : core.fvars ≠ []) :
       IsOSNF (shift n core)
+
+end SExpr
+
+/-! ### Expr.HasFreeVar and helper lemmas -/
+
+namespace Expr
+
+/-- An expression has a free variable at index `i` above cutoff `c`. -/
+inductive HasFreeVar : Expr → Nat → Nat → Prop where
+  | bvar (i c : Nat) (h : i ≥ c) : HasFreeVar (bvar i) i c
+  | app_left (f a : Expr) (i c : Nat) (h : HasFreeVar f i c) : HasFreeVar (app f a) i c
+  | app_right (f a : Expr) (i c : Nat) (h : HasFreeVar a i c) : HasFreeVar (app f a) i c
+  | lam (body : Expr) (i c : Nat) (h : HasFreeVar body i (c + 1)) : HasFreeVar (lam body) i c
+
+def AllFreeVarsGe (e : Expr) (bound : Nat) (c : Nat := 0) : Prop :=
+  ∀ i, HasFreeVar e i c → i ≥ bound
+
+private theorem allFreeVarsGe_shift_gen (e : Expr) (k c : Nat) :
+    AllFreeVarsGe (e.shift k c) (c + k) c := by
+  intro i hi
+  induction e generalizing c with
+  | bvar j =>
+    simp only [shift] at hi
+    by_cases hj : j ≥ c
+    · simp only [hj, ite_true] at hi; cases hi with | bvar _ _ hge => omega
+    · simp only [hj, ite_false] at hi; cases hi with | bvar _ _ hge => omega
+  | app f a ihf iha =>
+    simp only [shift] at hi
+    cases hi with
+    | app_left _ _ _ _ hf => exact ihf c hf
+    | app_right _ _ _ _ ha => exact iha c ha
+  | lam body ih =>
+    simp only [shift] at hi
+    cases hi with
+    | lam _ _ _ hb => have := ih (c + 1) hb; omega
+  | const _ => simp only [shift] at hi; cases hi
+
+theorem allFreeVarsGe_shift_zero (e : Expr) (k : Nat) :
+    AllFreeVarsGe (e.shift k 0) k 0 := by
+  have := allFreeVarsGe_shift_gen e k 0; simpa using this
+
+theorem no_freevar_zero_in_shifted (e : Expr) (k : Nat) (hk : k > 0) :
+    ¬ HasFreeVar (e.shift k 0) 0 0 := by
+  intro h; have := allFreeVarsGe_shift_zero e k 0 h; omega
+
+theorem shift_injective (k c : Nat) : ∀ (e₁ e₂ : Expr),
+    e₁.shift k c = e₂.shift k c → e₁ = e₂ := by
+  intro e₁
+  induction e₁ generalizing c with
+  | bvar i =>
+    intro e₂ h
+    cases e₂ with
+    | bvar j =>
+      simp only [shift] at h
+      split at h <;> split at h <;> simp_all [bvar.injEq] <;> omega
+    | app f a => simp only [shift] at h; split at h <;> simp at h
+    | lam body => simp only [shift] at h; split at h <;> simp at h
+    | const n => simp only [shift] at h; split at h <;> simp at h
+  | app f₁ a₁ ihf iha =>
+    intro e₂ h
+    cases e₂ with
+    | bvar j => simp only [shift] at h; split at h <;> simp at h
+    | app f₂ a₂ =>
+      simp only [shift, app.injEq] at h
+      have h1 := ihf c f₂ h.1
+      have h2 := iha c a₂ h.2
+      subst h1; subst h2; rfl
+    | lam body => simp only [shift] at h; simp at h
+    | const n => simp only [shift] at h; simp at h
+  | lam body₁ ih =>
+    intro e₂ h
+    cases e₂ with
+    | bvar j => simp only [shift] at h; split at h <;> simp at h
+    | app f a => simp only [shift] at h; simp at h
+    | lam body₂ =>
+      simp only [shift, lam.injEq] at h
+      exact congrArg lam (ih (c + 1) body₂ h)
+    | const n => simp only [shift] at h; simp at h
+  | const n₁ =>
+    intro e₂ h
+    cases e₂ with
+    | bvar j => simp only [shift] at h; split at h <;> simp at h
+    | app f a => simp only [shift] at h; simp at h
+    | lam body => simp only [shift] at h; simp at h
+    | const n₂ => simp only [shift, const.injEq] at h; exact congrArg const h
+
+end Expr
+
+namespace SExpr
 
 /-! ### adjust_child: subtract amount from free variable indices in a child -/
 
@@ -493,7 +590,10 @@ def to_osnf : SExpr → SExpr
     | bvar i => bvar (i + k)
     | shift k' core => if k + k' = 0 then core else shift (k + k') core
     | e =>  -- compound (already a core from mk_osnf_compound)
-      if k = 0 then e else shift k e
+      if k = 0 then e
+      else match e.fvars with
+        | [] => e
+        | _ => shift k e
 
 /-! ### Helpers for to_osnf_erase -/
 
@@ -607,49 +707,68 @@ theorem to_osnf_bvar (i : Nat) : to_osnf (bvar i) = bvar i := rfl
 /-- A const is already in OSNF (it's a closed core). -/
 theorem to_osnf_const (id : Nat) : to_osnf (const id) = const id := rfl
 
-/-- mk_osnf_compound produces OSNF for compound inputs. -/
-axiom mk_osnf_compound_isOSNF (e : SExpr) (he : e.isCompound = true) :
-    IsOSNF (mk_osnf_compound e)
+/-- mk_osnf_compound produces OSNF for app inputs when children are OSNF. -/
+axiom mk_osnf_compound_app_isOSNF (f a : SExpr) (hf : IsOSNF f) (ha : IsOSNF a) :
+    IsOSNF (mk_osnf_compound (app f a))
+
+/-- mk_osnf_compound produces OSNF for lam inputs when body is OSNF. -/
+axiom mk_osnf_compound_lam_isOSNF (body : SExpr) (hb : IsOSNF body) :
+    IsOSNF (mk_osnf_compound (lam body))
 
 private theorem IsOSNF.shift_parts (k : Nat) (c : SExpr) (h : IsOSNF (shift k c)) :
-    k > 0 ∧ c.isCompound = true ∧ c.fvar_lb_val = 0 := by
+    k > 0 ∧ IsOSNF c ∧ c.isCompound = true ∧ c.fvar_lb_val = 0 ∧ c.fvars ≠ [] := by
   cases h with
-  | core => contradiction
-  | shifted _ _ hn hc hlb => exact ⟨hn, hc, hlb⟩
+  | shifted _ _ hn hc hcomp hlb hfv => exact ⟨hn, hc, hcomp, hlb, hfv⟩
 
 private theorem isOSNF_not_bvar_not_shift (e : SExpr) (h : IsOSNF e)
     (h1 : ∀ i, e ≠ bvar i) (h2 : ∀ k c, e ≠ shift k c) :
     e.isCompound = true ∧ e.fvar_lb_val = 0 := by
   cases h with
   | bvar i => exact absurd rfl (h1 i)
-  | core _ hc hlb => exact ⟨hc, hlb⟩
-  | shifted n c _ _ _ => exact absurd rfl (h2 n c)
+  | const id => exact ⟨rfl, rfl⟩
+  | app _ _ _ _ hlb => exact ⟨rfl, hlb⟩
+  | lam _ _ hlb => exact ⟨rfl, hlb⟩
+  | shifted n c _ _ _ _ _ => exact absurd rfl (h2 n c)
+
+/-- If e.fvars = [], then shifting the erasure has no effect.  -/
+axiom fvars_empty_shift_erase (e : SExpr) (he : IsOSNF e) (hfv : e.fvars = []) (k : Nat) :
+    e.erase.shift k 0 = e.erase
 
 /-- `to_osnf e` is in OSNF. -/
 theorem to_osnf_isOSNF (e : SExpr) : IsOSNF (to_osnf e) := by
   induction e with
   | bvar i => exact IsOSNF.bvar i
-  | const id => exact IsOSNF.core (const id) rfl rfl
-  | app f a _ihf _iha => exact mk_osnf_compound_isOSNF _ rfl
-  | lam body _ih => exact mk_osnf_compound_isOSNF _ rfl
+  | const id => exact IsOSNF.const id
+  | app f a ihf iha => exact mk_osnf_compound_app_isOSNF _ _ ihf iha
+  | lam body ih => exact mk_osnf_compound_lam_isOSNF _ ih
   | shift k inner ih =>
     simp only [to_osnf]
     split
     · exact IsOSNF.bvar _
     · rename_i k' c heq
       have hih : IsOSNF (shift k' c) := heq ▸ ih
-      obtain ⟨hk', hc, hlb⟩ := IsOSNF.shift_parts k' c hih
+      obtain ⟨hk', hc_osnf, hc, hlb, hfv⟩ := IsOSNF.shift_parts k' c hih
       split
       next hkk => exfalso; omega
-      next hkk => exact IsOSNF.shifted (k + k') c (by omega) hc hlb
+      next hkk => exact IsOSNF.shifted (k + k') c (by omega) hc_osnf hc hlb hfv
     · rename_i h1 h2
       have hih : IsOSNF (inner.to_osnf) := ih
       obtain ⟨hc, hlb⟩ := isOSNF_not_bvar_not_shift _ hih
         (fun i hi => h1 i (by rw [hi]))
         (fun k' c hkc => h2 k' c (by rw [hkc]))
       split
-      next hk0 => subst hk0; exact IsOSNF.core _ hc hlb
-      next hk0 => exact IsOSNF.shifted k _ (by omega) hc hlb
+      next hk0 => subst hk0; exact hih
+      next hk0 =>
+        have : ∀ (fvs : FVarList),
+            inner.to_osnf.fvars = fvs →
+            IsOSNF (match fvs with | [] => inner.to_osnf | _ => shift k (inner.to_osnf)) := by
+          intro fvs hfvs
+          cases fvs with
+          | nil => exact hih
+          | cons hd tl =>
+            have hfv : (inner.to_osnf).fvars ≠ [] := by rw [hfvs]; exact List.cons_ne_nil _ _
+            exact IsOSNF.shifted k _ (by omega) hih hc hlb hfv
+        exact this _ rfl
 
 /-- Erasing a shift node gives the shifted erasure of the inner expression. -/
 theorem erase_shift (k : Nat) (inner : SExpr) :
@@ -672,7 +791,10 @@ theorem to_osnf_erase (e : SExpr) : (to_osnf e).erase = e.erase := by
     show (match inner.to_osnf with
       | bvar i => bvar (i + k)
       | shift k' core => if k + k' = 0 then core else shift (k + k') core
-      | e => if k = 0 then e else shift k e).erase = inner.erase.shift k 0
+      | e => if k = 0 then e
+             else match e.fvars with
+               | [] => e
+               | _ => shift k e).erase = inner.erase.shift k 0
     split
     · -- inner.to_osnf = bvar i
       rename_i i heq
@@ -697,18 +819,187 @@ theorem to_osnf_erase (e : SExpr) : (to_osnf e).erase = e.erase := by
       next hk0 =>
         subst hk0; rw [ih, Expr.shift_zero]
       next hk0 =>
-        rw [erase_shift', ih]
+        have : ∀ (fvs : FVarList),
+            inner.to_osnf.fvars = fvs →
+            (match fvs with | [] => inner.to_osnf | _ => shift k (inner.to_osnf)).erase
+              = inner.erase.shift k 0 := by
+          intro fvs hfvs
+          cases fvs with
+          | nil =>
+            -- e.fvars = [], so shift doesn't change the erasure
+            have hih : IsOSNF (inner.to_osnf) := to_osnf_isOSNF inner
+            rw [← ih]
+            exact (fvars_empty_shift_erase (inner.to_osnf) hih hfvs k).symm
+          | cons hd tl =>
+            rw [erase_shift', ih]
+        exact this _ rfl
+
+/-! ### Axioms for osnf_unique -/
+
+axiom fvars_empty_iff_no_free_vars (e : SExpr) (he : IsOSNF e) :
+    e.fvars = [] ↔ ∀ i, ¬ Expr.HasFreeVar e.erase i 0
+
+axiom fvar_lb_zero_has_freevar_zero (e : SExpr) (he : IsOSNF e)
+    (hlb : fvar_lb_val e = 0) (hne : e.fvars ≠ []) :
+    Expr.HasFreeVar e.erase 0 0
+
+/-! ### Helper lemmas for osnf_unique -/
+
+private theorem shifted_has_free_var_gen (core : Expr) (n i c : Nat)
+    (h : Expr.HasFreeVar core i c) :
+    Expr.HasFreeVar (core.shift n c) (i + n) c := by
+  induction h with
+  | bvar j d hge =>
+    simp only [Expr.shift, show j ≥ d from hge, ite_true]
+    exact Expr.HasFreeVar.bvar (j + n) d (by omega)
+  | app_left f a j d hf ih =>
+    exact Expr.HasFreeVar.app_left _ _ _ _ ih
+  | app_right f a j d ha ih =>
+    exact Expr.HasFreeVar.app_right _ _ _ _ ih
+  | lam body j d hb ih =>
+    exact Expr.HasFreeVar.lam _ _ _ ih
+
+private theorem shifted_has_free_var (core : Expr) (n i : Nat)
+    (h : Expr.HasFreeVar core i 0) :
+    Expr.HasFreeVar (core.shift n 0) (i + n) 0 :=
+  shifted_has_free_var_gen core n i 0 h
+
+private theorem erase_compound_shift_not_bvar (core : SExpr) (n : Nat)
+    (hcomp : core.isCompound) (i : Nat) :
+    core.erase.shift n 0 ≠ Expr.bvar i := by
+  match core with
+  | .app f a => simp [erase, Expr.shift]
+  | .lam body => simp [erase, Expr.shift]
+  | .const id => simp [erase, Expr.shift]
+
+private theorem compound_ne_shifted_erase
+    (e₁ : SExpr) (n : Nat) (core : SExpr)
+    (h₁ : IsOSNF e₁) (h_core : IsOSNF core)
+    (hlb₁ : fvar_lb_val e₁ = 0)
+    (hlb_core : fvar_lb_val core = 0)
+    (hn : n > 0)
+    (hfv_core : core.fvars ≠ [])
+    (heq : e₁.erase = (shift n core).erase) : False := by
+  simp only [erase] at heq
+  have hfv0 := fvar_lb_zero_has_freevar_zero core h_core hlb_core hfv_core
+  have hfvn := shifted_has_free_var core.erase n 0 hfv0
+  simp only [Nat.zero_add] at hfvn
+  rw [← heq] at hfvn
+  have hfv₁_ne : e₁.fvars ≠ [] := by
+    intro habs
+    exact (fvars_empty_iff_no_free_vars e₁ h₁).mp habs n hfvn
+  have hfv₁_0 := fvar_lb_zero_has_freevar_zero e₁ h₁ hlb₁ hfv₁_ne
+  rw [heq] at hfv₁_0
+  exact Expr.no_freevar_zero_in_shifted core.erase n hn hfv₁_0
+
+private theorem shifted_erase_eq_implies
+    (core₁ core₂ : SExpr) (n₁ n₂ : Nat)
+    (h_core₁ : IsOSNF core₁) (h_core₂ : IsOSNF core₂)
+    (hlb₁ : fvar_lb_val core₁ = 0) (hlb₂ : fvar_lb_val core₂ = 0)
+    (hfv₁ : core₁.fvars ≠ []) (hfv₂ : core₂.fvars ≠ [])
+    (heq : core₁.erase.shift n₁ 0 = core₂.erase.shift n₂ 0) :
+    n₁ = n₂ ∧ core₁.erase = core₂.erase := by
+  have hn : n₁ = n₂ := by
+    have hfv0_1 := fvar_lb_zero_has_freevar_zero core₁ h_core₁ hlb₁ hfv₁
+    have hfvn₁ := shifted_has_free_var core₁.erase n₁ 0 hfv0_1
+    simp only [Nat.zero_add] at hfvn₁
+    have hfv0_2 := fvar_lb_zero_has_freevar_zero core₂ h_core₂ hlb₂ hfv₂
+    have hfvn₂ := shifted_has_free_var core₂.erase n₂ 0 hfv0_2
+    simp only [Nat.zero_add] at hfvn₂
+    have hge₁ := Expr.allFreeVarsGe_shift_zero core₁.erase n₁
+    have hge₂ := Expr.allFreeVarsGe_shift_zero core₂.erase n₂
+    rw [heq] at hfvn₁; rw [← heq] at hfvn₂
+    have h1 : n₁ ≥ n₂ := hge₂ n₁ hfvn₁
+    have h2 : n₂ ≥ n₁ := hge₁ n₂ hfvn₂
+    omega
+  subst hn
+  exact ⟨rfl, Expr.shift_injective n₁ 0 core₁.erase core₂.erase heq⟩
+
+/-! ### OSNF uniqueness -/
 
 /-- **Uniqueness of OSNF**: If two expressions denote the same term and both
     are in OSNF, they are syntactically equal. -/
--- NOTE: This theorem is false as stated. IsOSNF allows shift nodes inside compound
--- cores. Counterexample: `app (shift 0 (bvar 0)) (const 1)` is IsOSNF.core (since
--- isCompound and fvar_lb_val = 0), and erases to `Expr.app (Expr.bvar 0) (Expr.const 1)`,
--- same as `app (bvar 0) (const 1)` which is also IsOSNF.core.
--- Fix: strengthen IsOSNF to require children are also in OSNF (deep normalization).
 theorem osnf_unique (e₁ e₂ : SExpr) (h₁ : IsOSNF e₁) (h₂ : IsOSNF e₂)
     (heq : e₁.erase = e₂.erase) : e₁ = e₂ := by
-  sorry
+  induction h₁ generalizing e₂ with
+  | bvar i =>
+    cases h₂ with
+    | bvar j =>
+      simp only [erase, Expr.bvar.injEq] at heq
+      exact congrArg SExpr.bvar heq
+    | const id => simp [erase] at heq
+    | app f a hf ha hlb => simp [erase] at heq
+    | lam body hb hlb => simp [erase] at heq
+    | shifted n core hn hc hcomp hlb hfv =>
+      exfalso; simp only [erase] at heq
+      exact erase_compound_shift_not_bvar core n hcomp i heq.symm
+  | const id =>
+    cases h₂ with
+    | bvar j => simp [erase] at heq
+    | const id₂ =>
+      simp only [erase, Expr.const.injEq] at heq
+      exact congrArg SExpr.const heq
+    | app f a hf ha hlb => simp [erase] at heq
+    | lam body hb hlb => simp [erase] at heq
+    | shifted n core hn hc hcomp hlb hfv =>
+      exfalso; simp only [erase] at heq
+      match core, hcomp, hfv with
+      | .app f a, _, _ => simp [erase, Expr.shift] at heq
+      | .lam body, _, _ => simp [erase, Expr.shift] at heq
+      | .const cid, _, hfv => simp [fvars] at hfv
+  | app f₁ a₁ hf₁ ha₁ hlb₁ ihf iha =>
+    cases h₂ with
+    | bvar j => simp [erase] at heq
+    | const id => simp [erase] at heq
+    | app f₂ a₂ hf₂ ha₂ hlb₂ =>
+      simp only [erase, Expr.app.injEq] at heq
+      have := ihf f₂ hf₂ heq.1
+      have := iha a₂ ha₂ heq.2
+      subst ‹f₁ = f₂›; subst ‹a₁ = a₂›; rfl
+    | lam body hb hlb => simp [erase] at heq
+    | shifted n core hn hc hcomp hlb hfv =>
+      exfalso
+      exact compound_ne_shifted_erase (app f₁ a₁) n core
+        (IsOSNF.app f₁ a₁ hf₁ ha₁ hlb₁) hc hlb₁ hlb hn hfv heq
+  | lam body₁ hb₁ hlb₁ ih =>
+    cases h₂ with
+    | bvar j => simp [erase] at heq
+    | const id => simp [erase] at heq
+    | app f a hf ha hlb => simp [erase] at heq
+    | lam body₂ hb₂ hlb₂ =>
+      simp only [erase, Expr.lam.injEq] at heq
+      have := ih body₂ hb₂ heq
+      subst this; rfl
+    | shifted n core hn hc hcomp hlb hfv =>
+      exfalso
+      exact compound_ne_shifted_erase (lam body₁) n core
+        (IsOSNF.lam body₁ hb₁ hlb₁) hc hlb₁ hlb hn hfv heq
+  | shifted n₁ core₁ hn₁ hc₁ hcomp₁ hlb₁ hfv₁ ih_core =>
+    cases h₂ with
+    | bvar j =>
+      exfalso; simp only [erase] at heq
+      exact erase_compound_shift_not_bvar core₁ n₁ hcomp₁ j heq
+    | const id =>
+      exfalso; simp only [erase] at heq
+      match core₁, hcomp₁, hfv₁ with
+      | .app f a, _, _ => simp [erase, Expr.shift] at heq
+      | .lam body, _, _ => simp [erase, Expr.shift] at heq
+      | .const cid, _, hfv => simp [fvars] at hfv
+    | app f₂ a₂ hf₂ ha₂ hlb₂ =>
+      exfalso
+      exact compound_ne_shifted_erase (app f₂ a₂) n₁ core₁
+        (IsOSNF.app f₂ a₂ hf₂ ha₂ hlb₂) hc₁ hlb₂ hlb₁ hn₁ hfv₁ heq.symm
+    | lam body₂ hb₂ hlb₂ =>
+      exfalso
+      exact compound_ne_shifted_erase (lam body₂) n₁ core₁
+        (IsOSNF.lam body₂ hb₂ hlb₂) hc₁ hlb₂ hlb₁ hn₁ hfv₁ heq.symm
+    | shifted n₂ core₂ hn₂ hc₂ hcomp₂ hlb₂ hfv₂ =>
+      simp only [erase] at heq
+      have ⟨hneq, hceq⟩ := shifted_erase_eq_implies
+        core₁ core₂ n₁ n₂ hc₁ hc₂ hlb₁ hlb₂ hfv₁ hfv₂ heq
+      subst hneq
+      have := ih_core core₂ hc₂ hceq
+      subst this; rfl
 
 /-- **Corollary**: `to_osnf` is idempotent. -/
 theorem to_osnf_idempotent (e : SExpr) : to_osnf (to_osnf e) = to_osnf e :=
@@ -747,14 +1038,15 @@ theorem to_osnf_shift_core (k : Nat) (e : SExpr) (hk : k > 0) :
     match to_osnf e with
     | bvar i => bvar (i + k)
     | shift k' core => if k + k' = 0 then core else shift (k + k') core
-    | core => shift k core := by
+    | core => match core.fvars with
+              | [] => core
+              | _ => shift k core := by
   simp only [to_osnf]
   split
   · rfl
   · rfl
   · rename_i h1 h2
-    simp only [ite_eq_right_iff]
-    intro heq; omega
+    rw [if_neg (show ¬(k = 0) by omega)]
 
 /-! ### Examples -/
 
