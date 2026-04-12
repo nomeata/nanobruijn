@@ -1,6 +1,5 @@
 //! Implementation of Lean expressions
 use crate::util::{AppArgs, BigUintPtr, ExprPtr, FxHashMap, LevelPtr, LevelsPtr, NamePtr, StringPtr, TcCtx};
-use smallvec::SmallVec;
 use num_bigint::BigUint;
 use num_traits::identities::Zero;
 use Expr::*;
@@ -23,23 +22,17 @@ pub enum Expr<'a> {
     /// A string literal with a pointer to a utf-8 string.
     StringLit {
         hash: u64,
-        struct_hash: u64,
-        fvar_bloom: u32,
         fvar_lb: u16,
         ptr: StringPtr<'a>,
     },
     /// A nat literal, holds a pointer to an arbitrary precision bignum.
     NatLit {
         hash: u64,
-        struct_hash: u64,
-        fvar_bloom: u32,
         fvar_lb: u16,
         ptr: BigUintPtr<'a>,
     },
     Proj {
         hash: u64,
-        struct_hash: u64,
-        fvar_bloom: u32,
         fvar_lb: u16,
         /// The name of the structure being projected. E.g. `Prod` if this is
         /// projection 0 of `Prod.mk ..`
@@ -55,30 +48,22 @@ pub enum Expr<'a> {
     /// A bound variable represented by a deBruijn index.
     Var {
         hash: u64,
-        struct_hash: u64,
-        fvar_bloom: u32,
         fvar_lb: u16,
         dbj_idx: u16,
     },
     Sort {
         hash: u64,
-        struct_hash: u64,
-        fvar_bloom: u32,
         fvar_lb: u16,
         level: LevelPtr<'a>,
     },
     Const {
         hash: u64,
-        struct_hash: u64,
-        fvar_bloom: u32,
         fvar_lb: u16,
         name: NamePtr<'a>,
         levels: LevelsPtr<'a>,
     },
     App {
         hash: u64,
-        struct_hash: u64,
-        fvar_bloom: u32,
         fvar_lb: u16,
         fun: ExprPtr<'a>,
         arg: ExprPtr<'a>,
@@ -87,8 +72,6 @@ pub enum Expr<'a> {
     },
     Pi {
         hash: u64,
-        struct_hash: u64,
-        fvar_bloom: u32,
         fvar_lb: u16,
         binder_name: NamePtr<'a>,
         binder_style: BinderStyle,
@@ -99,8 +82,6 @@ pub enum Expr<'a> {
     },
     Lambda {
         hash: u64,
-        struct_hash: u64,
-        fvar_bloom: u32,
         fvar_lb: u16,
         binder_name: NamePtr<'a>,
         binder_style: BinderStyle,
@@ -111,8 +92,6 @@ pub enum Expr<'a> {
     },
     Let {
         hash: u64,
-        struct_hash: u64,
-        fvar_bloom: u32,
         fvar_lb: u16,
         binder_name: NamePtr<'a>,
         binder_type: ExprPtr<'a>,
@@ -125,8 +104,6 @@ pub enum Expr<'a> {
     /// A free variable with binder information and a unique identifier.
     Local {
         hash: u64,
-        struct_hash: u64,
-        fvar_bloom: u32,
         fvar_lb: u16,
         binder_name: NamePtr<'a>,
         binder_style: BinderStyle,
@@ -140,8 +117,6 @@ pub enum Expr<'a> {
     /// Elided when inner has no free bvars above cutoff.
     Shift {
         hash: u64,
-        struct_hash: u64,
-        fvar_bloom: u32,
         fvar_lb: u16,
         inner: ExprPtr<'a>,
         amount: i16,
@@ -175,40 +150,6 @@ impl<'a> Expr<'a> {
             | NatLit { hash, .. }
             | Proj { hash, .. }
             | Shift { hash, .. } => *hash,
-        }
-    }
-
-    pub(crate) fn get_struct_hash(&self) -> u64 {
-        match self {
-            Var { struct_hash, .. }
-            | Sort { struct_hash, .. }
-            | Const { struct_hash, .. }
-            | App { struct_hash, .. }
-            | Pi { struct_hash, .. }
-            | Lambda { struct_hash, .. }
-            | Let { struct_hash, .. }
-            | Local { struct_hash, .. }
-            | StringLit { struct_hash, .. }
-            | NatLit { struct_hash, .. }
-            | Proj { struct_hash, .. }
-            | Shift { struct_hash, .. } => *struct_hash,
-        }
-    }
-
-    pub(crate) fn get_fvar_bloom(&self) -> u32 {
-        match self {
-            Var { fvar_bloom, .. }
-            | Sort { fvar_bloom, .. }
-            | Const { fvar_bloom, .. }
-            | App { fvar_bloom, .. }
-            | Pi { fvar_bloom, .. }
-            | Lambda { fvar_bloom, .. }
-            | Let { fvar_bloom, .. }
-            | Local { fvar_bloom, .. }
-            | StringLit { fvar_bloom, .. }
-            | NatLit { fvar_bloom, .. }
-            | Proj { fvar_bloom, .. }
-            | Shift { fvar_bloom, .. } => *fvar_bloom,
         }
     }
 
@@ -1204,358 +1145,10 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
 
     pub(crate) fn has_fvars(&self, e: ExprPtr<'t>) -> bool { self.read_expr(e).has_fvars() }
 
-    pub(crate) fn struct_hash(&self, e: ExprPtr<'t>) -> u64 { self.read_expr(e).get_struct_hash() }
-
     pub(crate) fn fvar_lb(&self, e: ExprPtr<'t>) -> u16 {
         self.read_expr(e).get_fvar_lb()
     }
 
-    /// Check if `b` equals `shift(a, delta)` without allocating.
-    /// Used to verify shift-invariant cache hits.
-    pub(crate) fn shift_eq(&mut self, a: ExprPtr<'t>, b: ExprPtr<'t>, delta: i16) -> bool {
-        self.shift_eq_aux(a, b, delta, 0)
-    }
-
-    /// Two-layer pending shift: for Var(i), compute:
-    ///   r = if amt1 > 0 && i >= sc1 { i + amt1 } else { i }   (inner shift)
-    ///   eff = if amt2 > 0 && r >= sc2 { r + amt2 } else { r }  (outer shift)
-    /// This represents shift(shift(e, amt1, sc1), amt2, sc2) without allocation.
-    #[inline]
-    fn bishift_apply(amt1: i16, sc1: u16, amt2: i16, sc2: u16, i: u16) -> u16 {
-        let r = if amt1 != 0 && i >= sc1 { (i as i16 + amt1) as u16 } else { i };
-        if amt2 != 0 && r >= sc2 { (r as i16 + amt2) as u16 } else { r }
-    }
-
-    /// Try to absorb a Shift(_, new_amt, new_sc) as the new innermost layer
-    /// into an existing BiShift (amt1, sc1, amt2, sc2).
-    /// Returns Some((new_amt1, new_sc1, new_amt2, new_sc2)) for the composed BiShift, or None.
-    #[inline]
-    fn bishift_absorb(amt1: i16, sc1: u16, amt2: i16, sc2: u16,
-                      new_amt: i16, new_sc: u16) -> Option<(i16, u16, i16, u16)> {
-        if new_amt == 0 { return Some((amt1, sc1, amt2, sc2)); }
-        if amt1 == 0 {
-            // Inner layer is free; put the new shift there
-            return Some((new_amt, new_sc, amt2, sc2));
-        }
-        // Compose: new shift (new_amt, new_sc) applied first, then (amt1, sc1).
-        // For var i: r = if i >= new_sc { i + new_amt } else { i }
-        //            eff = if r >= sc1 { r + amt1 } else { r }
-        if new_sc == sc1 {
-            // Same cutoff: add amounts
-            return Some((amt1 + new_amt, sc1, amt2, sc2));
-        }
-        if new_sc < sc1 && new_amt >= (sc1 - new_sc) as i16 {
-            // Inner shift lifts everything >= new_sc past sc1: compose additively
-            return Some((amt1 + new_amt, new_sc, amt2, sc2));
-        }
-        if new_sc > sc1 && amt2 == 0 {
-            // new shift only affects vars >= new_sc; existing layer 1 affects >= sc1.
-            // For i < sc1: eff = i
-            // For sc1 <= i < new_sc: eff = i + amt1
-            // For i >= new_sc: eff = i + new_amt + amt1
-            // Represent as: layer 1 = (amt1, sc1), layer 2 = (new_amt, (new_sc as i16 + amt1) as u16)
-            return Some((amt1, sc1, new_amt, (new_sc as i16 + amt1) as u16));
-        }
-        None
-    }
-
-    /// Semantic equality: checks if `a` and `b` are equal modulo internal Shift wrappers.
-    /// Unlike pointer equality (`a == b`), this traverses the structure to handle
-    /// expressions built by `push_shift` or `mk_shift` that are semantically
-    /// identical but have different ExprPtrs.
-    pub(crate) fn sem_eq(&mut self, a: ExprPtr<'t>, b: ExprPtr<'t>) -> bool {
-        // Fast path: pointer equality (most common case)
-        if a == b { return true; }
-        // Fast rejection: if canonical hashes differ, expressions can't be sem_eq
-        if self.canonical_hash(a) != self.canonical_hash(b) { return false; }
-        // Cache lookup: ordered pair for symmetry (order by idx + dag_marker)
-        let a_key = a.get_hash();
-        let b_key = b.get_hash();
-        let key = if a_key <= b_key { (a, b) } else { (b, a) };
-        if self.expr_cache.sem_eq_cache.contains(&key) { self.trace.sem_eq_cache_hits += 1; return true; }
-        let result = self.shift_eq_aux(a, b, 0, 0);
-        if result {
-            self.expr_cache.sem_eq_cache.insert(key);
-        }
-        result
-    }
-
-    fn shift_eq_aux(&mut self, a: ExprPtr<'t>, b: ExprPtr<'t>, delta: i16, cutoff: u16) -> bool {
-        use crate::expr::Expr::*;
-        self.trace.shift_eq_aux_calls += 1;
-        // Fast path: pointer equality. Valid when delta=0 (no shift needed)
-        // or when a has no free vars above cutoff (shift is a no-op on a).
-        if a == b {
-            if delta == 0 { self.trace.shift_eq_ptr_eq_hits += 1; return true; }
-            if self.num_loose_bvars(a) <= cutoff { self.trace.shift_eq_ptr_eq_hits += 1; return true; }
-        }
-        // Direct-mapped cache lookup: avoids re-comparing same (a,b,delta,cutoff) pairs
-        // that arise from DAG sharing (same sub-expression referenced by multiple parents).
-        let se_tag = {
-            let ak = a.get_hash();
-            let bk = b.get_hash();
-            let dc = (delta as u16 as u64) << 16 | cutoff as u64;
-            ak.wrapping_mul(0x9e3779b97f4a7c15).wrapping_add(bk).wrapping_mul(0x517cc1b727220a95).wrapping_add(dc)
-        };
-        let se_idx = (se_tag as usize) & (crate::util::SHIFT_EQ_CACHE_SIZE - 1);
-        if let Some(cached_result) = self.reusable.shift_eq_cache.get(crate::util::SHIFT_EQ_CACHE_SIZE, se_tag, se_idx) {
-            return cached_result;
-        }
-        let result = self.shift_eq_aux_inner(a, b, delta, cutoff);
-        self.reusable.shift_eq_cache.insert(crate::util::SHIFT_EQ_CACHE_SIZE, se_tag, se_idx, result);
-        result
-    }
-
-    fn shift_eq_aux_inner(&mut self, a: ExprPtr<'t>, b: ExprPtr<'t>, delta: i16, cutoff: u16) -> bool {
-        use crate::expr::Expr::*;
-        // Strip Shift wrappers before structural comparison.
-        // This must come before the nlbv early-outs since Shift nodes change
-        // the effective delta.
-        match (self.read_expr(a), self.read_expr(b)) {
-            // a-side Shift: absorb amount into delta.
-            // Convention: shift_eq_aux(a, b, delta, cutoff) checks b = shift(a, delta, cutoff).
-            // a = Shift(inner, amount, cutoff) = shift(inner, amount, cutoff).
-            // b = shift(a, delta) = shift(shift(inner, amount), delta) = shift(inner, amount + delta).
-            // So: shift_eq_aux(inner, b, delta + amount, cutoff).
-            (Shift { inner, amount, cutoff: sc, .. }, _) if sc == cutoff =>
-                return self.shift_eq_aux(inner, b, delta + amount, cutoff),
-            // a-side Shift with mismatched cutoff: if all vars of inner are above both cutoffs,
-            // the shift only affects free vars and is equivalent to Shift(inner, amount, cutoff)
-            (Shift { inner, amount, cutoff: sc, .. }, _) if sc != cutoff
-                && self.read_expr(inner).get_fvar_lb() >= cutoff.max(sc) =>
-                return self.shift_eq_aux(inner, b, delta + amount, cutoff),
-            // a-side Shift with mismatched cutoff, general case: use pending-shift comparison
-            (Shift { inner, amount, cutoff: sc, .. }, _) if sc != cutoff =>
-                return self.shift_eq_pending(
-                    inner, b,
-                    amount, sc, delta, cutoff,  // a-side: inner shift (amount, sc), outer (delta, cutoff)
-                    0, 0, 0, 0,                 // b-side: no pending shifts
-                ),
-            // b-side Shift: b = Shift(inner, amount, cutoff) = shift(inner, amount).
-            // b = shift(a, delta) → shift(inner, amount) = shift(a, delta) → inner = shift(a, delta - amount).
-            // shift_eq_aux(a, inner, delta - amount, cutoff).
-            (_, Shift { inner, amount, cutoff: sc, .. }) if sc == cutoff => {
-                return if amount <= delta {
-                    self.shift_eq_aux(a, inner, delta - amount, cutoff)
-                } else {
-                    // Swap: inner = shift(a, delta - amount) ⟺ a = shift(inner, amount - delta).
-                    self.shift_eq_aux(inner, a, amount - delta, cutoff)
-                };
-            }
-            // b-side Shift with mismatched cutoff: same optimization (check inner's fvar_lb)
-            (_, Shift { inner, amount, cutoff: sc, .. }) if sc != cutoff
-                && self.read_expr(inner).get_fvar_lb() >= cutoff.max(sc) => {
-                return if amount <= delta {
-                    self.shift_eq_aux(a, inner, delta - amount, cutoff)
-                } else {
-                    self.shift_eq_aux(inner, a, amount - delta, cutoff)
-                };
-            }
-            // b-side Shift with mismatched cutoff, general case
-            (_, Shift { inner, amount, cutoff: sc, .. }) if sc != cutoff =>
-                return self.shift_eq_pending(
-                    a, inner,
-                    0, 0, delta, cutoff,        // a-side: only comparison shift
-                    amount, sc, 0, 0,           // b-side: inner shift (amount, sc)
-                ),
-            _ => {}
-        }
-        // After stripping Shifts: if a has no free vars above cutoff,
-        // shift(a, delta) == a, so we need a == b semantically (delta=0).
-        if self.num_loose_bvars(a) <= cutoff {
-            if self.num_loose_bvars(b) <= cutoff {
-                // Both closed at cutoff. With Shifts already stripped, check structure.
-                return if delta == 0 { self.shift_eq_struct(a, b, 0, cutoff) } else { a == b };
-            }
-            // a is closed but b isn't (after stripping Shifts) — can't be equal
-            return false;
-        }
-        if self.num_loose_bvars(b) <= cutoff {
-            // b has no free vars above cutoff, but a does — can't be equal
-            return false;
-        }
-        // Structural comparison (no Shift nodes on either side at this point)
-        self.shift_eq_struct(a, b, delta, cutoff)
-    }
-
-    /// General shift-eq with per-side two-layer pending shifts.
-    /// Checks: shift(shift(a, a1, as1), a2, as2) == shift(shift(b, b1, bs1), b2, bs2)
-    /// This handles mismatched Shift cutoffs that shift_eq_aux can't absorb.
-    fn shift_eq_pending(&mut self, a: ExprPtr<'t>, b: ExprPtr<'t>,
-                        a1: i16, as1: u16, a2: i16, as2: u16,
-                        b1: i16, bs1: u16, b2: i16, bs2: u16) -> bool {
-        use crate::expr::Expr::*;
-        self.trace.shift_eq_pending_calls += 1;
-        // Fast path: pointer equality with identical pending shifts
-        if a == b && a1 == b1 && as1 == bs1 && a2 == b2 && as2 == bs2 {
-            return true;
-        }
-        // Pointer equality when both shifts are identity and expression is closed
-        if a == b && a1 == 0 && a2 == 0 && b1 == 0 && b2 == 0 {
-            return true;
-        }
-
-        // Direct-mapped cache: hash all 10 parameters (lazily allocated)
-        let sep_tag = {
-            let ak = a.get_hash();
-            let bk = b.get_hash();
-            let shifts_a = (a1 as u64) | ((as1 as u64) << 16) | ((a2 as u64) << 32) | ((as2 as u64) << 48);
-            let shifts_b = (b1 as u64) | ((bs1 as u64) << 16) | ((b2 as u64) << 32) | ((bs2 as u64) << 48);
-            ak.wrapping_mul(0x9e3779b97f4a7c15)
-              .wrapping_add(bk)
-              .wrapping_mul(0x517cc1b727220a95)
-              .wrapping_add(shifts_a)
-              .wrapping_mul(0x6c62272e07bb0142)
-              .wrapping_add(shifts_b)
-        };
-        let sep_idx = (sep_tag as usize) & (crate::util::SHIFT_EQ_PENDING_CACHE_SIZE - 1);
-        if let Some(cached_result) = self.reusable.shift_eq_pending_cache.get(crate::util::SHIFT_EQ_PENDING_CACHE_SIZE, sep_tag, sep_idx) {
-            self.trace.shift_eq_pending_cache_hits += 1;
-            return cached_result;
-        }
-
-        let a_expr = self.read_expr(a);
-        let b_expr = self.read_expr(b);
-
-        // Absorb Shift nodes into pending shifts
-        if let Shift { inner, amount, cutoff: sc, .. } = a_expr {
-            if let Some((na1, nas1, na2, nas2)) = Self::bishift_absorb(a1, as1, a2, as2, amount, sc) {
-                let result = self.shift_eq_pending(inner, b, na1, nas1, na2, nas2, b1, bs1, b2, bs2);
-                self.reusable.shift_eq_pending_cache.insert(crate::util::SHIFT_EQ_PENDING_CACHE_SIZE, sep_tag, sep_idx, result);
-                return result;
-            }
-            // Can't absorb; conservative false
-            self.reusable.shift_eq_pending_cache.insert(crate::util::SHIFT_EQ_PENDING_CACHE_SIZE, sep_tag, sep_idx, false);
-            return false;
-        }
-        if let Shift { inner, amount, cutoff: sc, .. } = b_expr {
-            if let Some((nb1, nbs1, nb2, nbs2)) = Self::bishift_absorb(b1, bs1, b2, bs2, amount, sc) {
-                let result = self.shift_eq_pending(a, inner, a1, as1, a2, as2, nb1, nbs1, nb2, nbs2);
-                self.reusable.shift_eq_pending_cache.insert(crate::util::SHIFT_EQ_PENDING_CACHE_SIZE, sep_tag, sep_idx, result);
-                return result;
-            }
-            self.reusable.shift_eq_pending_cache.insert(crate::util::SHIFT_EQ_PENDING_CACHE_SIZE, sep_tag, sep_idx, false);
-            return false;
-        }
-
-        // Structural comparison with pending shifts applied at Var leaves
-        let result = match (a_expr, b_expr) {
-            (Var { dbj_idx: i, .. }, Var { dbj_idx: j, .. }) =>
-                Self::bishift_apply(a1, as1, a2, as2, i) == Self::bishift_apply(b1, bs1, b2, bs2, j),
-            (App { fun: f1, arg: a1x, .. }, App { fun: f2, arg: a2x, .. }) =>
-                self.shift_eq_pending(f1, f2, a1, as1, a2, as2, b1, bs1, b2, bs2)
-                && self.shift_eq_pending(a1x, a2x, a1, as1, a2, as2, b1, bs1, b2, bs2),
-            (Pi { binder_name: n1, binder_style: s1, binder_type: t1, body: bd1, .. },
-             Pi { binder_name: n2, binder_style: s2, binder_type: t2, body: bd2, .. }) =>
-                n1 == n2 && s1 == s2
-                && self.shift_eq_pending(t1, t2, a1, as1, a2, as2, b1, bs1, b2, bs2)
-                && self.shift_eq_pending(bd1, bd2,
-                    a1, as1 + if a1 > 0 { 1 } else { 0 }, a2, as2 + if a2 > 0 { 1 } else { 0 },
-                    b1, bs1 + if b1 > 0 { 1 } else { 0 }, b2, bs2 + if b2 > 0 { 1 } else { 0 }),
-            (Lambda { binder_name: n1, binder_style: s1, binder_type: t1, body: bd1, .. },
-             Lambda { binder_name: n2, binder_style: s2, binder_type: t2, body: bd2, .. }) =>
-                n1 == n2 && s1 == s2
-                && self.shift_eq_pending(t1, t2, a1, as1, a2, as2, b1, bs1, b2, bs2)
-                && self.shift_eq_pending(bd1, bd2,
-                    a1, as1 + if a1 > 0 { 1 } else { 0 }, a2, as2 + if a2 > 0 { 1 } else { 0 },
-                    b1, bs1 + if b1 > 0 { 1 } else { 0 }, b2, bs2 + if b2 > 0 { 1 } else { 0 }),
-            (Let { binder_name: n1, binder_type: t1, val: v1, body: bd1, nondep: nd1, .. },
-             Let { binder_name: n2, binder_type: t2, val: v2, body: bd2, nondep: nd2, .. }) =>
-                n1 == n2 && nd1 == nd2
-                && self.shift_eq_pending(t1, t2, a1, as1, a2, as2, b1, bs1, b2, bs2)
-                && self.shift_eq_pending(v1, v2, a1, as1, a2, as2, b1, bs1, b2, bs2)
-                && self.shift_eq_pending(bd1, bd2,
-                    a1, as1 + if a1 > 0 { 1 } else { 0 }, a2, as2 + if a2 > 0 { 1 } else { 0 },
-                    b1, bs1 + if b1 > 0 { 1 } else { 0 }, b2, bs2 + if b2 > 0 { 1 } else { 0 }),
-            (Proj { ty_name: tn1, idx: i1, structure: s1, .. },
-             Proj { ty_name: tn2, idx: i2, structure: s2, .. }) =>
-                tn1 == tn2 && i1 == i2
-                && self.shift_eq_pending(s1, s2, a1, as1, a2, as2, b1, bs1, b2, bs2),
-            (Sort { level: l1, .. }, Sort { level: l2, .. }) => l1 == l2,
-            (Const { name: n1, levels: l1, .. }, Const { name: n2, levels: l2, .. }) =>
-                n1 == n2 && l1 == l2,
-            (NatLit { ptr: p1, .. }, NatLit { ptr: p2, .. }) => p1 == p2,
-            (StringLit { ptr: p1, .. }, StringLit { ptr: p2, .. }) => p1 == p2,
-            _ => false,
-        };
-        self.reusable.shift_eq_pending_cache.insert(crate::util::SHIFT_EQ_PENDING_CACHE_SIZE, sep_tag, sep_idx, result);
-        result
-    }
-
-    /// Structural comparison for shift_eq, assuming top-level Shifts already stripped.
-    fn shift_eq_struct(&mut self, a: ExprPtr<'t>, b: ExprPtr<'t>, delta: i16, cutoff: u16) -> bool {
-        use crate::expr::Expr::*;
-        self.trace.shift_eq_struct_calls += 1;
-        match (self.read_expr(a), self.read_expr(b)) {
-            (Var { dbj_idx: i, .. }, Var { dbj_idx: j, .. }) => {
-                if i >= cutoff {
-                    j as i16 == i as i16 + delta
-                } else {
-                    j == i  // bound var: not shifted
-                }
-            }
-            (App { fun: f1, arg: a1, .. }, App { fun: f2, arg: a2, .. }) =>
-                self.shift_eq_aux(f1, f2, delta, cutoff) && self.shift_eq_aux(a1, a2, delta, cutoff),
-            (Pi { binder_name: n1, binder_style: s1, binder_type: t1, body: b1, .. },
-             Pi { binder_name: n2, binder_style: s2, binder_type: t2, body: b2, .. }) =>
-                n1 == n2 && s1 == s2 && self.shift_eq_aux(t1, t2, delta, cutoff)
-                && self.shift_eq_aux(b1, b2, delta, cutoff + 1),
-            (Lambda { binder_name: n1, binder_style: s1, binder_type: t1, body: b1, .. },
-             Lambda { binder_name: n2, binder_style: s2, binder_type: t2, body: b2, .. }) =>
-                n1 == n2 && s1 == s2 && self.shift_eq_aux(t1, t2, delta, cutoff)
-                && self.shift_eq_aux(b1, b2, delta, cutoff + 1),
-            (Let { binder_name: n1, binder_type: t1, val: v1, body: b1, nondep: nd1, .. },
-             Let { binder_name: n2, binder_type: t2, val: v2, body: b2, nondep: nd2, .. }) =>
-                n1 == n2 && nd1 == nd2 && self.shift_eq_aux(t1, t2, delta, cutoff)
-                && self.shift_eq_aux(v1, v2, delta, cutoff) && self.shift_eq_aux(b1, b2, delta, cutoff + 1),
-            (Proj { ty_name: tn1, idx: i1, structure: s1, .. },
-             Proj { ty_name: tn2, idx: i2, structure: s2, .. }) =>
-                tn1 == tn2 && i1 == i2 && self.shift_eq_aux(s1, s2, delta, cutoff),
-            (Sort { level: l1, .. }, Sort { level: l2, .. }) => l1 == l2,
-            (Const { name: n1, levels: l1, .. }, Const { name: n2, levels: l2, .. }) =>
-                n1 == n2 && l1 == l2,
-            (NatLit { ptr: p1, .. }, NatLit { ptr: p2, .. }) => p1 == p2,
-            (StringLit { ptr: p1, .. }, StringLit { ptr: p2, .. }) => p1 == p2,
-            // Shift nodes that weren't stripped (mismatched cutoff) —
-            // fall through from shift_eq_aux if cutoff didn't match.
-            // Handle by stripping and adjusting delta.
-            (Shift { inner, amount, cutoff: sc, .. }, _) if sc == cutoff =>
-                self.shift_eq_aux(inner, b, delta + amount, cutoff),
-            (Shift { inner, amount, cutoff: sc, fvar_lb, .. }, _) if sc != cutoff
-                && fvar_lb >= cutoff.max(sc) =>
-                self.shift_eq_aux(inner, b, delta + amount, cutoff),
-            // a-side Shift with mismatched cutoff, general case
-            (Shift { inner, amount, cutoff: sc, .. }, _) if sc != cutoff =>
-                self.shift_eq_pending(
-                    inner, b,
-                    amount, sc, delta, cutoff,
-                    0, 0, 0, 0,
-                ),
-            (_, Shift { inner, amount, cutoff: sc, .. }) if sc == cutoff => {
-                if amount <= delta {
-                    self.shift_eq_aux(a, inner, delta - amount, cutoff)
-                } else {
-                    self.shift_eq_aux(inner, a, amount - delta, cutoff)
-                }
-            }
-            (_, Shift { inner, amount, cutoff: sc, fvar_lb, .. }) if sc != cutoff
-                && fvar_lb >= cutoff.max(sc) => {
-                if amount <= delta {
-                    self.shift_eq_aux(a, inner, delta - amount, cutoff)
-                } else {
-                    self.shift_eq_aux(inner, a, amount - delta, cutoff)
-                }
-            }
-            // b-side Shift with mismatched cutoff, general case
-            (_, Shift { inner, amount, cutoff: sc, .. }) if sc != cutoff =>
-                self.shift_eq_pending(
-                    a, inner,
-                    0, 0, delta, cutoff,
-                    amount, sc, 0, 0,
-                ),
-            _ => false,
-        }
-    }
 }
 
 impl<'t> Expr<'t> {
@@ -1588,23 +1181,4 @@ impl<'t> Expr<'t> {
     }
 }
 
-/// Bloom filter for a single bvar index. Bit position = min(idx, 31).
-pub(crate) fn bloom_single(idx: u16) -> u32 {
-    1u32 << idx.min(31)
-}
-
-/// Bloom filter union (bitwise OR).
-pub(crate) fn bloom_union(a: u32, b: u32) -> u32 {
-    a | b
-}
-
-/// Bloom unbind: remove bvar 0 (shift all indices down by 1).
-pub(crate) fn bloom_unbind(b: u32) -> u32 {
-    b >> 1
-}
-
-/// Normalize bloom filter for canonical hashing: shift out the lower bound.
-pub(crate) fn bloom_normalize(b: u32, lb: u16) -> u32 {
-    if lb >= 32 { b } else { b >> lb }
-}
 

@@ -253,14 +253,10 @@ pub struct ExprCache<'t> {
     pub(crate) shift_down_cache: FxHashMap<(ExprPtr<'t>, u16, u16), ExprPtr<'t>>,
     /// Cache for abstr_aux_levels (nanoda TC): (expr, start_pos, num_open_binders) -> expr
     pub(crate) abstr_cache_levels: FxHashMap<(ExprPtr<'t>, u16, u16), ExprPtr<'t>>,
-    /// Cache for sem_eq positive results: ordered (a, b) pairs known to be sem_eq.
-    /// Avoids repeated O(tree_size) structural walks through Shift wrappers.
-    pub(crate) sem_eq_cache: FxHashSet<(ExprPtr<'t>, ExprPtr<'t>)>,
     /// Dedup table for Shift nodes: (inner, amount, cutoff) → ExprPtr.
     /// Ensures mk_shift(a, k) always returns the same ExprPtr,
-    /// enabling O(1) pointer equality in cache verification instead of O(tree) shift_eq.
+    /// enabling O(1) pointer equality in cache verification.
     pub(crate) shift_dedup: FxHashMap<(ExprPtr<'t>, u16, u16), ExprPtr<'t>>,
-    // shift_eq_cache and shift_eq_pending_cache moved to ReusableCaches (avoids 24MB memset/decl)
     /// Direct-mapped mk_app cache, lazily allocated after enough misses.
     /// Avoids 16MB alloc for trivial declarations while speeding up heavy ones.
     pub(crate) mk_app_dm_cache: Vec<(u64, ExprPtr<'t>)>,
@@ -285,7 +281,6 @@ impl<'t> ExprCache<'t> {
             shift_cache: new_fx_hash_map(),
             shift_down_cache: new_fx_hash_map(),
             abstr_cache_levels: new_fx_hash_map(),
-            sem_eq_cache: new_fx_hash_set(),
             shift_dedup: new_fx_hash_map(),
             mk_app_dm_cache: Vec::new(),
             mk_app_miss_count: 0,
@@ -297,71 +292,12 @@ impl<'t> ExprCache<'t> {
 
 }
 
-pub const SHIFT_EQ_CACHE_SIZE: usize = 1 << 20; // 1M entries
-pub const SHIFT_EQ_PENDING_CACHE_SIZE: usize = 1 << 18; // 256K entries
-
-/// Direct-mapped cache with generation counting.
-/// Avoids expensive O(N) memset on "clear" — just bumps a generation counter.
-/// Each slot stores (tag, generation, result). A slot is valid iff its generation
-/// matches the current generation. Slots from prior generations are stale and ignored.
-/// Size per entry: u64(8) + u32(4) + bool(1) + padding(3) = 16 bytes (same as (u64, bool)).
-pub struct GenCache {
-    data: Vec<(u64, u32, bool)>,
-    generation: u32,
-}
-
-impl GenCache {
-    pub fn new() -> Self {
-        GenCache { data: Vec::new(), generation: 0 }
-    }
-
-    /// Reset the cache in O(1) by bumping the generation.
-    pub fn reset(&mut self) {
-        self.generation = self.generation.wrapping_add(1);
-    }
-
-    /// Lazily allocate on first use, then look up by index.
-    #[inline]
-    pub fn get(&self, size: usize, tag: u64, idx: usize) -> Option<bool> {
-        if self.data.len() < size { return None; }
-        let (cached_tag, cached_gen, cached_result) = self.data[idx];
-        if cached_gen == self.generation && cached_tag == tag {
-            Some(cached_result)
-        } else {
-            None
-        }
-    }
-
-    /// Ensure allocated and store a value.
-    #[inline]
-    pub fn insert(&mut self, size: usize, tag: u64, idx: usize, result: bool) {
-        if self.data.len() < size {
-            self.data.resize(size, (0u64, 0u32, false));
-        }
-        self.data[idx] = (tag, self.generation, result);
-    }
-}
-
-/// Pre-allocated caches that survive across declarations.
-/// Avoids 24MB+ memset per declaration for direct-mapped caches.
-pub struct ReusableCaches {
-    pub shift_eq_cache: GenCache,
-    pub shift_eq_pending_cache: GenCache,
-}
+/// Pre-allocated caches that survive across declarations (currently empty).
+pub struct ReusableCaches;
 
 impl ReusableCaches {
-    pub fn new() -> Self {
-        ReusableCaches {
-            shift_eq_cache: GenCache::new(),
-            shift_eq_pending_cache: GenCache::new(),
-        }
-    }
-
-    /// Reset all caches for a new declaration (O(1), no memset).
-    pub fn reset(&mut self) {
-        self.shift_eq_cache.reset();
-        self.shift_eq_pending_cache.reset();
-    }
+    pub fn new() -> Self { ReusableCaches }
+    pub fn reset(&mut self) {}
 }
 /// Type-erased LeanDag for reuse across declarations.
 /// The inner LeanDag<'static> is always cleared before being transmuted to the correct lifetime.
@@ -530,7 +466,7 @@ pub struct TcTrace {
     pub fail_cache_verify_fail: u64,
     pub eq_cache_overflow_stores: u64,
     pub eq_cache_overflow_hits: u64,
-    pub eq_cache_cross_depth_hits: u64,  // hit where stored_ptr != query_ptr (sem_eq through Shift)
+    pub eq_cache_cross_depth_hits: u64,  // hit where stored_ptr != query_ptr (cross-depth)
     pub fail_cache_overflow_stores: u64,
     pub fail_cache_overflow_hits: u64,
     pub infer_cache_hits: u64,
@@ -553,11 +489,6 @@ pub struct TcTrace {
     pub spec_app_hit: u64,               // speculative app congruence successes
     pub spec_app2_tried: u64,            // spec_app after whnf_cheap_proj attempts
     pub spec_app2_hit: u64,              // spec_app after whnf_cheap_proj successes
-    pub shift_eq_aux_calls: u64,         // total shift_eq_aux recursive calls
-    pub shift_eq_struct_calls: u64,      // total shift_eq_struct recursive calls
-    pub shift_eq_pending_calls: u64,     // total shift_eq_pending calls
-    pub shift_eq_pending_cache_hits: u64, // cache hits in shift_eq_pending
-    pub shift_eq_ptr_eq_hits: u64,       // ptr_eq fast path in shift_eq_aux
     pub push_shift_cache_hits: u64,
     pub infer_cache_hash_hit: u64,
     pub infer_cache_verify_fail: u64,
@@ -576,17 +507,17 @@ pub struct TcTrace {
     pub whnf_cache_no_bucket: u64,
     pub whnf_cache_no_entry: u64,
     pub whnf_cache_verify_fail: u64,
-    pub whnf_cache_vf_same: u64,   // same depth, sem_eq fail
-    pub whnf_cache_vf_above: u64,  // depth > stored, shift_eq fail
-    pub whnf_cache_vf_below: u64,  // depth < stored, shift_eq or shift_down fail
+    pub whnf_cache_vf_same: u64,   // same depth, verify fail
+    pub whnf_cache_vf_above: u64,  // depth > stored, verify fail
+    pub whnf_cache_vf_below: u64,  // depth < stored, verify fail
     pub whnf_cache_vf_sign_would_fix: u64, // sign(ub_f - ub_a) would have discriminated
     pub whnf_cache_vf_evictions: u64,     // times a collision caused eviction of a different expression
     pub whnf_cache_overflow_stores: u64,
     pub whnf_cache_overflow_hits: u64,
     // infer cache verify-fail breakdown
     pub infer_cache_vf_check_flag: u64,   // entry was InferOnly but query is Check
-    pub infer_cache_vf_same: u64,         // same depth, sem_eq fail
-    pub infer_cache_vf_above: u64,        // depth > stored, shift_eq fail
+    pub infer_cache_vf_same: u64,         // same depth, verify fail
+    pub infer_cache_vf_above: u64,        // depth > stored, verify fail
     pub infer_cache_vf_below: u64,        // depth < stored, not attempted
     pub infer_cache_vf_sign_would_fix: u64, // nlbv_sign would have discriminated
     pub infer_cache_overflow_stores: u64,
@@ -596,7 +527,6 @@ pub struct TcTrace {
     pub defeq_open_neg_hits: u64,
     pub def_eq_inner_calls: u64,
     pub def_eq_deep_calls: u64,  // survived both quick_checks, entering lazy_delta
-    pub sem_eq_cache_hits: u64,
     pub shift_dedup_hits: u64,
     pub osnf_canon_hits: u64,
     // wnu cache miss breakdown
@@ -628,24 +558,22 @@ pub struct TcTrace {
 
 impl std::fmt::Display for TcTrace {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "def_eq={} dei={}/{} whnf={} infer={} inst={} alloc={} | hits: whnf={} eq={}/vf{} uf={} dop={}/{} seq={} sd={} infer={} infer_hash={} infer_vfail={} | ps={}/{} | inst_aux={}/{}/{} sh={}/{}/{}",
+        write!(f, "def_eq={} dei={}/{} whnf={} infer={} inst={} alloc={} | hits: whnf={} eq={}/vf{} uf={} dop={}/{} sd={} infer={} infer_hash={} infer_vfail={} | ps={}/{} | inst_aux={}/{}/{} sh={}/{}/{}",
             self.def_eq_calls, self.def_eq_inner_calls, self.def_eq_deep_calls, self.whnf_calls, self.infer_calls,
             self.inst_calls, self.alloc_expr_calls,
             self.whnf_cache_hits, self.eq_cache_hits, self.eq_cache_verify_fail, self.eq_cache_uf_hits,
             self.defeq_open_pos_hits, self.defeq_open_neg_hits,
-            self.sem_eq_cache_hits, self.shift_dedup_hits,
+            self.shift_dedup_hits,
             self.infer_cache_hits,
             self.infer_cache_hash_hit, self.infer_cache_verify_fail,
             self.push_shift_calls, self.push_shift_cache_hits,
             self.inst_aux_calls, self.inst_aux_cache_hits, self.inst_aux_elided,
             self.inst_aux_shift_nodes, self.inst_aux_shift_mismatch, self.inst_aux_shift_compose)?;
-        write!(f, " | sh_path={} sh_alloc={}/{} sh_var={}/{} nsh_id={} skip={}/{} se={}/{}/{}/{} sep_hit={}",
+        write!(f, " | sh_path={} sh_alloc={}/{} sh_var={}/{} nsh_id={} skip={}/{}",
             self.inst_aux_shifted_path, self.inst_aux_shifted_alloc, self.inst_aux_shifted_identity,
             self.inst_aux_shifted_var_subst, self.inst_aux_shifted_var_nosubst,
             self.inst_aux_nonshift_identity,
-            self.inst_aux_shift_skip_clean, self.inst_aux_shift_skip_wrap,
-            self.shift_eq_aux_calls, self.shift_eq_struct_calls, self.shift_eq_pending_calls,
-            self.shift_eq_ptr_eq_hits, self.shift_eq_pending_cache_hits)?;
+            self.inst_aux_shift_skip_clean, self.inst_aux_shift_skip_wrap)?;
         if self.spec_app_tried > 0 {
             write!(f, " | spec={}/{} spec2={}/{}", self.spec_app_hit, self.spec_app_tried,
                 self.spec_app2_hit, self.spec_app2_tried)?;
@@ -819,17 +747,6 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         }
     }
 
-    /// Like alloc_expr but skips the export_file lookup. Used when the expression
-    /// contains TcCtx pointers (the export_file can't contain such expressions).
-    #[inline(always)]
-    fn alloc_expr_tc(&mut self, e: Expr<'t>) -> ExprPtr<'t> {
-        self.trace.alloc_expr_calls += 1;
-        let nlbv = e.num_loose_bvars();
-        let (idx, inserted) = self.dag.exprs.insert_full(e);
-        if inserted { self.dag.expr_nlbv.push(nlbv); }
-        Ptr::from(DagMarker::TcCtx, idx)
-    }
-
     /// Store a string (a `CowStr`), getting back a pointer to the allocated item. If the item was
     /// already stored, forego the allocation and return a pointer to the previously inserted
     /// element. Checks the longer-lived storage first.
@@ -874,42 +791,6 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
             Ptr::from(DagMarker::TcCtx, idx)
         } else {
             Ptr::from(DagMarker::TcCtx, self.dag.uparams.insert_full(Arc::from(ls)).0)
-        }
-    }
-
-    /// Canonical hash for cache keys: (struct_hash, normalized_fvar_hash).
-    pub(crate) fn canonical_hash(&self, e: ExprPtr<'t>) -> u64 {
-        let expr = self.read_expr(e);
-        let sh = expr.get_struct_hash();
-        let bloom = expr.get_fvar_bloom();
-        let lb = expr.get_fvar_lb();
-        let fh = if bloom == 0 { 0 } else { crate::expr::bloom_normalize(bloom, lb) as u64 };
-        sh ^ fh.wrapping_mul(0x9e3779b97f4a7c15) // mix with golden ratio
-    }
-
-    /// Compute a shift-invariant "child nlbv sign" for collision discrimination.
-    /// For App(f,a): sign of (nlbv(f) - nlbv(a)), encoded as 0/1/2.
-    /// For Pi/Lambda/Let: sign of (nlbv(ty) - nlbv(body)).
-    /// For others: 0.
-    /// This is shift-invariant because shifting both children by the same amount
-    /// preserves the difference.
-    pub(crate) fn nlbv_sign(&self, e: ExprPtr<'t>) -> u8 {
-        match self.read_expr(e) {
-            Expr::App { fun, arg, .. } => {
-                let f_nlbv = self.read_expr(fun).num_loose_bvars();
-                let a_nlbv = self.read_expr(arg).num_loose_bvars();
-                if f_nlbv > a_nlbv { 2 } else if f_nlbv < a_nlbv { 1 } else { 0 }
-            }
-            Expr::Pi { binder_type, body, .. } | Expr::Lambda { binder_type, body, .. } => {
-                let ty_nlbv = self.read_expr(binder_type).num_loose_bvars();
-                let body_nlbv = self.read_expr(body).num_loose_bvars();
-                if ty_nlbv > body_nlbv { 2 } else if ty_nlbv < body_nlbv { 1 } else { 0 }
-            }
-            Expr::Shift { inner, .. } => {
-                // Shift preserves the sign — recurse through
-                self.nlbv_sign(inner)
-            }
-            _ => 0,
         }
     }
 
@@ -1032,10 +913,8 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
             }
         }
         let hash = hash64!(crate::expr::VAR_HASH, dbj_idx);
-        let struct_hash = crate::expr::VAR_HASH;
-        let fvar_bloom = crate::expr::bloom_single(dbj_idx);
         let fvar_lb = dbj_idx;
-        let result = self.alloc_expr(Expr::Var { dbj_idx, hash, struct_hash, fvar_bloom, fvar_lb });
+        let result = self.alloc_expr(Expr::Var { dbj_idx, hash, fvar_lb });
         if idx >= self.expr_cache.mk_var_cache.len() {
             self.expr_cache.mk_var_cache.resize(idx + 1, None);
         }
@@ -1046,15 +925,13 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
     pub fn mk_sort(&mut self, level: LevelPtr<'t>) -> ExprPtr<'t> {
         self.trace.alloc_mk_other += 1;
         let hash = hash64!(crate::expr::SORT_HASH, level);
-        let struct_hash = hash;
-        self.alloc_expr(Expr::Sort { level, hash, struct_hash, fvar_bloom: 0, fvar_lb: 0 })
+        self.alloc_expr(Expr::Sort { level, hash, fvar_lb: 0 })
     }
 
     pub fn mk_const(&mut self, name: NamePtr<'t>, levels: LevelsPtr<'t>) -> ExprPtr<'t> {
         self.trace.alloc_mk_other += 1;
         let hash = hash64!(crate::expr::CONST_HASH, name, levels);
-        let struct_hash = hash;
-        self.alloc_expr(Expr::Const { name, levels, hash, struct_hash, fvar_bloom: 0, fvar_lb: 0 })
+        self.alloc_expr(Expr::Const { name, levels, hash, fvar_lb: 0 })
     }
 
     /// OSNF helper: adjust a child expression by subtracting `amount` from its free variable
@@ -1176,8 +1053,6 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         let arg_e = self.read_expr(arg);
         let num_loose_bvars = fun_e.num_loose_bvars().max(arg_e.num_loose_bvars());
         let has_fvars = fun_e.has_fvars() || arg_e.has_fvars();
-        let struct_hash = hash64!(crate::expr::APP_HASH, fun_e.get_struct_hash(), arg_e.get_struct_hash());
-        let fvar_bloom = crate::expr::bloom_union(fun_e.get_fvar_bloom(), arg_e.get_fvar_bloom());
         let fvar_lb = if num_loose_bvars == 0 { 0 } else {
             let f_nlbv = fun_e.num_loose_bvars();
             let a_nlbv = arg_e.num_loose_bvars();
@@ -1185,12 +1060,8 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
             else if a_nlbv == 0 { fun_e.get_fvar_lb() }
             else { fun_e.get_fvar_lb().min(arg_e.get_fvar_lb()) }
         };
-        let app_expr = Expr::App { fun, arg, num_loose_bvars, has_fvars, hash, struct_hash, fvar_bloom, fvar_lb };
-        let result = if fun.dag_marker() == DagMarker::TcCtx || arg.dag_marker() == DagMarker::TcCtx {
-            self.alloc_expr_tc(app_expr)
-        } else {
-            self.alloc_expr(app_expr)
-        };
+        let app_expr = Expr::App { fun, arg, num_loose_bvars, has_fvars, hash, fvar_lb };
+        let result = self.alloc_expr(app_expr);
         // Lazily allocate DM cache after enough misses to justify 1MB
         if dm_len == 0 {
             self.expr_cache.mk_app_miss_count += 1;
@@ -1227,9 +1098,6 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         let body_e = self.read_expr(body);
         let num_loose_bvars = ty_e.num_loose_bvars().max(body_e.num_loose_bvars().saturating_sub(1));
         let has_fvars = ty_e.has_fvars() || body_e.has_fvars();
-        let struct_hash = hash64!(crate::expr::LAMBDA_HASH, binder_name, binder_style, ty_e.get_struct_hash(), body_e.get_struct_hash());
-        let body_bloom = crate::expr::bloom_unbind(body_e.get_fvar_bloom());
-        let fvar_bloom = crate::expr::bloom_union(ty_e.get_fvar_bloom(), body_bloom);
         let fvar_lb = if num_loose_bvars == 0 { 0 } else {
             let t_nlbv = ty_e.num_loose_bvars();
             let b_nlbv = body_e.num_loose_bvars();
@@ -1239,12 +1107,8 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
             else if b_nlbv <= 1 { ty_e.get_fvar_lb() }
             else { ty_e.get_fvar_lb().min(b_lb) }
         };
-        let lambda_expr = Expr::Lambda { binder_name, binder_style, binder_type, body, num_loose_bvars, has_fvars, hash, struct_hash, fvar_bloom, fvar_lb };
-        let result = if binder_type.dag_marker() == DagMarker::TcCtx || body.dag_marker() == DagMarker::TcCtx {
-            self.alloc_expr_tc(lambda_expr)
-        } else {
-            self.alloc_expr(lambda_expr)
-        };
+        let lambda_expr = Expr::Lambda { binder_name, binder_style, binder_type, body, num_loose_bvars, has_fvars, hash, fvar_lb };
+        let result = self.alloc_expr(lambda_expr);
         self.expr_cache.mk_lambda_cache.insert(key, result);
         result
     }
@@ -1266,9 +1130,6 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         let body_e = self.read_expr(body);
         let num_loose_bvars = ty_e.num_loose_bvars().max(body_e.num_loose_bvars().saturating_sub(1));
         let has_fvars = ty_e.has_fvars() || body_e.has_fvars();
-        let struct_hash = hash64!(crate::expr::PI_HASH, binder_name, binder_style, ty_e.get_struct_hash(), body_e.get_struct_hash());
-        let body_bloom = crate::expr::bloom_unbind(body_e.get_fvar_bloom());
-        let fvar_bloom = crate::expr::bloom_union(ty_e.get_fvar_bloom(), body_bloom);
         let fvar_lb = if num_loose_bvars == 0 { 0 } else {
             let t_nlbv = ty_e.num_loose_bvars();
             let b_nlbv = body_e.num_loose_bvars();
@@ -1278,12 +1139,8 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
             else if b_nlbv <= 1 { ty_e.get_fvar_lb() }
             else { ty_e.get_fvar_lb().min(b_lb) }
         };
-        let pi_expr = Expr::Pi { binder_name, binder_style, binder_type, body, num_loose_bvars, has_fvars, hash, struct_hash, fvar_bloom, fvar_lb };
-        let result = if binder_type.dag_marker() == DagMarker::TcCtx || body.dag_marker() == DagMarker::TcCtx {
-            self.alloc_expr_tc(pi_expr)
-        } else {
-            self.alloc_expr(pi_expr)
-        };
+        let pi_expr = Expr::Pi { binder_name, binder_style, binder_type, body, num_loose_bvars, has_fvars, hash, fvar_lb };
+        let result = self.alloc_expr(pi_expr);
         self.expr_cache.mk_pi_cache.insert(key, result);
         result
     }
@@ -1306,12 +1163,6 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         let body_ub = body_e.num_loose_bvars();
         let num_loose_bvars = ty_ub.max(val_ub.max(body_ub.saturating_sub(1)));
         let has_fvars = ty_e.has_fvars() || val_e.has_fvars() || body_e.has_fvars();
-        let struct_hash = hash64!(crate::expr::LET_HASH, binder_name, ty_e.get_struct_hash(), val_e.get_struct_hash(), body_e.get_struct_hash(), nondep);
-        let body_bloom = crate::expr::bloom_unbind(body_e.get_fvar_bloom());
-        let fvar_bloom = crate::expr::bloom_union(
-            crate::expr::bloom_union(ty_e.get_fvar_bloom(), val_e.get_fvar_bloom()),
-            body_bloom
-        );
         let fvar_lb = if num_loose_bvars == 0 { 0 } else {
             let t_nlbv = ty_ub;
             let v_nlbv = val_ub;
@@ -1323,12 +1174,8 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
             if b_nlbv > 1 || (b_nlbv == 1 && body_e.get_fvar_lb() > 0) { lb = lb.min(b_lb); }
             if lb == u16::MAX { 0 } else { lb }
         };
-        let let_expr = Expr::Let { binder_name, binder_type, val, body, num_loose_bvars, has_fvars, hash, nondep, struct_hash, fvar_bloom, fvar_lb };
-        if binder_type.dag_marker() == DagMarker::TcCtx || val.dag_marker() == DagMarker::TcCtx || body.dag_marker() == DagMarker::TcCtx {
-            self.alloc_expr_tc(let_expr)
-        } else {
-            self.alloc_expr(let_expr)
-        }
+        let let_expr = Expr::Let { binder_name, binder_type, val, body, num_loose_bvars, has_fvars, hash, nondep, fvar_lb };
+        self.alloc_expr(let_expr)
     }
 
     pub fn mk_proj(&mut self, ty_name: NamePtr<'t>, idx: u32, structure: ExprPtr<'t>) -> ExprPtr<'t> {
@@ -1337,15 +1184,9 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         let s_e = self.read_expr(structure);
         let num_loose_bvars = s_e.num_loose_bvars();
         let has_fvars = s_e.has_fvars();
-        let struct_hash = hash64!(crate::expr::PROJ_HASH, ty_name, idx, s_e.get_struct_hash());
-        let fvar_bloom = s_e.get_fvar_bloom();
         let fvar_lb = s_e.get_fvar_lb();
-        let proj_expr = Expr::Proj { ty_name, idx, structure, num_loose_bvars, has_fvars, hash, struct_hash, fvar_bloom, fvar_lb };
-        if structure.dag_marker() == DagMarker::TcCtx {
-            self.alloc_expr_tc(proj_expr)
-        } else {
-            self.alloc_expr(proj_expr)
-        }
+        let proj_expr = Expr::Proj { ty_name, idx, structure, num_loose_bvars, has_fvars, hash, fvar_lb };
+        self.alloc_expr(proj_expr)
     }
 
     pub fn mk_string_lit(&mut self, string_ptr: StringPtr<'t>) -> Option<ExprPtr<'t>> {
@@ -1353,8 +1194,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
             return None
         }
         let hash = hash64!(crate::expr::STRING_LIT_HASH, string_ptr);
-        let struct_hash = hash;
-        Some(self.alloc_expr(Expr::StringLit { ptr: string_ptr, hash, struct_hash, fvar_bloom: 0, fvar_lb: 0 }))
+        Some(self.alloc_expr(Expr::StringLit { ptr: string_ptr, hash, fvar_lb: 0 }))
     }
 
     pub fn mk_string_lit_quick(&mut self, s: CowStr<'t>) -> Option<ExprPtr<'t>> {
@@ -1370,8 +1210,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
             return None
         }
         let hash = hash64!(crate::expr::NAT_LIT_HASH, num_ptr);
-        let struct_hash = hash;
-        Some(self.alloc_expr(Expr::NatLit { ptr: num_ptr, hash, struct_hash, fvar_bloom: 0, fvar_lb: 0 }))
+        Some(self.alloc_expr(Expr::NatLit { ptr: num_ptr, hash, fvar_lb: 0 }))
     }
 
     /// Shortcut to make an `Expr::NatLit` directly from a `BigUint`, rather than
@@ -1393,8 +1232,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         self.unique_counter += 1;
         let id = FVarId::Unique(unique_id);
         let hash = hash64!(crate::expr::LOCAL_HASH, binder_name, binder_style, binder_type, id);
-        let struct_hash = hash;
-        self.alloc_expr(Expr::Local { binder_name, binder_style, binder_type, id, hash, struct_hash, fvar_bloom: 0, fvar_lb: 0 })
+        self.alloc_expr(Expr::Local { binder_name, binder_style, binder_type, id, hash, fvar_lb: 0 })
     }
 
     /// Construct a free variable representing a deBruijn level, incrementing the counter.
@@ -1409,8 +1247,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         self.dbj_level_counter += 1;
         let id = FVarId::DbjLevel(level);
         let hash = hash64!(crate::expr::LOCAL_HASH, binder_name, binder_style, binder_type, id);
-        let struct_hash = hash;
-        self.alloc_expr(Expr::Local { binder_name, binder_style, binder_type, id, hash, struct_hash, fvar_bloom: 0, fvar_lb: 0 })
+        self.alloc_expr(Expr::Local { binder_name, binder_style, binder_type, id, hash, fvar_lb: 0 })
     }
 
     /// Construct a free variable representing a deBruijn level, reusing a particular level
@@ -1424,8 +1261,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
     ) -> ExprPtr<'t> {
         let id = FVarId::DbjLevel(level);
         let hash = hash64!(crate::expr::LOCAL_HASH, binder_name, binder_style, binder_type, id);
-        let struct_hash = hash;
-        self.alloc_expr(Expr::Local { binder_name, binder_style, binder_type, id, hash, struct_hash, fvar_bloom: 0, fvar_lb: 0 })
+        self.alloc_expr(Expr::Local { binder_name, binder_style, binder_type, id, hash, fvar_lb: 0 })
     }
 
     /// Decrement the deBruijn level counter when closing a binder.
@@ -1465,11 +1301,10 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         }
         // Normalize cutoff to 0 when all free vars are >= cutoff.
         let inner_lb = inner_expr.get_fvar_lb();
-        let inner_bloom = inner_expr.get_fvar_bloom();
         let cutoff = if cutoff > 0 && inner_lb >= cutoff { 0 } else { cutoff };
         // OSNF canonicalization: disabled for now. Rewriting Shift(e, amount, 0) →
         // Shift(core, fvar_lb + amount, 0) during TC breaks pointer equality and triggers
-        // expensive shift_eq_pending comparisons when encountered inside Lambda bodies
+        // expensive comparisons when encountered inside Lambda bodies
         // (where tracking cutoff > 0 but Shift cutoff is 0). This causes a ~60% slowdown
         // on Mathlib 100K. TODO: use OSNF cores for cache-based lookups instead.
         // For negative shifts with cutoff=0, validate that fvar_lb won't go negative.
@@ -1499,29 +1334,13 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         self.trace.alloc_mk_shift += 1;
         let has_fvars = inner_expr.has_fvars();
         let hash = hash64!(crate::expr::SHIFT_HASH, inner, amount as u16, cutoff);
-        let struct_hash = inner_expr.get_struct_hash();
         let new_nlbv = (nlbv as i16 + amount).max(0) as u16;
         // Compute fvar_lb for Shift
         let fvar_lb = if new_nlbv == 0 { 0 }
             else if inner_lb >= cutoff { (inner_lb as i32 + amount as i32).max(0) as u16 }
             else { inner_lb };
-        // Compute fvar_bloom for Shift: shift bits at positions >= cutoff by amount
-        let fvar_bloom = if cutoff == 0 {
-            if amount > 0 { inner_bloom.checked_shl(amount as u32).unwrap_or(0) | (if inner_bloom & 0x80000000 != 0 { 0x80000000 } else { 0 }) }
-            else { inner_bloom >> ((-amount) as u32) }
-        } else {
-            let low_mask = if cutoff >= 32 { u32::MAX } else { (1u32 << cutoff) - 1 };
-            let low = inner_bloom & low_mask;
-            let high = inner_bloom & !low_mask;
-            if amount > 0 { low | high.checked_shl(amount as u32).unwrap_or(0) | (if high & 0x80000000 != 0 { 0x80000000 } else { 0 }) }
-            else { low | (high >> ((-amount) as u32)) }
-        };
-        let shift_expr = Expr::Shift { hash, struct_hash, fvar_bloom, fvar_lb, inner, amount, cutoff, num_loose_bvars: new_nlbv, has_fvars };
-        let result = if inner.dag_marker() == DagMarker::TcCtx {
-            self.alloc_expr_tc(shift_expr)
-        } else {
-            self.alloc_expr(shift_expr)
-        };
+        let shift_expr = Expr::Shift { hash, fvar_lb, inner, amount, cutoff, num_loose_bvars: new_nlbv, has_fvars };
+        let result = self.alloc_expr(shift_expr);
         self.expr_cache.shift_dedup.insert(dedup_key, result);
         result
     }

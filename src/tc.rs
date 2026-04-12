@@ -901,7 +901,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                 let structure = self.strong_reduce(structure, reduce_types, reduce_proofs);
                 let x = self.ctx.mk_proj(ty_name, idx, structure);
                 let y = self.whnf(x);
-                if !self.ctx.sem_eq(y, x) {
+                if y != x {
                     self.strong_reduce(y, reduce_types, reduce_proofs)
                 } else {
                     x
@@ -1169,7 +1169,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         }
         if let (NatLit { .. }, NatLit { .. }) = (self.ctx.read_expr(x), self.ctx.read_expr(y)) {
             assert!(self.ctx.export_file.config.nat_extension);
-            return Some(self.ctx.sem_eq(x, y))
+            return Some(x == y)
         }
         if let (Some(x_pred), Some(y_pred)) = (self.ctx.pred_of_nat_succ(x), self.ctx.pred_of_nat_succ(y)) {
             Some(self.def_eq(x_pred, y_pred))
@@ -1239,7 +1239,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
     }
 
     /// Speculative app congruence: try to prove App(f1,a1) == App(f2,a2)
-    /// using only O(1) checks (sem_eq + eq_cache + UF), without whnf.
+    /// using only O(1) checks (ptr_eq + eq_cache + UF), without whnf.
     /// Recursively peels matching App layers. Returns Some(true) on full match.
     fn spec_app_congruence(&mut self, x: ExprPtr<'t>, y: ExprPtr<'t>) -> Option<bool> {
         self.ctx.trace.spec_app_tried += 1;
@@ -1266,10 +1266,10 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         Some(true)
     }
 
-    /// O(1) equality check: sem_eq + eq_cache + UF + defeq_open.
+    /// O(1) equality check: pointer eq + eq_cache + UF + defeq_open.
     /// Never calls def_eq recursively.
     fn cheap_eq(&mut self, x: ExprPtr<'t>, y: ExprPtr<'t>) -> bool {
-        self.ctx.sem_eq(x, y)
+        x == y
             || self.eq_cache_contains(x, y)
             || self.tc_cache.eq_cache_uf.check_uf_eq(x, y)
             || self.defeq_open_lookup(true, x, y)
@@ -1306,10 +1306,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
 
     pub fn assert_def_eq(&mut self, u: ExprPtr<'t>, v: ExprPtr<'t>) {
         if !self.def_eq(u, v) {
-            let sem = self.ctx.sem_eq(u, v);
-            let u_sh = self.ctx.read_expr(u).get_struct_hash();
-            let v_sh = self.ctx.read_expr(v).get_struct_hash();
-            eprintln!("  assert_def_eq FAILED (sem_eq={}, shash u={:016x} v={:016x} eq={}):", sem, u_sh, v_sh, u_sh == v_sh);
+            eprintln!("  assert_def_eq FAILED:");
             eprintln!("    u = {} (marker={:?} idx={})", self.ctx.expr_desc(u, 15), u.dag_marker(), u.idx());
             eprintln!("    v = {} (marker={:?} idx={})", self.ctx.expr_desc(v, 15), v.dag_marker(), v.idx());
             // Try to find first difference
@@ -1360,7 +1357,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         self.ctx.trace.def_eq_inner_calls += 1;
 
         // Speculative app congruence: if both sides are applications, try comparing
-        // their spines via cheap O(1) checks (sem_eq + caches) before doing whnf.
+        // their spines via cheap O(1) checks (ptr_eq + caches) before doing whnf.
         // Avoids expensive whnf/delta steps for cases resolvable by structural congruence.
         if matches!((self.ctx.read_expr(x), self.ctx.read_expr(y)), (App { .. }, App { .. })) {
             if let Some(true) = self.spec_app_congruence(x, y) {
@@ -1382,7 +1379,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             }
         }
 
-        if (x_n != x || y_n != y) {
+        if x_n != x || y_n != y {
             if let Some(easy) = self.def_eq_quick_check(x_n, y_n) {
                 return easy
             }
@@ -1636,9 +1633,8 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
     }
 
     fn def_eq_quick_check(&mut self, x: ExprPtr<'t>, y: ExprPtr<'t>) -> Option<bool> {
-        // Semantic equality: handles internal Shift wrappers transparently.
-        // Subsumes the old pointer equality, Shift-stripping, and shift_eq checks.
-        if self.ctx.sem_eq(x, y) {
+        // Pointer equality check.
+        if x == y {
             return Some(true)
         }
         if self.eq_cache_contains(x, y) {
@@ -1828,7 +1824,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         let f = self.ctx.unfold_apps_fun(e);
         if let Proj { .. } = self.ctx.read_expr(f) {
             let eprime = self.whnf_no_unfolding(e);
-            if !self.ctx.sem_eq(eprime, e) {
+            if eprime != e {
                 return Some(eprime)
             }
         }

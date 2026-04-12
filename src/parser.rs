@@ -442,14 +442,6 @@ impl<'a, R: BufRead> Parser<'a, R> {
 
     fn has_fvars(&self, e: ExprPtr<'a>) -> bool { self.dag.exprs.get_index(e.idx()).unwrap().has_fvars() }
 
-    fn struct_hash(&self, e: ExprPtr<'a>) -> u64 {
-        self.dag.exprs.get_index(e.idx()).unwrap().get_struct_hash()
-    }
-
-    fn bloom(&self, e: ExprPtr<'a>) -> u32 {
-        self.dag.exprs.get_index(e.idx()).unwrap().get_fvar_bloom()
-    }
-
     fn expr_fvar_lb(&self, e: ExprPtr<'a>) -> u16 {
         self.dag.exprs.get_index(e.idx()).unwrap().get_fvar_lb()
     }
@@ -457,9 +449,8 @@ impl<'a, R: BufRead> Parser<'a, R> {
     /// Find or create BVar(idx) in the DAG. Returns its ExprPtr.
     fn find_or_insert_bvar(&mut self, idx: u16) -> ExprPtr<'a> {
         let hash = hash64!(crate::expr::VAR_HASH, idx);
-        let fvar_bloom = crate::expr::bloom_single(idx);
         let (dag_idx, _) = self.insert_expr(Expr::Var {
-            dbj_idx: idx, hash, struct_hash: crate::expr::VAR_HASH, fvar_bloom, fvar_lb: idx,
+            dbj_idx: idx, hash, fvar_lb: idx,
         });
         crate::util::Ptr::from(DagMarker::ExportFile, dag_idx)
     }
@@ -560,16 +551,12 @@ impl<'a, R: BufRead> Parser<'a, R> {
         let inner_expr = *self.dag.exprs.get_index(inner.idx()).unwrap();
         let inner_nlbv = inner_expr.num_loose_bvars();
         let inner_lb = inner_expr.get_fvar_lb();
-        let inner_bloom = inner_expr.get_fvar_bloom();
         let has_fvars = inner_expr.has_fvars();
         let hash = hash64!(crate::expr::SHIFT_HASH, inner, amount, 0u16);
-        let struct_hash = inner_expr.get_struct_hash();
         let new_nlbv = inner_nlbv + amount;
         let fvar_lb = inner_lb + amount;
-        let fvar_bloom = inner_bloom.checked_shl(amount as u32).unwrap_or(0)
-            | (if inner_bloom & 0x80000000 != 0 { 0x80000000 } else { 0 });
         self.insert_expr(Expr::Shift {
-            hash, struct_hash, fvar_bloom, fvar_lb, inner, amount: amount as i16,
+            hash, fvar_lb, inner, amount: amount as i16,
             cutoff: 0, num_loose_bvars: new_nlbv, has_fvars,
         }).0
     }
@@ -633,7 +620,7 @@ impl<'a, R: BufRead> Parser<'a, R> {
                 let num_ptr = BigUintPtr::from(DagMarker::ExportFile, self.dag.bignums.as_mut().unwrap().insert_full(big_uint).0);
                 let (dag_idx, _) = {
                     let hash = hash64!(crate::expr::NAT_LIT_HASH, num_ptr);
-                    self.insert_expr(Expr::NatLit { ptr: num_ptr, hash, struct_hash: hash, fvar_bloom: 0, fvar_lb: 0 })
+                    self.insert_expr(Expr::NatLit { ptr: num_ptr, hash, fvar_lb: 0 })
                 };
                 if !self.config.nat_extension {
                     return Err(Box::<dyn Error>::from(
@@ -655,7 +642,7 @@ impl<'a, R: BufRead> Parser<'a, R> {
                 );
                 let (dag_idx, _) = {
                     let hash = hash64!(crate::expr::STRING_LIT_HASH, string_ptr);
-                    self.insert_expr(Expr::StringLit { ptr: string_ptr, hash, struct_hash: hash, fvar_bloom: 0, fvar_lb: 0 })
+                    self.insert_expr(Expr::StringLit { ptr: string_ptr, hash, fvar_lb: 0 })
                 };
                 self.record_expr(dag_idx);
             }
@@ -697,7 +684,7 @@ impl<'a, R: BufRead> Parser<'a, R> {
                 let level = self.get_level_ptr(level);
                 let (dag_idx, _) = {
                     let hash = hash64!(crate::expr::SORT_HASH, level);
-                    self.insert_expr(Expr::Sort { level, hash, struct_hash: hash, fvar_bloom: 0, fvar_lb: 0 })
+                    self.insert_expr(Expr::Sort { level, hash, fvar_lb: 0 })
                 };
                 self.record_expr(dag_idx);
             }
@@ -709,7 +696,7 @@ impl<'a, R: BufRead> Parser<'a, R> {
                 let levels = self.get_levels_ptr(&levels);
                 let (dag_idx, _) = {
                     let hash = hash64!(crate::expr::CONST_HASH, name, levels);
-                    self.insert_expr(Expr::Const { name, levels, hash, struct_hash: hash, fvar_bloom: 0, fvar_lb: 0 })
+                    self.insert_expr(Expr::Const { name, levels, hash, fvar_lb: 0 })
                 };
                 self.record_expr(dag_idx);
             }
@@ -729,15 +716,13 @@ impl<'a, R: BufRead> Parser<'a, R> {
                 let core_idx = {
                     let hash = hash64!(crate::expr::APP_HASH, core_fun, core_arg);
                     let locals = self.has_fvars(core_fun) || self.has_fvars(core_arg);
-                    let struct_hash = hash64!(crate::expr::APP_HASH, self.struct_hash(core_fun), self.struct_hash(core_arg));
-                    let fvar_bloom = crate::expr::bloom_union(self.bloom(core_fun), self.bloom(core_arg));
                     let core_nlbv = self.num_loose_bvars(core_fun).max(self.num_loose_bvars(core_arg));
                     let core_fvar_lb = if core_nlbv == 0 { 0 } else {
                         if self.num_loose_bvars(core_fun) == 0 { self.expr_fvar_lb(core_arg) }
                         else if self.num_loose_bvars(core_arg) == 0 { self.expr_fvar_lb(core_fun) }
                         else { self.expr_fvar_lb(core_fun).min(self.expr_fvar_lb(core_arg)) }
                     };
-                    self.insert_expr(Expr::App { fun: core_fun, arg: core_arg, num_loose_bvars: core_nlbv, has_fvars: locals, hash, struct_hash, fvar_bloom, fvar_lb: core_fvar_lb }).0
+                    self.insert_expr(Expr::App { fun: core_fun, arg: core_arg, num_loose_bvars: core_nlbv, has_fvars: locals, hash, fvar_lb: core_fvar_lb }).0
                 };
                 if fvar_lb > 0 {
                     let core_ptr = crate::util::Ptr::from(DagMarker::ExportFile, core_idx);
@@ -750,9 +735,8 @@ impl<'a, R: BufRead> Parser<'a, R> {
             ExprBVar(dbj_idx) => {
                 let (dag_idx, _) = {
                     let hash = hash64!(crate::expr::VAR_HASH, dbj_idx);
-                    let fvar_bloom = crate::expr::bloom_single(dbj_idx);
                     let fvar_lb = dbj_idx;
-                    self.insert_expr(Expr::Var { dbj_idx, hash, struct_hash: crate::expr::VAR_HASH, fvar_bloom, fvar_lb })
+                    self.insert_expr(Expr::Var { dbj_idx, hash, fvar_lb })
                 };
                 self.record_expr(dag_idx);
             }
@@ -778,9 +762,6 @@ impl<'a, R: BufRead> Parser<'a, R> {
                     let hash = hash64!(crate::expr::LAMBDA_HASH, binder_name, binder_info, core_type, core_body);
                     let core_nlbv = self.num_loose_bvars(core_type).max(self.num_loose_bvars(core_body).saturating_sub(1));
                     let locals = self.has_fvars(core_type) || self.has_fvars(core_body);
-                    let struct_hash = hash64!(crate::expr::LAMBDA_HASH, binder_name, binder_info, self.struct_hash(core_type), self.struct_hash(core_body));
-                    let body_bloom = crate::expr::bloom_unbind(self.bloom(core_body));
-                    let fvar_bloom = crate::expr::bloom_union(self.bloom(core_type), body_bloom);
                     let core_fvar_lb = if core_nlbv == 0 { 0 } else {
                         let t_nlbv = self.num_loose_bvars(core_type);
                         let b_nlbv = self.num_loose_bvars(core_body);
@@ -792,7 +773,7 @@ impl<'a, R: BufRead> Parser<'a, R> {
                     };
                     self.insert_expr(Expr::Lambda {
                         binder_name, binder_style: binder_info, binder_type: core_type, body: core_body,
-                        num_loose_bvars: core_nlbv, has_fvars: locals, hash, struct_hash, fvar_bloom, fvar_lb: core_fvar_lb,
+                        num_loose_bvars: core_nlbv, has_fvars: locals, hash, fvar_lb: core_fvar_lb,
                     }).0
                 };
                 if fvar_lb > 0 {
@@ -825,9 +806,6 @@ impl<'a, R: BufRead> Parser<'a, R> {
                     let hash = hash64!(crate::expr::PI_HASH, binder_name, binder_info, core_type, core_body);
                     let core_nlbv = self.num_loose_bvars(core_type).max(self.num_loose_bvars(core_body).saturating_sub(1));
                     let locals = self.has_fvars(core_type) || self.has_fvars(core_body);
-                    let struct_hash = hash64!(crate::expr::PI_HASH, binder_name, binder_info, self.struct_hash(core_type), self.struct_hash(core_body));
-                    let body_bloom = crate::expr::bloom_unbind(self.bloom(core_body));
-                    let fvar_bloom = crate::expr::bloom_union(self.bloom(core_type), body_bloom);
                     let core_fvar_lb = if core_nlbv == 0 { 0 } else {
                         let t_nlbv = self.num_loose_bvars(core_type);
                         let b_nlbv = self.num_loose_bvars(core_body);
@@ -839,7 +817,7 @@ impl<'a, R: BufRead> Parser<'a, R> {
                     };
                     self.insert_expr(Expr::Pi {
                         binder_name, binder_style: binder_info, binder_type: core_type, body: core_body,
-                        num_loose_bvars: core_nlbv, has_fvars: locals, hash, struct_hash, fvar_bloom, fvar_lb: core_fvar_lb,
+                        num_loose_bvars: core_nlbv, has_fvars: locals, hash, fvar_lb: core_fvar_lb,
                     }).0
                 };
                 if fvar_lb > 0 {
@@ -877,12 +855,6 @@ impl<'a, R: BufRead> Parser<'a, R> {
                         .num_loose_bvars(core_type)
                         .max(self.num_loose_bvars(core_val).max(self.num_loose_bvars(core_body).saturating_sub(1)));
                     let locals = self.has_fvars(core_type) || self.has_fvars(core_val) || self.has_fvars(core_body);
-                    let struct_hash = hash64!(crate::expr::LET_HASH, binder_name, self.struct_hash(core_type), self.struct_hash(core_val), self.struct_hash(core_body), nondep);
-                    let body_bloom = crate::expr::bloom_unbind(self.bloom(core_body));
-                    let fvar_bloom = crate::expr::bloom_union(
-                        crate::expr::bloom_union(self.bloom(core_type), self.bloom(core_val)),
-                        body_bloom
-                    );
                     let core_fvar_lb = if core_nlbv == 0 { 0 } else {
                         let mut lb = u16::MAX;
                         if self.num_loose_bvars(core_type) > 0 { lb = lb.min(self.expr_fvar_lb(core_type)); }
@@ -901,8 +873,6 @@ impl<'a, R: BufRead> Parser<'a, R> {
                         has_fvars: locals,
                         hash,
                         nondep,
-                        struct_hash,
-                        fvar_bloom,
                         fvar_lb: core_fvar_lb,
                     }).0
                 };
@@ -927,8 +897,6 @@ impl<'a, R: BufRead> Parser<'a, R> {
                     let hash = hash64!(crate::expr::PROJ_HASH, ty_name, idx, core_structure);
                     let core_nlbv = self.num_loose_bvars(core_structure);
                     let locals = self.has_fvars(core_structure);
-                    let struct_hash = hash64!(crate::expr::PROJ_HASH, ty_name, idx, self.struct_hash(core_structure));
-                    let fvar_bloom = self.bloom(core_structure);
                     let core_fvar_lb = self.expr_fvar_lb(core_structure);
                     self.insert_expr(Expr::Proj {
                         ty_name,
@@ -937,8 +905,6 @@ impl<'a, R: BufRead> Parser<'a, R> {
                         num_loose_bvars: core_nlbv,
                         has_fvars: locals,
                         hash,
-                        struct_hash,
-                        fvar_bloom,
                         fvar_lb: core_fvar_lb,
                     }).0
                 };

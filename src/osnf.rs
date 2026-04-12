@@ -9,7 +9,7 @@
 //! This module computes statistics on potential OSNF sharing in the export file DAG
 //! without modifying the DAG.
 
-use crate::expr::{self, Expr, APP_HASH, LAMBDA_HASH, LET_HASH, PI_HASH, PROJ_HASH, SHIFT_HASH, VAR_HASH};
+use crate::expr::{Expr, APP_HASH, LAMBDA_HASH, LET_HASH, PI_HASH, PROJ_HASH, VAR_HASH};
 use crate::hash64;
 use crate::util::{DagMarker, ExportFile, ExprPtr, FxHashMap, LeanDag, Ptr};
 
@@ -313,12 +313,9 @@ fn compute_core(
         Expr::Var { dbj_idx, .. } => {
             let new_idx = if dbj_idx >= cutoff { dbj_idx - shift } else { dbj_idx };
             let hash = hash64!(VAR_HASH, new_idx);
-            let bloom = expr::bloom_single(new_idx);
             let new_var = Expr::Var {
                 dbj_idx: new_idx,
                 hash,
-                struct_hash: expr::VAR_HASH,
-                fvar_bloom: bloom,
                 fvar_lb: new_idx,
             };
             let (vi, inserted) = dag.exprs.insert_full(new_var);
@@ -338,8 +335,6 @@ fn compute_core(
             let fun_expr = dag.exprs.get_index(fun_core).unwrap();
             let arg_expr = dag.exprs.get_index(arg_core).unwrap();
             let hash = hash64!(APP_HASH, fun_ptr, arg_ptr);
-            let struct_hash = hash64!(APP_HASH, fun_expr.get_struct_hash(), arg_expr.get_struct_hash());
-            let bloom = expr::bloom_union(fun_expr.get_fvar_bloom(), arg_expr.get_fvar_bloom());
             let fvar_lb = if new_nlbv == 0 { 0 } else {
                 if fun_nlbv == 0 { arg_expr.get_fvar_lb() }
                 else if arg_nlbv == 0 { fun_expr.get_fvar_lb() }
@@ -347,7 +342,7 @@ fn compute_core(
             };
             let app = Expr::App {
                 fun: fun_ptr, arg: arg_ptr, num_loose_bvars: new_nlbv,
-                has_fvars, hash, struct_hash, fvar_bloom: bloom, fvar_lb,
+                has_fvars, hash, fvar_lb,
             };
             let (ai, inserted) = dag.exprs.insert_full(app);
             if inserted { dag.expr_nlbv.push(new_nlbv); }
@@ -378,9 +373,6 @@ fn compute_core(
             let body_nlbv = dag.expr_nlbv[body_core];
             let new_nlbv = ty_nlbv.max(val_nlbv.max(body_nlbv.saturating_sub(1)));
             let hash = hash64!(LET_HASH, binder_name, ty_ptr, val_ptr, body_ptr, nondep);
-            let struct_hash = hash64!(LET_HASH, binder_name, ty_e.get_struct_hash(), val_e.get_struct_hash(), body_e.get_struct_hash(), nondep);
-            let body_bloom = expr::bloom_unbind(body_e.get_fvar_bloom());
-            let bloom = expr::bloom_union(expr::bloom_union(ty_e.get_fvar_bloom(), val_e.get_fvar_bloom()), body_bloom);
             let fvar_lb = if new_nlbv == 0 { 0 } else {
                 let mut lb = u16::MAX;
                 if ty_nlbv > 0 { lb = lb.min(ty_e.get_fvar_lb()); }
@@ -392,8 +384,8 @@ fn compute_core(
             };
             let let_e = Expr::Let {
                 binder_name, binder_type: ty_ptr, val: val_ptr, body: body_ptr,
-                num_loose_bvars: new_nlbv, has_fvars, hash, nondep, struct_hash,
-                fvar_bloom: bloom, fvar_lb,
+                num_loose_bvars: new_nlbv, has_fvars, hash, nondep,
+                fvar_lb,
             };
             let (li, inserted) = dag.exprs.insert_full(let_e);
             if inserted { dag.expr_nlbv.push(new_nlbv); }
@@ -405,13 +397,11 @@ fn compute_core(
             let struct_e = dag.exprs.get_index(struct_core).unwrap();
             let struct_nlbv = dag.expr_nlbv[struct_core];
             let hash = hash64!(PROJ_HASH, ty_name, proj_idx, struct_ptr);
-            let struct_hash = hash64!(PROJ_HASH, ty_name, proj_idx, struct_e.get_struct_hash());
-            let bloom = struct_e.get_fvar_bloom();
             let fvar_lb = struct_e.get_fvar_lb();
             let proj = Expr::Proj {
                 ty_name, idx: proj_idx, structure: struct_ptr,
-                num_loose_bvars: struct_nlbv, has_fvars, hash, struct_hash,
-                fvar_bloom: bloom, fvar_lb,
+                num_loose_bvars: struct_nlbv, has_fvars, hash,
+                fvar_lb,
             };
             let (pi, inserted) = dag.exprs.insert_full(proj);
             if inserted { dag.expr_nlbv.push(struct_nlbv); }
@@ -450,9 +440,6 @@ fn make_binder_core<'a>(
     let new_nlbv = ty_nlbv.max(body_nlbv.saturating_sub(1));
     let tag = if is_lambda { LAMBDA_HASH } else { PI_HASH };
     let hash = hash64!(tag, binder_name, binder_style, ty_ptr, body_ptr);
-    let struct_hash = hash64!(tag, binder_name, binder_style, ty_e.get_struct_hash(), body_e.get_struct_hash());
-    let body_bloom = expr::bloom_unbind(body_e.get_fvar_bloom());
-    let bloom = expr::bloom_union(ty_e.get_fvar_bloom(), body_bloom);
     let fvar_lb = if new_nlbv == 0 { 0 } else {
         let b_nlbv = body_nlbv;
         let b_lb = body_e.get_fvar_lb().saturating_sub(1);
@@ -464,14 +451,14 @@ fn make_binder_core<'a>(
     let expr = if is_lambda {
         Expr::Lambda {
             binder_name, binder_style, binder_type: ty_ptr, body: body_ptr,
-            num_loose_bvars: new_nlbv, has_fvars, hash, struct_hash,
-            fvar_bloom: bloom, fvar_lb,
+            num_loose_bvars: new_nlbv, has_fvars, hash,
+            fvar_lb,
         }
     } else {
         Expr::Pi {
             binder_name, binder_style, binder_type: ty_ptr, body: body_ptr,
-            num_loose_bvars: new_nlbv, has_fvars, hash, struct_hash,
-            fvar_bloom: bloom, fvar_lb,
+            num_loose_bvars: new_nlbv, has_fvars, hash,
+            fvar_lb,
         }
     };
     let (bi, inserted) = dag.exprs.insert_full(expr);

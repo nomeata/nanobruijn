@@ -37,8 +37,7 @@ fn use_config(config_path: &Path) -> Result<Option<String>, Box<dyn Error>> {
     let (mut export_file, skipped_axioms) = cfg.to_export_file()?;
     // OSNF: normalize export DAG to outermost-shift normal form.
     // Disabled: expression rewriting causes 60% slowdown (broken pointer equality).
-    // Cache-key approach not needed: canonical_hash (struct_hash + normalized bloom)
-    // already captures shift-equivalence between same-core expressions.
+    // Cache-key approach not needed: pointer equality suffices after hash-consing.
     // nanobruijn::osnf::osnf_normalize(&mut export_file);
     // Check the environment
     let panic_count = export_file.check_all_declars();
