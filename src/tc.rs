@@ -87,39 +87,39 @@ impl<'p> ExportFile<'p> {
         if self.config.use_nanoda_tc {
             self.check_declar_nanoda(d, crate::util::ReusableDag::new(&self.config)).0
         } else {
-            self.check_declar_shift(d, crate::util::ReusableCaches::new(), crate::util::ReusableDag::new(&self.config)).0
+            self.check_declar_shift(d, crate::util::ReusableDag::new(&self.config)).0
         }
     }
 
-    /// Check using our shift-based TC, reusing pre-allocated caches and dag.
-    fn check_declar_shift(&self, d: &Declar<'p>, reusable: crate::util::ReusableCaches, dag: crate::util::ReusableDag) -> (crate::util::TcTrace, crate::util::ReusableCaches, crate::util::ReusableDag) {
+    /// Check using our shift-based TC, reusing pre-allocated dag.
+    fn check_declar_shift(&self, d: &Declar<'p>, dag: crate::util::ReusableDag) -> (crate::util::TcTrace, crate::util::ReusableDag) {
         use Declar::*;
         match d {
             Axiom { .. } => {
-                let (r, reusable, dag) = self.with_tc_and_declar_reusing(*d.info(), reusable, dag, |tc| tc.check_declar_info(d).unwrap());
-                (r.1, reusable, dag)
+                let (r, dag) = self.with_tc_and_declar_reusing(*d.info(), dag, |tc| tc.check_declar_info(d).unwrap());
+                (r.1, dag)
             }
-            Inductive(..) => { self.check_inductive_declar(d); (crate::util::TcTrace::default(), reusable, dag) },
-            Quot { .. } => { self.with_ctx(|ctx| crate::quot::check_quot(ctx, d)); (crate::util::TcTrace::default(), reusable, dag) },
+            Inductive(..) => { self.check_inductive_declar(d); (crate::util::TcTrace::default(), dag) },
+            Quot { .. } => { self.with_ctx(|ctx| crate::quot::check_quot(ctx, d)); (crate::util::TcTrace::default(), dag) },
             Definition { val, .. } | Theorem { val, .. } | Opaque { val, .. } => {
-                let (r, reusable, dag) = self.with_tc_and_declar_reusing(*d.info(), reusable, dag, |tc| {
+                let (r, dag) = self.with_tc_and_declar_reusing(*d.info(), dag, |tc| {
                     tc.check_declar_info(d).unwrap();
                     let inferred_type = tc.infer(*val, crate::tc::InferFlag::Check);
                     tc.assert_def_eq(inferred_type, d.info().ty);
                 });
-                (r.1, reusable, dag)
+                (r.1, dag)
             }
             Constructor(ctor_data) => {
-                let (r, reusable, dag) = self.with_tc_and_declar_reusing(*d.info(), reusable, dag, |tc| tc.check_declar_info(d).unwrap());
+                let (r, dag) = self.with_tc_and_declar_reusing(*d.info(), dag, |tc| tc.check_declar_info(d).unwrap());
                 assert!(self.declars.get(&ctor_data.inductive_name).is_some());
-                (r.1, reusable, dag)
+                (r.1, dag)
             }
             Recursor(recursor_data) => {
-                let (r, reusable, dag) = self.with_tc_and_declar_reusing(*d.info(), reusable, dag, |tc| tc.check_declar_info(d).unwrap());
+                let (r, dag) = self.with_tc_and_declar_reusing(*d.info(), dag, |tc| tc.check_declar_info(d).unwrap());
                 for ind_name in recursor_data.all_inductives.iter() {
                     assert!(self.declars.get(ind_name).is_some())
                 }
-                (r.1, reusable, dag)
+                (r.1, dag)
             }
         }
     }
@@ -167,7 +167,6 @@ impl<'p> ExportFile<'p> {
         let skip_decl = self.config.skip_declarations;
         let timeout_secs = self.config.declaration_timeout_secs;
         let mut skipped_count = 0usize;
-        let mut reusable = crate::util::ReusableCaches::new();
         let mut dag = crate::util::ReusableDag::new(&self.config);
         for (i, declar) in self.declars.values().enumerate() {
             if max_decl > 0 && i >= max_decl {
@@ -189,24 +188,22 @@ impl<'p> ExportFile<'p> {
                 dag = d;
             } else if timeout_secs > 0 {
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    self.check_declar_shift(declar, reusable, dag)
+                    self.check_declar_shift(declar, dag)
                 }));
                 match result {
                     Err(_) => {
                         self.with_ctx(|ctx| {
                             eprintln!("  PANIC #{}: {:?} (skipping)", i, ctx.debug_print(declar.info().name));
                         });
-                        reusable = crate::util::ReusableCaches::new();
                         dag = crate::util::ReusableDag::new(&self.config);
                         skipped_count += 1;
                         continue;
                     }
-                    Ok((t, r, d)) => { trace = t; reusable = r; dag = d; }
+                    Ok((t, d)) => { trace = t; dag = d; }
                 }
             } else {
-                let (t, r, d) = self.check_declar_shift(declar, reusable, dag);
+                let (t, d) = self.check_declar_shift(declar, dag);
                 trace = t;
-                reusable = r;
                 dag = d;
             }
             let decl_time = decl_start.elapsed().as_millis();
@@ -236,7 +233,6 @@ impl<'p> ExportFile<'p> {
                         .name(format!("thread_{}", i))
                         .stack_size(crate::STACK_SIZE)
                         .spawn_scoped(sco, || {
-                            let mut reusable = crate::util::ReusableCaches::new();
                             let mut dag = crate::util::ReusableDag::new(&self.config);
                             loop {
                                 let idx = task_num.fetch_add(1, Relaxed);
@@ -245,8 +241,7 @@ impl<'p> ExportFile<'p> {
                                         let (_, d) = self.check_declar_nanoda(declar, dag);
                                         dag = d;
                                     } else {
-                                        let (_, r, d) = self.check_declar_shift(declar, reusable, dag);
-                                        reusable = r;
+                                        let (_, d) = self.check_declar_shift(declar, dag);
                                         dag = d;
                                     }
                                 } else {

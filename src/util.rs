@@ -292,13 +292,6 @@ impl<'t> ExprCache<'t> {
 
 }
 
-/// Pre-allocated caches that survive across declarations (currently empty).
-pub struct ReusableCaches;
-
-impl ReusableCaches {
-    pub fn new() -> Self { ReusableCaches }
-    pub fn reset(&mut self) {}
-}
 /// Type-erased LeanDag for reuse across declarations.
 /// The inner LeanDag<'static> is always cleared before being transmuted to the correct lifetime.
 pub struct ReusableDag(LeanDag<'static>);
@@ -338,7 +331,7 @@ impl<'p> ExportFile<'p> {
     where
         F: FnOnce(&mut TcCtx<'_, 'p>) -> A, {
         let mut dag = LeanDag::new(&self.config);
-        let mut ctx = TcCtx::new(self, &mut dag, ReusableCaches::new());
+        let mut ctx = TcCtx::new(self, &mut dag);
         f(&mut ctx)
     }
 
@@ -346,7 +339,7 @@ impl<'p> ExportFile<'p> {
     where
         F: FnOnce(&mut TypeChecker<'_, '_, 'p>) -> A, {
         let mut dag = LeanDag::new(&self.config);
-        let mut ctx = TcCtx::new(self, &mut dag, ReusableCaches::new());
+        let mut ctx = TcCtx::new(self, &mut dag);
         let env = self.new_env(env_limit);
         let mut tc = TypeChecker::new(&mut ctx, &env, None);
         f(&mut tc)
@@ -355,40 +348,38 @@ impl<'p> ExportFile<'p> {
     pub fn with_tc_and_declar<F, A>(&self, d: crate::env::DeclarInfo<'p>, f: F) -> (A, TcTrace)
     where
         F: FnOnce(&mut TypeChecker<'_, '_, 'p>) -> A, {
-        self.with_tc_and_declar_reusing(d, ReusableCaches::new(), ReusableDag::new(&self.config), f).0
+        self.with_tc_and_declar_reusing(d, ReusableDag::new(&self.config), f).0
     }
 
-    /// Like `with_tc_and_declar`, but reuses pre-allocated caches and dag across declarations.
+    /// Like `with_tc_and_declar`, but reuses pre-allocated dag across declarations.
     /// The dag is passed as `ReusableDag` (type-erased) and rebound to the correct lifetime.
-    pub fn with_tc_and_declar_reusing<F, A>(&self, d: crate::env::DeclarInfo<'p>, mut reusable: ReusableCaches, reusable_dag: ReusableDag, f: F) -> ((A, TcTrace), ReusableCaches, ReusableDag)
+    pub fn with_tc_and_declar_reusing<F, A>(&self, d: crate::env::DeclarInfo<'p>, reusable_dag: ReusableDag, f: F) -> ((A, TcTrace), ReusableDag)
     where
         F: FnOnce(&mut TypeChecker<'_, '_, 'p>) -> A, {
-        reusable.reset();
         // SAFETY: ReusableDag wraps LeanDag<'static>. After clear_for_reuse(), the IndexSets
         // are empty (only Anon/Zero sentinels which are 'static). All types use PhantomData
         // for lifetimes — identical layout across all lifetimes.
         let mut dag_storage = std::mem::ManuallyDrop::new(reusable_dag.0);
         let dag_ref: &mut LeanDag<'_> = unsafe { &mut *(&mut *dag_storage as *mut LeanDag<'static>).cast() };
         dag_ref.clear_for_reuse();
-        let mut ctx = TcCtx::new(self, dag_ref, reusable);
+        let mut ctx = TcCtx::new(self, dag_ref);
         let env = self.new_env(EnvLimit::ByName(d.name));
         let mut tc = TypeChecker::new(&mut ctx, &env, Some(d));
         let result = f(&mut tc);
         let mut trace = tc.ctx.trace;
         trace.dag_size = tc.ctx.dag.exprs.len() as u64;
-        let reusable = std::mem::replace(&mut tc.ctx.reusable, ReusableCaches::new());
         drop(tc);
         drop(ctx);
         // Reclaim ownership and erase lifetime back to 'static.
         let reusable_dag = ReusableDag(std::mem::ManuallyDrop::into_inner(dag_storage));
-        ((result, trace), reusable, reusable_dag)
+        ((result, trace), reusable_dag)
     }
 
     pub fn with_nanoda_tc_and_declar<F, A>(&self, d: crate::env::DeclarInfo<'p>, f: F) -> (A, TcTrace)
     where
         F: FnOnce(&mut crate::nanoda_tc::NanodaTypeChecker<'_, '_, 'p>) -> A, {
         let mut dag = LeanDag::new(&self.config);
-        let mut ctx = TcCtx::new(self, &mut dag, ReusableCaches::new());
+        let mut ctx = TcCtx::new(self, &mut dag);
         let env = self.new_env(EnvLimit::ByName(d.name));
         let mut tc = crate::nanoda_tc::NanodaTypeChecker::new(&mut ctx, &env, Some(d));
         let result = f(&mut tc);
@@ -403,7 +394,7 @@ impl<'p> ExportFile<'p> {
         let mut dag_storage = std::mem::ManuallyDrop::new(reusable_dag.0);
         let dag_ref: &mut LeanDag<'_> = unsafe { &mut *(&mut *dag_storage as *mut LeanDag<'static>).cast() };
         dag_ref.clear_for_reuse();
-        let mut ctx = TcCtx::new(self, dag_ref, ReusableCaches::new());
+        let mut ctx = TcCtx::new(self, dag_ref);
         let env = self.new_env(EnvLimit::ByName(d.name));
         let mut tc = crate::nanoda_tc::NanodaTypeChecker::new(&mut ctx, &env, Some(d));
         let result = f(&mut tc);
@@ -439,8 +430,6 @@ pub struct TcCtx<'t, 'p> {
     pub(crate) unique_counter: u32,
     /// A cache for instantiation, free variable abstraction, and level substitution
     pub(crate) expr_cache: ExprCache<'t>,
-    /// Pre-allocated caches that survive across declarations (avoids 24MB memset/decl).
-    pub(crate) reusable: ReusableCaches,
     pub(crate) eager_mode: bool,
     /// Heartbeat counter: incremented in hot paths. When a deadline is set,
     /// checked periodically to enforce per-declaration timeouts.
@@ -605,14 +594,13 @@ impl std::fmt::Display for TcTrace {
 }
 
 impl<'t, 'p: 't> TcCtx<'t, 'p> {
-    pub fn new(export_file: &'t ExportFile<'p>, tdag: &'t mut LeanDag<'t>, reusable: ReusableCaches) -> Self {
+    pub fn new(export_file: &'t ExportFile<'p>, tdag: &'t mut LeanDag<'t>) -> Self {
         Self {
             export_file,
             dag: tdag,
             dbj_level_counter: 0u16,
             unique_counter: 0u32,
             expr_cache: ExprCache::new(),
-            reusable,
             eager_mode: false,
             heartbeat: 0,
             deadline: if export_file.config.declaration_timeout_secs > 0 {
