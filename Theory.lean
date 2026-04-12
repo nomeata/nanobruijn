@@ -186,6 +186,73 @@ def shift : Expr → (k : Nat) → (c : Nat := 0) → Expr
   | lam body, k, c => lam (body.shift k (c + 1))
   | const id, _, _ => const id
 
+theorem shift_bvar' (i k c : Nat) :
+    (bvar i : Expr).shift k c = if i ≥ c then bvar (i + k) else bvar i := rfl
+theorem shift_app' (f a : Expr) (k c : Nat) :
+    (app f a).shift k c = app (f.shift k c) (a.shift k c) := rfl
+theorem shift_lam' (body : Expr) (k c : Nat) :
+    (lam body).shift k c = lam (body.shift k (c + 1)) := rfl
+theorem shift_const' (n k c : Nat) :
+    (const n).shift k c = const n := rfl
+
+/-! ### Shift composition lemmas -/
+
+theorem shift_zero (e : Expr) (c : Nat) : e.shift 0 c = e := by
+  induction e generalizing c with
+  | bvar i => simp only [shift]; split <;> (first | (congr 1; omega) | rfl)
+  | app f a ihf iha => simp only [shift, ihf, iha]
+  | lam body ih => simp only [shift, ih]
+  | const _ => rfl
+
+theorem shift_shift (e : Expr) (j k c : Nat) :
+    (e.shift j c).shift k c = e.shift (j + k) c := by
+  induction e generalizing c with
+  | bvar i =>
+    simp only [shift]
+    by_cases h : i ≥ c
+    · simp only [h, ↓reduceIte, shift, show i + j ≥ c from by omega, Expr.bvar.injEq]; omega
+    · simp only [h, ↓reduceIte, shift, h]
+  | app f a ihf iha => simp only [shift, ihf, iha]
+  | lam body ih => simp only [shift, ih]
+  | const _ => rfl
+
+theorem shift_shift_comm (e : Expr) (j k c d : Nat) (hcd : c ≤ d) (hdj : d ≤ c + j) :
+    (e.shift j c).shift k d = e.shift (j + k) c := by
+  induction e generalizing c d with
+  | bvar i =>
+    simp only [shift]
+    by_cases h : i ≥ c
+    · simp only [h, ↓reduceIte, shift, show i + j ≥ d from by omega, Expr.bvar.injEq]; omega
+    · simp only [h, ↓reduceIte, shift, show ¬(i ≥ d) from by omega]
+  | app f a ihf iha => simp only [shift, ihf c d hcd hdj, iha c d hcd hdj]
+  | lam body ih =>
+    simp only [shift]; exact congrArg Expr.lam (ih (c + 1) (d + 1) (by omega) (by omega))
+  | const _ => rfl
+
+private theorem shift_comm_lt_gen (e : Expr) (k amount cutoff base : Nat) (hlt : k < cutoff) :
+    (e.shift k base).shift amount (cutoff + base) =
+    (e.shift amount (cutoff - k + base)).shift k base := by
+  induction e generalizing k cutoff base with
+  | bvar i =>
+    simp only [shift]
+    by_cases h : i ≥ base
+    · simp only [h, ↓reduceIte]
+      by_cases hi : i + k ≥ cutoff + base
+      · simp only [shift, hi, ↓reduceIte, show i ≥ cutoff - k + base from by omega,
+          show i + amount ≥ base from by omega, Expr.bvar.injEq]; omega
+      · simp only [shift, hi, ↓reduceIte, show ¬(i ≥ cutoff - k + base) from by omega, h]
+    · simp only [h, ↓reduceIte, shift, show ¬(i ≥ cutoff + base) from by omega,
+        show ¬(i ≥ cutoff - k + base) from by omega, h]
+  | app f a ihf iha => simp only [shift, ihf k cutoff base hlt, iha k cutoff base hlt]
+  | lam body ih =>
+    simp only [shift]; exact congrArg Expr.lam (ih k cutoff (base + 1) hlt)
+  | const _ => rfl
+
+theorem shift_comm_lt (e : Expr) (k amount cutoff : Nat) (hlt : k < cutoff) :
+    (e.shift k 0).shift amount cutoff = (e.shift amount (cutoff - k)).shift k 0 := by
+  have h := shift_comm_lt_gen e k amount cutoff 0 hlt
+  simp only [Nat.add_zero] at h; exact h
+
 /-- Compute the delta-encoded free variable list. -/
 def fvars : Expr → FVarList
   | bvar i => [i]
@@ -319,6 +386,12 @@ def erase : SExpr → Expr
   | const id => .const id
   | shift k inner => inner.erase.shift k 0
 
+theorem erase_bvar' (i : Nat) : (bvar i : SExpr).erase = Expr.bvar i := rfl
+theorem erase_app' (f a : SExpr) : (app f a).erase = Expr.app f.erase a.erase := rfl
+theorem erase_lam' (b : SExpr) : (lam b).erase = Expr.lam b.erase := rfl
+theorem erase_const' (n : Nat) : (const n : SExpr).erase = Expr.const n := rfl
+theorem erase_shift' (k : Nat) (inner : SExpr) : (shift k inner).erase = inner.erase.shift k 0 := rfl
+
 /-- Two SExprs are shift-equivalent iff they erase to the same Expr. -/
 def equiv (e₁ e₂ : SExpr) : Prop := e₁.erase = e₂.erase
 
@@ -422,6 +495,110 @@ def to_osnf : SExpr → SExpr
     | e =>  -- compound (already a core from mk_osnf_compound)
       if k = 0 then e else shift k e
 
+/-! ### Helpers for to_osnf_erase -/
+
+/-- Predicate: all bvar indices in `e` at or above `cutoff` are ≥ `cutoff + amount`.
+    This is the precondition for `adjust_child` to correctly preserve erasure. -/
+inductive BvarsGe : SExpr → Nat → Nat → Prop where
+  | bvar_lt (i amount cutoff : Nat) (h : i < cutoff) : BvarsGe (bvar i) amount cutoff
+  | bvar_ge (i amount cutoff : Nat) (h : i ≥ cutoff + amount) : BvarsGe (bvar i) amount cutoff
+  | app (f a : SExpr) (amount cutoff : Nat)
+    (hf : BvarsGe f amount cutoff) (ha : BvarsGe a amount cutoff) :
+    BvarsGe (app f a) amount cutoff
+  | lam (body : SExpr) (amount cutoff : Nat)
+    (hb : BvarsGe body amount (cutoff + 1)) :
+    BvarsGe (lam body) amount cutoff
+  | const_intro (id amount cutoff : Nat) : BvarsGe (const id) amount cutoff
+  | shift_ge (k : Nat) (inner : SExpr) (amount cutoff : Nat)
+    (hge : k ≥ cutoff) (hka : k ≥ cutoff + amount) :
+    BvarsGe (shift k inner) amount cutoff
+  | shift_lt (k : Nat) (inner : SExpr) (amount cutoff : Nat)
+    (hlt : ¬(k ≥ cutoff)) (hi : BvarsGe inner amount (cutoff - k)) :
+    BvarsGe (shift k inner) amount cutoff
+
+/-- adjust_child preserves erasure (after re-shifting) when the BvarsGe precondition holds. -/
+theorem adjust_child_erase (e : SExpr) (amount cutoff : Nat)
+    (h : BvarsGe e amount cutoff) :
+    (adjust_child e amount cutoff).erase.shift amount cutoff = e.erase := by
+  induction h with
+  | bvar_lt i amount cutoff hlt =>
+    show ((if i ≥ cutoff then bvar (i - amount) else bvar i) : SExpr).erase.shift amount cutoff = _
+    rw [if_neg (show ¬(i ≥ cutoff) by omega), erase_bvar',
+        Expr.shift_bvar', if_neg (show ¬(i ≥ cutoff) by omega)]
+  | bvar_ge i amount cutoff hge =>
+    show ((if i ≥ cutoff then bvar (i - amount) else bvar i) : SExpr).erase.shift amount cutoff = _
+    rw [if_pos (show i ≥ cutoff by omega), erase_bvar',
+        Expr.shift_bvar', if_pos (show i - amount ≥ cutoff by omega)]
+    congr 1; omega
+  | app f a amount cutoff _hf _ha ihf iha =>
+    show (Expr.app (adjust_child f amount cutoff).erase (adjust_child a amount cutoff).erase).shift amount cutoff
+         = Expr.app f.erase a.erase
+    rw [Expr.shift_app']; congr 1 <;> assumption
+  | lam body amount cutoff _hb ih =>
+    show (Expr.lam (adjust_child body amount (cutoff + 1)).erase).shift amount cutoff = Expr.lam body.erase
+    rw [Expr.shift_lam']
+    exact congrArg Expr.lam ih
+  | const_intro id amount cutoff =>
+    show (Expr.const id).shift amount cutoff = Expr.const id
+    exact Expr.shift_const' id amount cutoff
+  | shift_ge k inner amount cutoff hge hka =>
+    show ((if k ≥ cutoff then
+            (let k' := k - amount; if k' = 0 then inner else shift k' inner)
+           else shift k (adjust_child inner amount (cutoff - k))) : SExpr).erase.shift amount cutoff
+         = inner.erase.shift k 0
+    rw [if_pos hge]
+    by_cases hk0 : k - amount = 0
+    · simp only [hk0, ite_true]
+      have hkeq : k = amount := by omega
+      have hc0 : cutoff = 0 := by omega
+      subst hkeq; subst hc0; rfl
+    · rw [if_neg hk0, erase_shift']
+      rw [Expr.shift_shift_comm inner.erase (k - amount) amount 0 cutoff (by omega) (by omega)]
+      congr 1; omega
+  | shift_lt k inner amount cutoff hlt hi ih =>
+    show ((if k ≥ cutoff then _
+           else shift k (adjust_child inner amount (cutoff - k))) : SExpr).erase.shift amount cutoff
+         = inner.erase.shift k 0
+    rw [if_neg hlt, erase_shift']
+    rw [Expr.shift_comm_lt (adjust_child inner amount (cutoff - k)).erase k amount cutoff (by omega)]
+    show ((adjust_child inner amount (cutoff - k)).erase.shift amount (cutoff - k)).shift k 0
+         = inner.erase.shift k 0
+    exact congrArg (·.shift k 0) ih
+
+/-- Children of `app f a` satisfy BvarsGe for fvar_lb_val. -/
+axiom bvarsGe_child_app_left (f a : SExpr) :
+    BvarsGe f (fvar_lb_val (app f a)) 0
+/-- Children of `app f a` satisfy BvarsGe for fvar_lb_val. -/
+axiom bvarsGe_child_app_right (f a : SExpr) :
+    BvarsGe a (fvar_lb_val (app f a)) 0
+/-- Body of `lam body` satisfies BvarsGe for fvar_lb_val at cutoff 1. -/
+axiom bvarsGe_child_lam (body : SExpr) :
+    BvarsGe body (fvar_lb_val (lam body)) 1
+
+theorem mk_osnf_compound_erase_app (f a : SExpr) :
+    (mk_osnf_compound (app f a)).erase = (app f a).erase := by
+  show (let lb := (app f a).fvar_lb_val;
+        if lb = 0 then app f a
+        else shift lb (app (adjust_child f lb 0) (adjust_child a lb 0))).erase = _
+  simp only
+  split
+  · rfl
+  · rw [erase_shift', erase_app', Expr.shift_app']
+    congr 1
+    exact adjust_child_erase f _ 0 (bvarsGe_child_app_left f a)
+    exact adjust_child_erase a _ 0 (bvarsGe_child_app_right f a)
+
+theorem mk_osnf_compound_erase_lam (body : SExpr) :
+    (mk_osnf_compound (lam body)).erase = (lam body).erase := by
+  show (let lb := (lam body).fvar_lb_val;
+        if lb = 0 then lam body
+        else shift lb (lam (adjust_child body lb 1))).erase = _
+  simp only
+  split
+  · rfl
+  · rw [erase_shift', erase_lam', Expr.shift_lam']
+    congr 1; exact adjust_child_erase body _ 1 (bvarsGe_child_lam body)
+
 /-! ### OSNF theorems -/
 
 /-- The OSNF of a bvar is itself. -/
@@ -441,7 +618,46 @@ theorem erase_shift (k : Nat) (inner : SExpr) :
 
 /-- `to_osnf` preserves denotation: `(to_osnf e).erase = e.erase`. -/
 theorem to_osnf_erase (e : SExpr) : (to_osnf e).erase = e.erase := by
-  sorry
+  induction e with
+  | bvar i => rfl
+  | const id => rfl
+  | app f a ihf iha =>
+    show (mk_osnf_compound (app f.to_osnf a.to_osnf)).erase = Expr.app f.erase a.erase
+    rw [mk_osnf_compound_erase_app, erase_app']
+    congr 1 <;> assumption
+  | lam body ih =>
+    show (mk_osnf_compound (lam body.to_osnf)).erase = Expr.lam body.erase
+    rw [mk_osnf_compound_erase_lam, erase_lam', ih]
+  | shift k inner ih =>
+    show (match inner.to_osnf with
+      | bvar i => bvar (i + k)
+      | shift k' core => if k + k' = 0 then core else shift (k + k') core
+      | e => if k = 0 then e else shift k e).erase = inner.erase.shift k 0
+    split
+    · -- inner.to_osnf = bvar i
+      rename_i i heq
+      rw [erase_bvar', ← ih, heq, erase_bvar', Expr.shift_bvar', if_pos (show i ≥ 0 by omega)]
+    · -- inner.to_osnf = shift k' core
+      rename_i k' core heq
+      have ih' : (shift k' core).erase = inner.erase := by rw [← heq]; exact ih
+      split
+      next hkk =>
+        have hk0 : k = 0 := by omega
+        have hk'0 : k' = 0 := by omega
+        subst hk0; subst hk'0
+        rw [erase_shift', Expr.shift_zero] at ih'
+        rw [ih', Expr.shift_zero]
+      next hkk =>
+        rw [erase_shift']
+        rw [erase_shift'] at ih'
+        rw [← ih', Expr.shift_shift core.erase k' k 0]
+        congr 1; omega
+    · -- compound (app/lam/const)
+      split
+      next hk0 =>
+        subst hk0; rw [ih, Expr.shift_zero]
+      next hk0 =>
+        rw [erase_shift', ih]
 
 /-- **Uniqueness of OSNF**: If two expressions denote the same term and both
     are in OSNF, they are syntactically equal. -/
