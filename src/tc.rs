@@ -713,7 +713,6 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             }
             Shift { .. } => unreachable!("Shift handled before cache lookup")
         };
-        let r = self.ctx.to_osnf(r);
         self.tc_cache.infer_cache_insert(bucket_idx, e, r, is_check);
         r
     }
@@ -974,7 +973,6 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             } else if let Some(next_term) = self.unfold_def(whnfd) {
                 cursor = next_term;
             } else {
-                let whnfd = self.ctx.to_osnf(whnfd);
                 self.tc_cache.whnf_cache_insert(whnf_bucket_idx, e, whnfd);
                 return whnfd
             }
@@ -1150,7 +1148,6 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                 }
             }
         };
-        let result = self.ctx.to_osnf(result);
         // Cache intermediate inputs (non-cheap_proj only).
         if !cheap_proj {
             let store_depth = self.depth() as u16;
