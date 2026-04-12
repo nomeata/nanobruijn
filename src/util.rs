@@ -219,35 +219,33 @@ impl<K: ChainKey, V: Copy> LazyChainMap<K, V> {
     }
 }
 
-/// Cache key: single u64 mixing struct_hash and fvar_bloom hash.
-pub(crate) type CacheKey = u64;
-/// DefEq cache key: ordered pair of canonical hashes.
-pub(crate) type DefeqCacheKey = (u64, u64);
-
 /// A single depth frame: one local context entry plus all per-depth caches.
-/// Size: 16 bytes (local) + 7 * 8 bytes (lazy caches) = 72 bytes.
+/// Caches are keyed by ExprPtr (pointer identity, enabled by hash-consing).
 pub(crate) struct DepthFrame<'t> {
     /// The local binding: (type, optional value for let-bindings).
     pub(crate) local: (ExprPtr<'t>, Option<ExprPtr<'t>>),
-    /// Per-depth whnf cache (chained for hash collision handling).
-    pub(crate) whnf_cache: LazyChainMap<CacheKey, WhnfSlot<'t>>,
-    /// Per-depth whnf_no_unfolding cache (chained).
-    pub(crate) whnf_no_unfolding_cache: LazyChainMap<CacheKey, WhnfSlot<'t>>,
-    /// Per-depth infer cache (chained).
-    pub(crate) infer_cache: LazyChainMap<CacheKey, (ExprPtr<'t>, ExprPtr<'t>, u16, bool)>,
+    /// Per-depth whnf cache: ExprPtr → result.
+    pub(crate) whnf_cache: LazyMap<ExprPtr<'t>, ExprPtr<'t>>,
+    /// Per-depth whnf_no_unfolding cache.
+    pub(crate) whnf_no_unfolding_cache: LazyMap<ExprPtr<'t>, ExprPtr<'t>>,
+    /// Per-depth infer cache (check mode): ExprPtr → result.
+    pub(crate) infer_cache_check: LazyMap<ExprPtr<'t>, ExprPtr<'t>>,
+    /// Per-depth infer cache (no-check mode): ExprPtr → result.
+    pub(crate) infer_cache_no_check: LazyMap<ExprPtr<'t>, ExprPtr<'t>>,
     /// Per-depth positive def_eq cache for open expressions.
-    pub(crate) defeq_pos_open: LazyMap<DefeqCacheKey, (ExprPtr<'t>, ExprPtr<'t>, u16)>,
+    pub(crate) defeq_pos_open: LazyMap<(ExprPtr<'t>, ExprPtr<'t>), (ExprPtr<'t>, ExprPtr<'t>, u16)>,
     /// Per-depth negative def_eq cache for open expressions.
-    pub(crate) defeq_neg_open: LazyMap<DefeqCacheKey, (ExprPtr<'t>, ExprPtr<'t>, u16)>,
+    pub(crate) defeq_neg_open: LazyMap<(ExprPtr<'t>, ExprPtr<'t>), (ExprPtr<'t>, ExprPtr<'t>, u16)>,
 }
 
 impl<'t> DepthFrame<'t> {
     pub(crate) fn new(ty: ExprPtr<'t>, val: Option<ExprPtr<'t>>) -> Self {
         DepthFrame {
             local: (ty, val),
-            whnf_cache: LazyChainMap::new(),
-            whnf_no_unfolding_cache: LazyChainMap::new(),
-            infer_cache: LazyChainMap::new(),
+            whnf_cache: LazyMap::new(),
+            whnf_no_unfolding_cache: LazyMap::new(),
+            infer_cache_check: LazyMap::new(),
+            infer_cache_no_check: LazyMap::new(),
             defeq_pos_open: LazyMap::new(),
             defeq_neg_open: LazyMap::new(),
         }
@@ -915,16 +913,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         }
     }
 
-    /// Like alloc_expr but skips the export_file lookup. Used when the expression
-    /// contains TcCtx pointers (the export_file can't contain such expressions).
-    #[inline(always)]
-    fn alloc_expr_tc(&mut self, e: Expr<'t>) -> ExprPtr<'t> {
-        self.trace.alloc_expr_calls += 1;
-        let nlbv = e.num_loose_bvars();
-        let (idx, inserted) = self.dag.exprs.insert_full(e);
-        if inserted { self.dag.expr_nlbv.push(nlbv); }
-        Ptr::from(DagMarker::TcCtx, idx)
-    }
+    // alloc_expr_tc removed: always use alloc_expr to check both DAGs (nanoda approach).
 
     /// Store a string (a `CowStr`), getting back a pointer to the allocated item. If the item was
     /// already stored, forego the allocation and return a pointer to the previously inserted
@@ -1153,6 +1142,89 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         self.alloc_expr(Expr::Const { name, levels, hash, struct_hash, fvar_bloom: 0, fvar_lb: 0 })
     }
 
+    /// OSNF helper: adjust a child expression by subtracting `amount` from its free variable
+    /// lower bound. `cutoff` accounts for binders (0 for non-binder children, 1 for lambda/pi body).
+    /// Precondition: child's effective fvar_lb >= amount (after accounting for cutoff).
+    /// Only called when amount > 0.
+    fn adjust_child_tc(&mut self, child: ExprPtr<'t>, amount: u16, cutoff: u16) -> ExprPtr<'t> {
+        let child_expr = self.read_expr(child);
+        let nlbv = child_expr.num_loose_bvars();
+        if nlbv <= cutoff { return child; }
+        match child_expr {
+            Expr::Var { dbj_idx, .. } => {
+                debug_assert!(dbj_idx >= amount, "adjust_child_tc: bvar {} < amount {}", dbj_idx, amount);
+                self.mk_var(dbj_idx - amount)
+            }
+            Expr::Shift { inner, amount: child_amount, cutoff: 0, .. } => {
+                debug_assert!(child_amount as u16 >= amount,
+                    "adjust_child_tc: shift amount {} < adjustment {}", child_amount, amount);
+                let new_amount = child_amount as u16 - amount;
+                if new_amount == 0 {
+                    inner
+                } else {
+                    self.mk_shift(inner, new_amount as i16)
+                }
+            }
+            _ => {
+                let child_fvar_lb = child_expr.get_fvar_lb();
+                if child_fvar_lb == 0 {
+                    return child; // Already a core
+                }
+                // Non-OSNF compound with fvar_lb > 0: recursively OSNF-normalize first,
+                // which produces Shift(child_fvar_lb, core). Then adjust the Shift.
+                let osnf = self.to_osnf(child);
+                self.adjust_child_tc(osnf, amount, cutoff)
+            }
+        }
+    }
+
+    /// Convert an expression to Outermost-Shift Normal Form (OSNF).
+    /// If fvar_lb > 0, extracts the core (adjusting children) and wraps in Shift(fvar_lb, core).
+    /// Handles non-OSNF children by recursively normalizing them first.
+    /// Leaves bvar, Shift, Sort, Const, NatLit, StringLit, Local unchanged.
+    pub fn to_osnf(&mut self, e: ExprPtr<'t>) -> ExprPtr<'t> {
+        let expr = self.read_expr(e);
+        let fvar_lb = expr.get_fvar_lb();
+        if fvar_lb == 0 || expr.num_loose_bvars() == 0 {
+            return e;
+        }
+        // Only normalize compound expressions (not Var, Shift, or leaf types)
+        match expr {
+            Expr::Var { .. } | Expr::Shift { .. } | Expr::Sort { .. } | Expr::Const { .. }
+            | Expr::NatLit { .. } | Expr::StringLit { .. } | Expr::Local { .. } => e,
+            Expr::App { fun, arg, .. } => {
+                let cf = self.adjust_child_tc(fun, fvar_lb, 0);
+                let ca = self.adjust_child_tc(arg, fvar_lb, 0);
+                let core = self.mk_app(cf, ca);
+                self.mk_shift(core, fvar_lb as i16)
+            }
+            Expr::Lambda { binder_name, binder_style, binder_type, body, .. } => {
+                let ct = self.adjust_child_tc(binder_type, fvar_lb, 0);
+                let cb = self.adjust_child_tc(body, fvar_lb, 1);
+                let core = self.mk_lambda(binder_name, binder_style, ct, cb);
+                self.mk_shift(core, fvar_lb as i16)
+            }
+            Expr::Pi { binder_name, binder_style, binder_type, body, .. } => {
+                let ct = self.adjust_child_tc(binder_type, fvar_lb, 0);
+                let cb = self.adjust_child_tc(body, fvar_lb, 1);
+                let core = self.mk_pi(binder_name, binder_style, ct, cb);
+                self.mk_shift(core, fvar_lb as i16)
+            }
+            Expr::Let { binder_name, binder_type, val, body, nondep, .. } => {
+                let ct = self.adjust_child_tc(binder_type, fvar_lb, 0);
+                let cv = self.adjust_child_tc(val, fvar_lb, 0);
+                let cb = self.adjust_child_tc(body, fvar_lb, 1);
+                let core = self.mk_let(binder_name, ct, cv, cb, nondep);
+                self.mk_shift(core, fvar_lb as i16)
+            }
+            Expr::Proj { ty_name, idx, structure, .. } => {
+                let cs = self.adjust_child_tc(structure, fvar_lb, 0);
+                let core = self.mk_proj(ty_name, idx, cs);
+                self.mk_shift(core, fvar_lb as i16)
+            }
+        }
+    }
+
     pub fn mk_app(&mut self, fun: ExprPtr<'t>, arg: ExprPtr<'t>) -> ExprPtr<'t> {
         // 2-way set-associative cache (only allocated for heavy declarations)
         let tag = fun.get_hash().wrapping_mul(0x9e3779b97f4a7c15) ^ arg.get_hash();
@@ -1199,11 +1271,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
             else { fun_e.get_fvar_lb().min(arg_e.get_fvar_lb()) }
         };
         let app_expr = Expr::App { fun, arg, num_loose_bvars, has_fvars, hash, struct_hash, fvar_bloom, fvar_lb };
-        let result = if fun.dag_marker() == DagMarker::TcCtx || arg.dag_marker() == DagMarker::TcCtx {
-            self.alloc_expr_tc(app_expr)
-        } else {
-            self.alloc_expr(app_expr)
-        };
+        let result = self.alloc_expr(app_expr);
         // Lazily allocate DM cache after enough misses to justify 1MB
         if dm_len == 0 {
             self.expr_cache.mk_app_miss_count += 1;
@@ -1253,11 +1321,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
             else { ty_e.get_fvar_lb().min(b_lb) }
         };
         let lambda_expr = Expr::Lambda { binder_name, binder_style, binder_type, body, num_loose_bvars, has_fvars, hash, struct_hash, fvar_bloom, fvar_lb };
-        let result = if binder_type.dag_marker() == DagMarker::TcCtx || body.dag_marker() == DagMarker::TcCtx {
-            self.alloc_expr_tc(lambda_expr)
-        } else {
-            self.alloc_expr(lambda_expr)
-        };
+        let result = self.alloc_expr(lambda_expr);
         self.expr_cache.mk_lambda_cache.insert(key, result);
         result
     }
@@ -1292,11 +1356,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
             else { ty_e.get_fvar_lb().min(b_lb) }
         };
         let pi_expr = Expr::Pi { binder_name, binder_style, binder_type, body, num_loose_bvars, has_fvars, hash, struct_hash, fvar_bloom, fvar_lb };
-        let result = if binder_type.dag_marker() == DagMarker::TcCtx || body.dag_marker() == DagMarker::TcCtx {
-            self.alloc_expr_tc(pi_expr)
-        } else {
-            self.alloc_expr(pi_expr)
-        };
+        let result = self.alloc_expr(pi_expr);
         self.expr_cache.mk_pi_cache.insert(key, result);
         result
     }
@@ -1337,11 +1397,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
             if lb == u16::MAX { 0 } else { lb }
         };
         let let_expr = Expr::Let { binder_name, binder_type, val, body, num_loose_bvars, has_fvars, hash, nondep, struct_hash, fvar_bloom, fvar_lb };
-        if binder_type.dag_marker() == DagMarker::TcCtx || val.dag_marker() == DagMarker::TcCtx || body.dag_marker() == DagMarker::TcCtx {
-            self.alloc_expr_tc(let_expr)
-        } else {
-            self.alloc_expr(let_expr)
-        }
+        self.alloc_expr(let_expr)
     }
 
     pub fn mk_proj(&mut self, ty_name: NamePtr<'t>, idx: u32, structure: ExprPtr<'t>) -> ExprPtr<'t> {
@@ -1353,11 +1409,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         let struct_hash = hash64!(crate::expr::PROJ_HASH, ty_name, idx, s_e.get_struct_hash());
         let fvar_bloom = s_e.get_fvar_bloom();
         let fvar_lb = s_e.get_fvar_lb();
-        if structure.dag_marker() == DagMarker::TcCtx {
-            self.alloc_expr_tc(Expr::Proj { ty_name, idx, structure, num_loose_bvars, has_fvars, hash, struct_hash, fvar_bloom, fvar_lb })
-        } else {
-            self.alloc_expr(Expr::Proj { ty_name, idx, structure, num_loose_bvars, has_fvars, hash, struct_hash, fvar_bloom, fvar_lb })
-        }
+        self.alloc_expr(Expr::Proj { ty_name, idx, structure, num_loose_bvars, has_fvars, hash, struct_hash, fvar_bloom, fvar_lb })
     }
 
     pub fn mk_string_lit(&mut self, string_ptr: StringPtr<'t>) -> Option<ExprPtr<'t>> {
@@ -1530,7 +1582,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         };
         // Shift nodes may exist in the export_file dag (from OSNF parse-time normalization).
         // TC-created Shift nodes use tc-only alloc.
-        let result = self.alloc_expr_tc(Expr::Shift { hash, struct_hash, fvar_bloom, fvar_lb, inner, amount, cutoff, num_loose_bvars: new_nlbv, has_fvars });
+        let result = self.alloc_expr(Expr::Shift { hash, struct_hash, fvar_bloom, fvar_lb, inner, amount, cutoff, num_loose_bvars: new_nlbv, has_fvars });
         self.expr_cache.shift_dedup.insert(dedup_key, result);
         result
     }
@@ -1933,23 +1985,21 @@ pub struct NameCache<'p> {
     pub(crate) list_cons: Option<NamePtr<'p>>,
 }
 
-/// A single whnf cache slot: (input, result, depth).
-pub(crate) type WhnfSlot<'t> = (ExprPtr<'t>, ExprPtr<'t>, u16);
-
-
 pub(crate) struct TcCache<'t> {
     // === Base buckets (bucket 0): closed expressions, never evicted ===
-    /// WHNF cache for closed expressions.
-    pub(crate) whnf_cache_base: ChainMap<CacheKey, WhnfSlot<'t>>,
+    /// WHNF cache for closed expressions: ExprPtr → result.
+    pub(crate) whnf_cache_base: FxHashMap<ExprPtr<'t>, ExprPtr<'t>>,
     /// whnf_no_unfolding cache for closed expressions.
-    pub(crate) wnu_cache_base: ChainMap<CacheKey, WhnfSlot<'t>>,
-    /// Infer cache for closed expressions.
-    pub(crate) infer_cache_base: ChainMap<CacheKey, (ExprPtr<'t>, ExprPtr<'t>, u16, bool)>,
+    pub(crate) wnu_cache_base: FxHashMap<ExprPtr<'t>, ExprPtr<'t>>,
+    /// Infer cache (check mode) for closed expressions: ExprPtr → result.
+    pub(crate) infer_cache_check_base: FxHashMap<ExprPtr<'t>, ExprPtr<'t>>,
+    /// Infer cache (no-check mode) for closed expressions: ExprPtr → result.
+    pub(crate) infer_cache_no_check_base: FxHashMap<ExprPtr<'t>, ExprPtr<'t>>,
     // === Flat caches (not depth-stacked) ===
-    /// Positive def_eq cache for closed expressions.
-    pub(crate) eq_cache: ChainMap<DefeqCacheKey, (ExprPtr<'t>, ExprPtr<'t>)>,
-    /// Negative def_eq cache for closed expressions.
-    pub(crate) failure_cache: ChainMap<DefeqCacheKey, (ExprPtr<'t>, ExprPtr<'t>)>,
+    /// Positive def_eq cache for closed expressions (pointer-keyed set).
+    pub(crate) eq_cache: FxHashSet<(ExprPtr<'t>, ExprPtr<'t>)>,
+    /// Negative def_eq cache for closed expressions (pointer-keyed set).
+    pub(crate) failure_cache: FxHashSet<(ExprPtr<'t>, ExprPtr<'t>)>,
     /// Strong reduction cache (library/inspection feature).
     pub(crate) strong_cache: UniqueHashMap<(ExprPtr<'t>, bool, bool), ExprPtr<'t>>,
     /// Pointer-based UnionFind for transitive def_eq caching.
@@ -1964,11 +2014,12 @@ pub(crate) struct TcCache<'t> {
 impl<'t> TcCache<'t> {
     pub(crate) fn new() -> Self {
         Self {
-            whnf_cache_base: ChainMap::new(),
-            wnu_cache_base: ChainMap::new(),
-            infer_cache_base: ChainMap::new(),
-            eq_cache: ChainMap::new(),
-            failure_cache: ChainMap::new(),
+            whnf_cache_base: new_fx_hash_map(),
+            wnu_cache_base: new_fx_hash_map(),
+            infer_cache_check_base: new_fx_hash_map(),
+            infer_cache_no_check_base: new_fx_hash_map(),
+            eq_cache: new_fx_hash_set(),
+            failure_cache: new_fx_hash_set(),
             strong_cache: new_unique_hash_map(),
             eq_cache_uf: UnionFind::new(),
             frames: Vec::new(),
@@ -1978,7 +2029,8 @@ impl<'t> TcCache<'t> {
     pub(crate) fn clear(&mut self) {
         self.whnf_cache_base.clear();
         self.wnu_cache_base.clear();
-        self.infer_cache_base.clear();
+        self.infer_cache_check_base.clear();
+        self.infer_cache_no_check_base.clear();
         self.eq_cache.clear();
         self.failure_cache.clear();
         self.strong_cache.clear();
@@ -2035,72 +2087,58 @@ impl<'t> TcCache<'t> {
         self.frames[depth - 1 - dbj_idx as usize].local.1
     }
 
-    // === Bucket-indexed cache accessors ===
+    // === Pointer-based cache accessors (nanoda approach) ===
+    // Hash-consing guarantees: same expression = same pointer = same cache key.
     // For whnf/infer/wnu caches: bucket 0 = base, bucket k>0 = frames[k-1].
     // For defeq caches: bucket k = frames[k] (no base bucket).
 
-    pub(crate) fn whnf_cache_chain(&self, bucket_idx: usize, key: &CacheKey) -> SmallVec<[WhnfSlot<'t>; 2]> {
-        if bucket_idx == 0 { self.whnf_cache_base.get_chain(key) }
-        else { self.frames.get(bucket_idx - 1).map_or(SmallVec::new(), |f| f.whnf_cache.get_chain(key)) }
+    pub(crate) fn whnf_cache_get(&self, bucket_idx: usize, key: &ExprPtr<'t>) -> Option<ExprPtr<'t>> {
+        if bucket_idx == 0 { self.whnf_cache_base.get(key).copied() }
+        else { self.frames.get(bucket_idx - 1)?.whnf_cache.get(key).copied() }
     }
 
-    pub(crate) fn whnf_cache_get_mut(&mut self, bucket_idx: usize, key: &CacheKey, idx: usize) -> Option<&mut WhnfSlot<'t>> {
-        if bucket_idx == 0 { self.whnf_cache_base.get_mut(key, idx) }
-        else { self.frames.get_mut(bucket_idx - 1)?.whnf_cache.get_mut(key, idx) }
+    pub(crate) fn whnf_cache_insert(&mut self, bucket_idx: usize, key: ExprPtr<'t>, val: ExprPtr<'t>) {
+        if bucket_idx == 0 { self.whnf_cache_base.insert(key, val); }
+        else if let Some(f) = self.frames.get_mut(bucket_idx - 1) { f.whnf_cache.insert(key, val); }
     }
 
-    pub(crate) fn whnf_cache_push(&mut self, bucket_idx: usize, key: CacheKey, val: WhnfSlot<'t>) {
-        if bucket_idx == 0 { self.whnf_cache_base.push(key, val); }
-        else if let Some(f) = self.frames.get_mut(bucket_idx - 1) { f.whnf_cache.push(key, val); }
+    pub(crate) fn wnu_cache_get(&self, bucket_idx: usize, key: &ExprPtr<'t>) -> Option<ExprPtr<'t>> {
+        if bucket_idx == 0 { self.wnu_cache_base.get(key).copied() }
+        else { self.frames.get(bucket_idx - 1)?.whnf_no_unfolding_cache.get(key).copied() }
     }
 
-    pub(crate) fn whnf_cache_insert_first(&mut self, bucket_idx: usize, key: CacheKey, val: WhnfSlot<'t>) {
-        if bucket_idx == 0 { self.whnf_cache_base.insert_first(key, val); }
-        else if let Some(f) = self.frames.get_mut(bucket_idx - 1) { f.whnf_cache.insert_first(key, val); }
+    pub(crate) fn wnu_cache_insert(&mut self, bucket_idx: usize, key: ExprPtr<'t>, val: ExprPtr<'t>) {
+        if bucket_idx == 0 { self.wnu_cache_base.insert(key, val); }
+        else if let Some(f) = self.frames.get_mut(bucket_idx - 1) { f.whnf_no_unfolding_cache.insert(key, val); }
     }
 
-    /// Check if a whnf cache bucket exists (allocated or base).
-    pub(crate) fn whnf_cache_bucket_exists(&self, bucket_idx: usize) -> bool {
-        if bucket_idx == 0 { true }
-        else { self.frames.get(bucket_idx - 1).is_some() }
+    pub(crate) fn infer_cache_get(&self, bucket_idx: usize, key: &ExprPtr<'t>, is_check: bool) -> Option<ExprPtr<'t>> {
+        if bucket_idx == 0 {
+            if is_check { self.infer_cache_check_base.get(key).copied() }
+            else { self.infer_cache_no_check_base.get(key).copied() }
+        } else {
+            let f = self.frames.get(bucket_idx - 1)?;
+            if is_check { f.infer_cache_check.get(key).copied() }
+            else { f.infer_cache_no_check.get(key).copied() }
+        }
     }
 
-    pub(crate) fn wnu_cache_chain(&self, bucket_idx: usize, key: &CacheKey) -> SmallVec<[WhnfSlot<'t>; 2]> {
-        if bucket_idx == 0 { self.wnu_cache_base.get_chain(key) }
-        else { self.frames.get(bucket_idx - 1).map_or(SmallVec::new(), |f| f.whnf_no_unfolding_cache.get_chain(key)) }
+    pub(crate) fn infer_cache_insert(&mut self, bucket_idx: usize, key: ExprPtr<'t>, val: ExprPtr<'t>, is_check: bool) {
+        if bucket_idx == 0 {
+            if is_check { self.infer_cache_check_base.insert(key, val); }
+            else { self.infer_cache_no_check_base.insert(key, val); }
+        } else if let Some(f) = self.frames.get_mut(bucket_idx - 1) {
+            if is_check { f.infer_cache_check.insert(key, val); }
+            else { f.infer_cache_no_check.insert(key, val); }
+        }
     }
 
-    pub(crate) fn wnu_cache_get_mut(&mut self, bucket_idx: usize, key: &CacheKey, idx: usize) -> Option<&mut WhnfSlot<'t>> {
-        if bucket_idx == 0 { self.wnu_cache_base.get_mut(key, idx) }
-        else { self.frames.get_mut(bucket_idx - 1)?.whnf_no_unfolding_cache.get_mut(key, idx) }
-    }
-
-    pub(crate) fn wnu_cache_push(&mut self, bucket_idx: usize, key: CacheKey, val: WhnfSlot<'t>) {
-        if bucket_idx == 0 { self.wnu_cache_base.push(key, val); }
-        else if let Some(f) = self.frames.get_mut(bucket_idx - 1) { f.whnf_no_unfolding_cache.push(key, val); }
-    }
-
-    pub(crate) fn infer_cache_chain(&self, bucket_idx: usize, key: &CacheKey) -> SmallVec<[(ExprPtr<'t>, ExprPtr<'t>, u16, bool); 2]> {
-        if bucket_idx == 0 { self.infer_cache_base.get_chain(key) }
-        else { self.frames.get(bucket_idx - 1).map_or(SmallVec::new(), |f| f.infer_cache.get_chain(key)) }
-    }
-
-    pub(crate) fn infer_cache_get_mut(&mut self, bucket_idx: usize, key: &CacheKey, idx: usize) -> Option<&mut (ExprPtr<'t>, ExprPtr<'t>, u16, bool)> {
-        if bucket_idx == 0 { self.infer_cache_base.get_mut(key, idx) }
-        else { self.frames.get_mut(bucket_idx - 1)?.infer_cache.get_mut(key, idx) }
-    }
-
-    pub(crate) fn infer_cache_push(&mut self, bucket_idx: usize, key: CacheKey, val: (ExprPtr<'t>, ExprPtr<'t>, u16, bool)) {
-        if bucket_idx == 0 { self.infer_cache_base.push(key, val); }
-        else if let Some(f) = self.frames.get_mut(bucket_idx - 1) { f.infer_cache.push(key, val); }
-    }
-
-    pub(crate) fn defeq_open_get(&self, is_pos: bool, bucket_idx: usize, key: &DefeqCacheKey) -> Option<&(ExprPtr<'t>, ExprPtr<'t>, u16)> {
+    pub(crate) fn defeq_open_get(&self, is_pos: bool, bucket_idx: usize, key: &(ExprPtr<'t>, ExprPtr<'t>)) -> Option<&(ExprPtr<'t>, ExprPtr<'t>, u16)> {
         let frame = self.frames.get(bucket_idx)?;
         if is_pos { frame.defeq_pos_open.get(key) } else { frame.defeq_neg_open.get(key) }
     }
 
-    pub(crate) fn defeq_open_insert(&mut self, is_pos: bool, bucket_idx: usize, key: DefeqCacheKey, val: (ExprPtr<'t>, ExprPtr<'t>, u16)) {
+    pub(crate) fn defeq_open_insert(&mut self, is_pos: bool, bucket_idx: usize, key: (ExprPtr<'t>, ExprPtr<'t>), val: (ExprPtr<'t>, ExprPtr<'t>, u16)) {
         if let Some(frame) = self.frames.get_mut(bucket_idx) {
             if is_pos { frame.defeq_pos_open.insert(key, val); }
             else { frame.defeq_neg_open.insert(key, val); }

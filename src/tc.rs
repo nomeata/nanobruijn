@@ -4,8 +4,8 @@ use crate::expr::Expr;
 use crate::level::Level;
 use crate::util::{
     nat_div, nat_mod, nat_sub, nat_gcd, nat_land, nat_lor,
-    nat_xor, nat_shr, nat_shl, AppArgs, CacheKey, ExportFile, ExprPtr, LevelPtr,
-    LevelsPtr, NamePtr, TcCache, TcCtx, StringPtr, WhnfSlot
+    nat_xor, nat_shr, nat_shl, AppArgs, ExportFile, ExprPtr, LevelPtr,
+    LevelsPtr, NamePtr, TcCache, TcCtx, StringPtr,
 };
 use std::error::Error;
 
@@ -654,7 +654,6 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
     }
 
     fn infer_inner(&mut self, e: ExprPtr<'t>, flag: InferFlag) -> ExprPtr<'t> {
-        let depth = self.depth() as u16;
         // Handle Shift nodes without forcing: infer(Shift(inner, k, 0), d) = mk_shift(infer(inner, d-k), k).
         // Temporarily shrink the context to depth d-k, infer inner, restore, shift result.
         // Only works for cutoff=0 (top-level shifts). For cutoff>0, force first.
@@ -673,35 +672,24 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                 return self.infer(forced, flag);
             }
         }
-        // Shift-invariant infer cache: bucket 0 for closed, bucket (depth - fvar_lb) for open.
+        // Pointer-based infer cache: bucket 0 for closed, bucket depth for open OSNF cores.
         let depth = self.depth() as u16;
         let bucket_idx = if self.ctx.num_loose_bvars(e) == 0 {
             0
         } else {
-            let e_lb = self.ctx.read_expr(e).get_fvar_lb();
-            (depth - e_lb) as usize
+            depth as usize
         };
-        let canon = self.ctx.canonical_hash(e);
         let is_check = flag == InferFlag::Check;
-        // Infer cache lookup: scan chain.
-        let infer_chain = self.tc_cache.infer_cache_chain(bucket_idx, &canon);
-        if !infer_chain.is_empty() {
-            self.ctx.trace.infer_cache_hash_hit += 1;
-            for (ci, &(stored_input, stored_result, stored_depth, checked)) in infer_chain.iter().enumerate() {
-                if let Some(r) = self.try_infer_cache_hit(e, stored_input, stored_result, stored_depth, depth, checked, is_check) {
-                    self.ctx.trace.infer_cache_hits += 1;
-                    if ci > 0 { self.ctx.trace.infer_cache_overflow_hits += 1; }
-                    // On same-depth hit: replace entry's input ptr for future ptr_eq lookups.
-                    // On above-depth hit: do NOT replace — keep the low-depth canonical entry.
-                    if stored_depth == depth && stored_input != e {
-                        if let Some(slot) = self.tc_cache.infer_cache_get_mut(bucket_idx, &canon, ci) {
-                            *slot = (e, r, depth, is_check || checked);
-                        }
-                    }
-                    return r;
-                }
+        // Check cache subsumes no-check: try check first, then no-check.
+        if let Some(cached_result) = self.tc_cache.infer_cache_get(bucket_idx, &e, true) {
+            self.ctx.trace.infer_cache_hits += 1;
+            return cached_result;
+        }
+        if !is_check {
+            if let Some(cached_result) = self.tc_cache.infer_cache_get(bucket_idx, &e, false) {
+                self.ctx.trace.infer_cache_hits += 1;
+                return cached_result;
             }
-            self.ctx.trace.infer_cache_verify_fail += 1;
         }
         let r = match self.ctx.read_expr(e) {
             Local { binder_type, .. } => binder_type,
@@ -725,64 +713,9 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             }
             Shift { .. } => unreachable!("Shift handled before cache lookup")
         };
-        self.infer_cache_store(bucket_idx, canon, e, r, depth, is_check);
+        let r = self.ctx.to_osnf(r);
+        self.tc_cache.infer_cache_insert(bucket_idx, e, r, is_check);
         r
-    }
-
-    /// Try to match a query against a stored infer cache entry.
-    fn try_infer_cache_hit(&mut self, e: ExprPtr<'t>, stored_input: ExprPtr<'t>, stored_result: ExprPtr<'t>, stored_depth: u16, depth: u16, checked: bool, is_check: bool) -> Option<ExprPtr<'t>> {
-        // A Check entry can serve both flags; an InferOnly entry can only serve InferOnly.
-        if !checked && is_check { return None; }
-        if stored_depth == depth {
-            if stored_input == e || self.ctx.sem_eq(stored_input, e) {
-                return Some(stored_result);
-            }
-            return None; // caller counts vf_same
-        }
-        if depth > stored_depth {
-            let delta = (depth - stored_depth) as i16;
-            if self.ctx.shift_eq(stored_input, e, delta) {
-                return Some(self.ctx.mk_shift(stored_result, delta));
-            }
-            return None; // caller counts vf_above
-        }
-        // depth < stored_depth: reverse shift_eq + push_shift_down
-        let delta = (stored_depth - depth) as i16;
-        if self.ctx.shift_eq(e, stored_input, delta) {
-            let result_fvar_lb = self.ctx.read_expr(stored_result).get_fvar_lb();
-            if self.ctx.num_loose_bvars(stored_result) == 0 || result_fvar_lb >= delta as u16 {
-                return Some(self.ctx.push_shift_down(stored_result, delta as u16));
-            }
-        }
-        None
-    }
-
-    /// Store an infer result in the chained cache.
-    fn infer_cache_store(&mut self, bucket_idx: usize, canon: CacheKey, e: ExprPtr<'t>, r: ExprPtr<'t>, depth: u16, is_check: bool) {
-        let chain = self.tc_cache.infer_cache_chain(bucket_idx, &canon);
-        for (ci, &(si, _sr, sd, sc)) in chain.iter().enumerate() {
-            if si == e { return; }
-            let is_family = if depth == sd {
-                self.ctx.sem_eq(si, e)
-            } else if depth > sd {
-                self.ctx.shift_eq(si, e, (depth - sd) as i16)
-            } else {
-                self.ctx.shift_eq(e, si, (sd - depth) as i16)
-            };
-            if is_family {
-                // Same family — prefer checked, then lower depth
-                let dominated = (is_check && !sc) || (is_check == sc && depth < sd);
-                if dominated {
-                    if let Some(slot) = self.tc_cache.infer_cache_get_mut(bucket_idx, &canon, ci) {
-                        *slot = (e, r, depth, is_check);
-                    }
-                }
-                return;
-            }
-        }
-        // No matching family — append
-        if !chain.is_empty() { self.ctx.trace.infer_cache_overflow_stores += 1; }
-        self.tc_cache.infer_cache_push(bucket_idx, canon, (e, r, depth, is_check));
     }
 
     fn infer_sort(&mut self, l: LevelPtr<'t>, flag: InferFlag) -> ExprPtr<'t> {
@@ -1022,43 +955,16 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             self.tc_cache.extend(saved);
             return self.ctx.mk_shift(r, total_shift);
         }
-        // Stacked whnf cache: bucket 0 for closed, bucket (depth - fvar_lb) for open.
-        // Using fvar_lb-based bucketing ensures shift-related expressions at different
-        // depths land in the same bucket, enabling cross-depth shift_eq reuse.
-        let canon = self.ctx.canonical_hash(e);
+        // Pointer-based whnf cache: bucket 0 for closed, bucket depth for open OSNF cores.
         let depth = self.depth() as u16;
-        let e_nlbv = self.ctx.num_loose_bvars(e);
-        let whnf_bucket_idx = if e_nlbv == 0 {
+        let whnf_bucket_idx = if self.ctx.num_loose_bvars(e) == 0 {
             0
         } else {
-            let e_lb = self.ctx.read_expr(e).get_fvar_lb();
-            (depth - e_lb) as usize
+            depth as usize
         };
-        // Look up in whnf cache chain.
-        // Copy chain entries to release borrow before calling methods on self.
-        let chain = self.tc_cache.whnf_cache_chain(whnf_bucket_idx, &canon);
-        if !chain.is_empty() {
-            for (ci, &(stored_input, stored_result, stored_depth)) in chain.iter().enumerate() {
-                if let Some(result) = self.try_whnf_cache_hit(e, stored_input, stored_result, stored_depth, depth) {
-                    self.ctx.trace.whnf_cache_hits += 1;
-                    if ci > 0 { self.ctx.trace.whnf_cache_overflow_hits += 1; }
-                    if stored_depth == depth && stored_input != e {
-                        if let Some(slot) = self.tc_cache.whnf_cache_get_mut(whnf_bucket_idx, &canon, ci) {
-                            *slot = (e, result, depth);
-                        }
-                    }
-                    if stored_depth > depth {
-                        // Below-depth hit: return eagerly shifted result
-                        return result;
-                    }
-                    return result;
-                }
-            }
-            self.ctx.trace.whnf_cache_verify_fail += 1;
-        } else if self.tc_cache.whnf_cache_bucket_exists(whnf_bucket_idx) {
-            self.ctx.trace.whnf_cache_no_entry += 1;
-        } else {
-            self.ctx.trace.whnf_cache_no_bucket += 1;
+        if let Some(result) = self.tc_cache.whnf_cache_get(whnf_bucket_idx, &e) {
+            self.ctx.trace.whnf_cache_hits += 1;
+            return result;
         }
         let mut cursor = e;
         loop {
@@ -1068,71 +974,11 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             } else if let Some(next_term) = self.unfold_def(whnfd) {
                 cursor = next_term;
             } else {
-                // Store with depth for cross-depth reuse (2-slot).
-                self.whnf_cache_store(whnf_bucket_idx, canon, e, whnfd, depth);
+                let whnfd = self.ctx.to_osnf(whnfd);
+                self.tc_cache.whnf_cache_insert(whnf_bucket_idx, e, whnfd);
                 return whnfd
             }
         }
-    }
-
-    /// Try to match a query expression against a stored cache slot.
-    /// Returns Some(result) on hit, None on miss.
-    fn try_whnf_cache_hit(&mut self, e: ExprPtr<'t>, stored_input: ExprPtr<'t>, stored_result: ExprPtr<'t>, stored_depth: u16, depth: u16) -> Option<ExprPtr<'t>> {
-        if stored_depth == depth && (stored_input == e || self.ctx.sem_eq(stored_input, e)) {
-            return Some(stored_result);
-        }
-        // Above-depth hit: positive shift wraps result
-        if depth > stored_depth {
-            let delta = (depth - stored_depth) as i16;
-            if self.ctx.shift_eq(stored_input, e, delta) {
-                if self.ctx.num_loose_bvars(stored_result) == 0 {
-                    return Some(stored_result);
-                }
-                return Some(self.ctx.push_shift(stored_result, delta, 0));
-            }
-        }
-        // Below-depth hit: shift result down via eager push_shift_down
-        if depth < stored_depth {
-            let abs_delta = (stored_depth - depth) as i16;
-            if self.ctx.shift_eq(e, stored_input, abs_delta) {
-                let result_fvar_lb = self.ctx.read_expr(stored_result).get_fvar_lb();
-                if result_fvar_lb >= abs_delta as u16 {
-                    self.ctx.trace.whnf_below_depth_hits += 1;
-                    let shifted = self.ctx.push_shift_down(stored_result, abs_delta as u16);
-                    return Some(shifted);
-                }
-            }
-        }
-        None
-    }
-
-    /// Store a whnf result in the chained cache.
-    fn whnf_cache_store(&mut self, bucket_idx: usize, canon: CacheKey, e: ExprPtr<'t>, result: ExprPtr<'t>, depth: u16) {
-        // Validate: stored result's fvar_lb must be < depth (or closed)
-        let new_slot: WhnfSlot<'t> = (e, result, depth);
-        let chain = self.tc_cache.whnf_cache_chain(bucket_idx, &canon);
-        for (ci, &(si, _sr, sd)) in chain.iter().enumerate() {
-            if si == e { return; } // already stored
-            let is_family = if depth == sd {
-                self.ctx.sem_eq(si, e)
-            } else if depth > sd {
-                self.ctx.shift_eq(si, e, (depth - sd) as i16)
-            } else {
-                self.ctx.shift_eq(e, si, (sd - depth) as i16)
-            };
-            if is_family {
-                // Same family — prefer the lowest depth (canonical representative)
-                if depth < sd {
-                    if let Some(slot) = self.tc_cache.whnf_cache_get_mut(bucket_idx, &canon, ci) {
-                        *slot = new_slot;
-                    }
-                }
-                return;
-            }
-        }
-        // No matching family — append new entry
-        if !chain.is_empty() { self.ctx.trace.whnf_cache_overflow_stores += 1; }
-        self.tc_cache.whnf_cache_push(bucket_idx, canon, new_slot);
     }
 
     fn whnf_no_unfolding_cheap_proj(&mut self, e: ExprPtr<'t>) -> ExprPtr<'t> {
@@ -1178,75 +1024,17 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         let mut cache_entries: Vec<ExprPtr<'t>> = Vec::new();
         let mut cur = e;
         let result = loop {
-            // Stacked whnf_no_unfolding cache: bucket 0 for closed, bucket (depth - fvar_lb) for open.
-            let cur_canon = self.ctx.canonical_hash(cur);
-            let cur_nlbv = self.ctx.num_loose_bvars(cur);
+            // Pointer-based wnu cache: bucket 0 for closed, bucket depth for open.
             let cur_depth = self.depth() as u16;
-            let wnu_bucket_idx = if cur_nlbv == 0 {
+            let wnu_bucket_idx = if self.ctx.num_loose_bvars(cur) == 0 {
                 0
             } else {
-                let cur_lb = self.ctx.read_expr(cur).get_fvar_lb();
-                (cur_depth - cur_lb) as usize
+                cur_depth as usize
             };
-            let wnu_chain = self.tc_cache.wnu_cache_chain(wnu_bucket_idx, &cur_canon);
-            if !wnu_chain.is_empty() {
-                let mut wnu_hit = false;
-                for (ci, &(stored_input, stored_result, stored_depth)) in wnu_chain.iter().enumerate() {
-                    if stored_depth == cur_depth && (stored_input == cur || self.ctx.sem_eq(stored_input, cur)) {
-                        self.ctx.trace.wnu_cache_hits += 1;
-                        if ci > 0 { self.ctx.trace.wnu_cache_overflow_hits += 1; }
-                        wnu_hit = true;
-                        cur = stored_result;
-                        break;
-                    }
-                    if cur_depth > stored_depth {
-                        let delta = (cur_depth - stored_depth) as i16;
-                        if self.ctx.shift_eq(stored_input, cur, delta) {
-                            self.ctx.trace.wnu_cache_hits += 1;
-                            if ci > 0 { self.ctx.trace.wnu_cache_overflow_hits += 1; }
-                            wnu_hit = true;
-                            cur = self.ctx.push_shift(stored_result, delta, 0);
-                            break;
-                        }
-                    }
-                    // Below-depth hit: conservative O(1) adjustment only
-                    if cur_depth < stored_depth {
-                        let abs_delta = (stored_depth - cur_depth) as i16;
-                        let result_nlbv = self.ctx.num_loose_bvars(stored_result);
-                        let usable = if result_nlbv == 0 {
-                            true
-                        } else if stored_result == stored_input {
-                            true
-                        } else if let Expr::Shift { amount, cutoff: 0, .. } = self.ctx.read_expr(stored_result) {
-                            amount >= abs_delta
-                        } else {
-                            false
-                        };
-                        if usable && self.ctx.shift_eq(cur, stored_input, abs_delta) {
-                            self.ctx.trace.wnu_cache_hits += 1;
-                            if ci > 0 { self.ctx.trace.wnu_cache_overflow_hits += 1; }
-                            wnu_hit = true;
-                            if result_nlbv == 0 {
-                                cur = stored_result;
-                            } else if stored_result == stored_input {
-                                cur = cur; // identity (no-op)
-                            } else if let Expr::Shift { inner, amount, cutoff: 0, .. } = self.ctx.read_expr(stored_result) {
-                                cur = self.ctx.mk_shift(inner, amount - abs_delta);
-                            }
-                            break;
-                        }
-                    }
-                }
-                if wnu_hit { break cur; }
-                self.ctx.trace.wnu_cache_verify_fail += 1;
-            } else {
-                // No entry at this bucket (or bucket doesn't exist).
-                // Distinguish no_entry vs no_bucket for diagnostics.
-                if wnu_bucket_idx == 0 || self.tc_cache.frames.get(wnu_bucket_idx - 1).is_some() {
-                    self.ctx.trace.wnu_cache_no_entry += 1;
-                } else {
-                    self.ctx.trace.wnu_cache_no_bucket += 1;
-                }
+            if let Some(cached) = self.tc_cache.wnu_cache_get(wnu_bucket_idx, &cur) {
+                self.ctx.trace.wnu_cache_hits += 1;
+                cur = cached;
+                break cur;
             }
             let (mut e_fun, args, shifted) = self.ctx.unfold_apps(cur);
             // Force any Shift wrapper on the head so the match sees real constructors.
@@ -1362,48 +1150,17 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                 }
             }
         };
+        let result = self.ctx.to_osnf(result);
         // Cache intermediate inputs (non-cheap_proj only).
         if !cheap_proj {
             let store_depth = self.depth() as u16;
             for entry in cache_entries {
-                let entry_canon = self.ctx.canonical_hash(entry);
-                let entry_nlbv = self.ctx.num_loose_bvars(entry);
-                let entry_bucket_idx = if entry_nlbv == 0 {
+                let entry_bucket_idx = if self.ctx.num_loose_bvars(entry) == 0 {
                     0
                 } else {
-                    let entry_lb = self.ctx.read_expr(entry).get_fvar_lb();
-                    (store_depth - entry_lb) as usize
+                    store_depth as usize
                 };
-                let new_slot: WhnfSlot<'t> = (entry, result, store_depth);
-                let wnu_chain = self.tc_cache.wnu_cache_chain(entry_bucket_idx, &entry_canon);
-                if !wnu_chain.is_empty() {
-                    // Check if already stored
-                    if wnu_chain.iter().any(|s| s.0 == entry) {
-                        self.ctx.trace.wnu_cache_update_skip += 1;
-                        continue;
-                    }
-                    // Try to replace an entry at higher depth
-                    let mut replaced = false;
-                    for (ci, &(_, _, sd)) in wnu_chain.iter().enumerate() {
-                        if store_depth < sd {
-                            if let Some(slot) = self.tc_cache.wnu_cache_get_mut(entry_bucket_idx, &entry_canon, ci) {
-                                *slot = new_slot;
-                            }
-                            replaced = true;
-                            self.ctx.trace.wnu_cache_update_lower += 1;
-                            break;
-                        }
-                    }
-                    if !replaced {
-                        // Append new entry
-                        self.ctx.trace.wnu_cache_overflow_stores += 1;
-                        self.tc_cache.wnu_cache_push(entry_bucket_idx, entry_canon, new_slot);
-                        self.ctx.trace.wnu_cache_update_higher += 1;
-                    }
-                } else {
-                    self.tc_cache.wnu_cache_push(entry_bucket_idx, entry_canon, new_slot);
-                    self.ctx.trace.wnu_cache_new_inserts += 1;
-                }
+                self.tc_cache.wnu_cache_insert(entry_bucket_idx, entry, result);
             }
         }
         result
@@ -1553,9 +1310,9 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
     pub fn assert_def_eq(&mut self, u: ExprPtr<'t>, v: ExprPtr<'t>) {
         if !self.def_eq(u, v) {
             let sem = self.ctx.sem_eq(u, v);
-            let u_ch = self.ctx.canonical_hash(u);
-            let v_ch = self.ctx.canonical_hash(v);
-            eprintln!("  assert_def_eq FAILED (sem_eq={}, chash u={:016x} v={:016x} eq={}):", sem, u_ch, v_ch, u_ch == v_ch);
+            let u_sh = self.ctx.read_expr(u).get_struct_hash();
+            let v_sh = self.ctx.read_expr(v).get_struct_hash();
+            eprintln!("  assert_def_eq FAILED (sem_eq={}, shash u={:016x} v={:016x} eq={}):", sem, u_sh, v_sh, u_sh == v_sh);
             eprintln!("    u = {} (marker={:?} idx={})", self.ctx.expr_desc(u, 15), u.dag_marker(), u.idx());
             eprintln!("    v = {} (marker={:?} idx={})", self.ctx.expr_desc(v, 15), v.dag_marker(), v.idx());
             // Try to find first difference
@@ -1926,17 +1683,9 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
     }
 
     fn failure_cache_contains(&mut self, x: ExprPtr<'t>, y: ExprPtr<'t>) -> bool {
-        let (key, swapped) = self.defeq_canon_key(x, y);
-        let (qx, qy) = if swapped { (y, x) } else { (x, y) };
-        let chain = self.tc_cache.failure_cache.get_chain(&key);
-        if !chain.is_empty() {
-            for (ci, &(stored_a, stored_b)) in chain.iter().enumerate() {
-                if self.ctx.sem_eq(stored_a, qx) && self.ctx.sem_eq(stored_b, qy) {
-                    if ci > 0 { self.ctx.trace.fail_cache_overflow_hits += 1; }
-                    return true;
-                }
-            }
-            self.ctx.trace.fail_cache_verify_fail += 1;
+        let (key, _swapped) = self.defeq_canon_key(x, y);
+        if self.tc_cache.failure_cache.contains(&key) {
+            return true;
         }
         if self.defeq_open_lookup(false, x, y) {
             return true;
@@ -1945,12 +1694,8 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
     }
 
     fn failure_cache_insert(&mut self, x: ExprPtr<'t>, y: ExprPtr<'t>) {
-        let (key, swapped) = self.defeq_canon_key(x, y);
-        let (a, b) = if swapped { (y, x) } else { (x, y) };
-        let chain = self.tc_cache.failure_cache.get_chain(&key);
-        if chain.iter().any(|&(sa, sb)| sa == a && sb == b) { return; }
-        if !chain.is_empty() { self.ctx.trace.fail_cache_overflow_stores += 1; }
-        self.tc_cache.failure_cache.push(key, (a, b));
+        let (key, _swapped) = self.defeq_canon_key(x, y);
+        self.tc_cache.failure_cache.insert(key);
         self.defeq_open_store_neg(x, y);
     }
 
@@ -1973,58 +1718,32 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         Some((depth - 1 - min_lb) as usize)
     }
 
-    /// Canonical-hash-keyed eq_cache lookup for closed expressions.
-    /// Uses sem_eq to verify (handles internal Shift wrappers).
+    /// Pointer-based eq_cache lookup for closed expressions.
     fn eq_cache_contains(&mut self, x: ExprPtr<'t>, y: ExprPtr<'t>) -> bool {
-        let (key, swapped) = self.defeq_canon_key(x, y);
-        let (qx, qy) = if swapped { (y, x) } else { (x, y) };
-        let chain = self.tc_cache.eq_cache.get_chain(&key);
-        if chain.is_empty() { return false; }
-        for (ci, &(stored_a, stored_b)) in chain.iter().enumerate() {
-            if self.ctx.sem_eq(stored_a, qx) && self.ctx.sem_eq(stored_b, qy) {
-                self.ctx.trace.eq_cache_hits += 1;
-                if ci > 0 { self.ctx.trace.eq_cache_overflow_hits += 1; }
-                if stored_a != qx || stored_b != qy {
-                    self.ctx.trace.eq_cache_cross_depth_hits += 1;
-                }
-                return true;
-            }
+        let (key, _swapped) = self.defeq_canon_key(x, y);
+        if self.tc_cache.eq_cache.contains(&key) {
+            self.ctx.trace.eq_cache_hits += 1;
+            return true;
         }
-        self.ctx.trace.eq_cache_verify_fail += 1;
         false
     }
 
-    /// Canonical-hash-keyed eq_cache insert for closed expressions.
-    /// Appends to chain if key already has entries with different pointers.
+    /// Pointer-based eq_cache insert for closed expressions.
     fn eq_cache_insert(&mut self, x: ExprPtr<'t>, y: ExprPtr<'t>) {
-        let (key, swapped) = self.defeq_canon_key(x, y);
-        let (a, b) = if swapped { (y, x) } else { (x, y) };
-        let chain = self.tc_cache.eq_cache.get_chain(&key);
-        for &(stored_a, stored_b) in chain.iter() {
-            if stored_a == a && stored_b == b {
-                return; // Already stored
-            }
-        }
-        if chain.is_empty() {
-            self.tc_cache.eq_cache.insert_first(key, (a, b));
+        let (key, _swapped) = self.defeq_canon_key(x, y);
+        self.tc_cache.eq_cache.insert(key);
+    }
+
+    /// Ordered pointer key for a pair of expressions.
+    fn defeq_canon_key(&self, x: ExprPtr<'t>, y: ExprPtr<'t>) -> ((ExprPtr<'t>, ExprPtr<'t>), bool) {
+        if x.get_hash() <= y.get_hash() {
+            ((x, y), false)
         } else {
-            self.ctx.trace.eq_cache_overflow_stores += 1;
-            self.tc_cache.eq_cache.push(key, (a, b));
+            ((y, x), true)
         }
     }
 
-    /// Ordered canonical hash key for a pair of expressions.
-    fn defeq_canon_key(&self, x: ExprPtr<'t>, y: ExprPtr<'t>) -> ((u64, u64), bool) {
-        let cx = self.ctx.canonical_hash(x);
-        let cy = self.ctx.canonical_hash(y);
-        if cx <= cy {
-            ((cx, cy), false)
-        } else {
-            ((cy, cx), true)
-        }
-    }
-
-    /// Look up in a shift-invariant def_eq cache (positive or negative).
+    /// Look up in a pointer-based def_eq cache (positive or negative).
     fn defeq_open_lookup(
         &mut self,
         is_pos: bool,
@@ -2032,37 +1751,13 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         y: ExprPtr<'t>,
     ) -> bool {
         let Some(bucket_idx) = self.defeq_bucket_idx(x, y) else { return false };
-        let (key, swapped) = self.defeq_canon_key(x, y);
-        let Some(&(stored_a, stored_b, stored_depth)) = self.tc_cache.defeq_open_get(is_pos, bucket_idx, &key) else { return false };
-        let depth = self.depth() as u16;
-        let (qx, qy) = if swapped { (y, x) } else { (x, y) };
-        // Exact depth match with semantic equality
-        if stored_depth == depth && self.ctx.sem_eq(stored_a, qx) && self.ctx.sem_eq(stored_b, qy) {
-            if is_pos { self.ctx.trace.defeq_open_pos_hits += 1; } else { self.ctx.trace.defeq_open_neg_hits += 1; }
-            return true;
-        }
-        // Shift-invariant match
-        if depth >= stored_depth {
-            let delta = (depth - stored_depth) as i16;
-            if delta > 0 {
-                if self.ctx.shift_eq(stored_a, qx, delta) && self.ctx.shift_eq(stored_b, qy, delta) {
-                    if is_pos { self.ctx.trace.defeq_open_pos_hits += 1; } else { self.ctx.trace.defeq_open_neg_hits += 1; }
-                    return true;
-                }
-                // Try swapped assignment if canonical hashes are equal
-                if self.ctx.canonical_hash(x) == self.ctx.canonical_hash(y)
-                    && self.ctx.shift_eq(stored_a, qy, delta)
-                    && self.ctx.shift_eq(stored_b, qx, delta)
-                {
-                    if is_pos { self.ctx.trace.defeq_open_pos_hits += 1; } else { self.ctx.trace.defeq_open_neg_hits += 1; }
-                    return true;
-                }
-            }
-        }
-        false
+        let (key, _swapped) = self.defeq_canon_key(x, y);
+        let Some(&(_stored_a, _stored_b, _stored_depth)) = self.tc_cache.defeq_open_get(is_pos, bucket_idx, &key) else { return false };
+        if is_pos { self.ctx.trace.defeq_open_pos_hits += 1; } else { self.ctx.trace.defeq_open_neg_hits += 1; }
+        true
     }
 
-    /// Store in a shift-invariant def_eq cache (positive or negative).
+    /// Store in a pointer-based def_eq cache (positive or negative).
     fn defeq_open_store_pos(&mut self, x: ExprPtr<'t>, y: ExprPtr<'t>) {
         self.defeq_open_store_impl(true, x, y);
     }
@@ -2081,9 +1776,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         let y_lb = if y_nlbv > 0 { self.ctx.read_expr(y).get_fvar_lb() } else { u16::MAX };
         let min_lb = x_lb.min(y_lb);
         let bucket_idx = (depth - 1 - min_lb) as usize;
-        let cx = self.ctx.canonical_hash(x);
-        let cy = self.ctx.canonical_hash(y);
-        let (key, swapped) = if cx <= cy { ((cx, cy), false) } else { ((cy, cx), true) };
+        let (key, swapped) = self.defeq_canon_key(x, y);
         let (sx, sy) = if swapped { (y, x) } else { (x, y) };
         if self.tc_cache.defeq_open_get(is_pos, bucket_idx, &key).map_or(true, |&(_, _, sd)| depth < sd) {
             self.tc_cache.defeq_open_insert(is_pos, bucket_idx, key, (sx, sy, depth));
