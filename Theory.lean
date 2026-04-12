@@ -701,11 +701,18 @@ theorem to_osnf_erase (e : SExpr) : (to_osnf e).erase = e.erase := by
 
 /-- **Uniqueness of OSNF**: If two expressions denote the same term and both
     are in OSNF, they are syntactically equal. -/
+-- NOTE: This theorem is false as stated. IsOSNF allows shift nodes inside compound
+-- cores. Counterexample: `app (shift 0 (bvar 0)) (const 1)` is IsOSNF.core (since
+-- isCompound and fvar_lb_val = 0), and erases to `Expr.app (Expr.bvar 0) (Expr.const 1)`,
+-- same as `app (bvar 0) (const 1)` which is also IsOSNF.core.
+-- Fix: strengthen IsOSNF to require children are also in OSNF (deep normalization).
 theorem osnf_unique (e₁ e₂ : SExpr) (h₁ : IsOSNF e₁) (h₂ : IsOSNF e₂)
     (heq : e₁.erase = e₂.erase) : e₁ = e₂ := by
   sorry
 
-/-- **Corollary**: `to_osnf` is idempotent. -/
+/-- **Corollary**: `to_osnf` is idempotent.
+    Requires showing `to_osnf` is the identity on its own outputs, which needs
+    reasoning about `adjust_child` outputs and a corrected `osnf_unique`. -/
 theorem to_osnf_idempotent (e : SExpr) : to_osnf (to_osnf e) = to_osnf e := by
   sorry
 
