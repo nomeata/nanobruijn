@@ -56,6 +56,44 @@ then `whnf(Shift(n, e)) = Shift(n, v)`. This means a single cache entry serves
 all shifted variants of an expression, giving cross-depth cache hits that the
 locally-nameless approach cannot achieve.
 
+### Parse-time OSNF (Outermost-Shift Normal Form)
+
+Expressions are normalized at parse time into OSNF: every DAG node is either a
+bare `bvar`, a "core" (compound expression with `fvar_lb = 0`), or
+`Shift(n, core)` wrapping a core. Expressions that differ only by a uniform
+shift of their free variable indices share the same core in the DAG, with only
+the shift amount differing. Shifting an OSNF expression is O(1).
+
+A literature search found no established name for this specific normal form,
+though it sits at the intersection of several well-studied ideas:
+
+- **Nadathur & Wilson's Suspension Notation** (1990, 1998) — terms carry
+  deferred shifts as `[[t, ol, nl, e]]`. Closest ancestor, but no canonical
+  form requirement.
+  [Paper](https://dl.acm.org/doi/pdf/10.1145/91556.91682)
+
+- **McBride's Co-de-Bruijn / Thinnings** (2018) — each node carries a
+  bit-vector ("thinning") indicating which scope variables are used. Achieves
+  similar sharing but via a more general mechanism (thinnings can drop
+  variables from the middle, not just shift uniformly).
+  [arXiv:1807.04085](https://arxiv.org/abs/1807.04085)
+
+- **Gallais's Lazy Weakening** — keeps weakenings (uniform shifts) suspended
+  outermost, structurally similar to OSNF, but without canonicalization or
+  hash-consing.
+  [Blog post](https://gallais.github.io/blog/lazy-lambda.html)
+
+- **Zucker's Thinning Hash Cons** (2024–2025) — hash-consing with thinning
+  annotations following McBride, explicitly discussing sharing modulo context
+  adjustments.
+  [Blog post](https://www.philipzucker.com/thin_hash_cons_codebruijn/)
+
+- **Lambda-sigma calculus** (Abadi, Cardelli, Curien & Levy, 1991) — shift as
+  a primitive in explicit substitution calculus, but a rewriting system rather
+  than a canonical form for DAG sharing.
+
+See `Theory.lean` for a formalization of OSNF and its uniqueness property.
+
 ## Current status
 
 nanobruijn successfully type-checks all of Mathlib with 0 errors and 0 timeouts.

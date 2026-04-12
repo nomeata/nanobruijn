@@ -425,15 +425,65 @@ Not applicable:
 - `7981ff6` / `224b7c1` — README update for JSON export format
 - `514a1a5` / `14bbb5c` — semver bumps
 
+## Next: OSNF everywhere + ptr-based caching
+
+**Goal**: Replace shift-equivalence caching (canonical_hash + sem_eq + fvar_bloom) with
+OSNF-everywhere + nanoda-style ptr-based caches. Since all expressions are in OSNF,
+shift-equivalent expressions share the same core pointer. Caches use core ExprPtr as key
+(pointer identity via UniqueHashMap), no semantic equality verification needed.
+
+### What changes
+
+**Phase 1: OSNF in TC expression constructors**
+- mk_app, mk_lambda, mk_pi, mk_let, mk_proj: if fvar_lb > 0, extract core (adjust_child
+  on each child), alloc core, wrap in Shift(fvar_lb, core). adjust_child for TC:
+  - bvar(i) → mk_var(i - amount)
+  - Shift(k, inner) → mk_shift(inner, k - amount) or inner if k == amount
+  - compound with fvar_lb=0 → use as-is
+  - nlbv ≤ cutoff → use as-is (bound variable)
+
+**Phase 2: Cache key change**
+- Replace CacheKey (u64 canonical_hash) with ExprPtr in all caches
+- whnf_cache, infer_cache: keyed by core ExprPtr, per-depth
+- def_eq cache: keyed by (ExprPtr, ExprPtr) pair of core pointers
+- Use UniqueHashMap<ExprPtr, V> like nanoda (hash by pointer identity)
+- Remove ChainMap, LazyChainMap
+
+**Phase 3: Simplify cache lookup**
+- infer(Shift(n, core)): pop n from context, look up core in cache[depth-n], shift result
+- whnf(Shift(n, core)): pop n from context, look up core in cache[depth-n], shift result
+- No sem_eq verification — pointer identity is exact
+- No above-depth/below-depth shift adjustment
+
+**Phase 4: Remove dead code**
+- sem_eq, shift_eq_aux, shift_eq_pending, GenCache shift_eq caches
+- canonical_hash, bloom_normalize
+- fvar_bloom (may keep fvar_lb for OSNF computation)
+- struct_hash use in caching (keep for hash-consing)
+- ChainMap, ChainKey, LazyChainMap
+- push_shift_down (no more below-depth cache hits)
+
+### What stays
+- Depth-indexed cache frames (push_local / pop_local)
+- infer-under-shift (pop context, infer core, shift result)
+- whnf-under-shift (pop context, whnf core, shift result)
+- mk_shift, push_shift, view_expr
+- OSNF parse-time normalization
+- mk_app DM cache, mk_var cache
+- alloc_expr_tc optimization
+- ReusableDag, expr_nlbv
+
+### Key insight
+With OSNF, there is no shift-equivalence problem: every expression IS its canonical
+representative. The "60% regression" from TC-time OSNF rewriting (documented in "Paths
+not taken") was caused by breaking pointer equality mid-computation. With OSNF maintained
+as an invariant from the start (parse-time + TC constructors), pointer equality is never
+broken.
+
 ## TODO
-- **Bloom filter vs FVarList**: Investigate whether replacing nanoda's FVarList with a
-  32-bit bloom filter (`fvar_bloom`) loses information under shifting. Shifting can lose
-  bits (shifted out the top), so shift-equivalent expressions might get different
-  `canonical_hash` values, causing cache misses. Consider going back to FVarList and
-  optimizing it without losing shift-invariance.
+- **Fill in Theory.lean sorry's**: OSNF uniqueness, erase preservation
 - **Remove remaining dead code**: thread_local profiling counters, dead locally-nameless
   code (Local variant, FVarId, abstr, etc.)
-- **Fill in Theory.lean sorry's**: `decode_shift`, `fvars_shift_zero`
 
 ## References
 
