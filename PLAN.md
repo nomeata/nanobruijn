@@ -47,20 +47,15 @@ and encounters `Shift(inner, amount, cutoff)`, it composes the shifts directly w
 `cutoff < sh_cut && amount >= (sh_cut - cutoff)`, avoiding intermediate Shift creation.
 This captures ~100% of first-level binder mismatches and repeats at every binder depth.
 
-### sem_eq (replaces pointer equality)
+### Pointer equality (replacing sem_eq)
 
-`sem_eq(a, b)` = `shift_eq_aux(a, b, 0, 0)` — structural walk that transparently handles
-Shift wrappers by accumulating deltas. No allocation, no new node creation. Replaces all
-pointer equality (`==`) comparisons throughout the system.
+All equality checks use pointer equality (`==`). Since expressions are hash-consed into
+IndexSets (export-file DAG and per-declaration TC DAG), structurally equal expressions
+have the same pointer. `alloc_expr` always probes the export-file DAG first, ensuring
+expressions from different sources get the same pointer.
 
-`shift_eq_aux(a, b, delta, cutoff)` checks whether `a` equals `shift(b, delta)`:
-- Increments `cutoff` under binders (bound vars compare without delta)
-- Absorbs Shift nodes when their cutoff matches the comparison cutoff (additive amounts)
-- **Mismatched cutoff fast path**: When `fvar_lb(inner) >= max(sc, cutoff)`, absorbs into delta
-- **General path** (`shift_eq_pending`): BiShift representation for two-layer shifts per side.
-  Conservative false only when three distinct cutoff levels would be needed (extremely rare).
-- Direct-mapped caches (1M entries for shift_eq_aux, 256K for shift_eq_pending) prevent
-  DAG→tree explosion. Generation-counted (`GenCache`) for O(1) cross-declaration reuse.
+Previously used `sem_eq` (structural walk through Shift wrappers) — removed because
+with pointer-based caching, pointer identity is the correct check.
 
 ### Lazy zeta in whnf Let case
 
@@ -76,56 +71,25 @@ on 8/54086 Init declarations because `inst_beta(result, [val])` after pop create
 structurally different expressions (not shift-variants), unlike nanoda where fvar-based
 zeta returns the original `val` pointer.
 
-### Shift-invariant hashing and caching
+### Pointer-based caching (nanoda style)
 
-Each expression stores `struct_hash: u64` — purely structural hash (tag + children's
-struct_hashes + binder_name/style). Bvar indices are replaced by a constant (VAR_HASH),
-so shifted expressions share the same struct_hash.
+All caches are keyed by `ExprPtr` (pointer identity via hash-consing). No semantic
+equality verification needed — pointer equality is exact.
 
-**FVarBloom** (bloom filter for free variable discrimination): Each expression stores a
-32-bit bloom filter (`fvar_bloom: u32`) where bit `min(idx, 31)` is set for each free
-bvar index `idx`, plus an exact lower bound (`fvar_lb: u16`). All operations are O(1)
-bitwise: union = OR, unbind = right-shift by 1, shift = left/right-shift. Replaced the
-previous delta-encoded FVarList linked list which required O(n+m) recursive merge with
-hash-consed node allocation (was 20% of Mathlib runtime including IndexSet overhead).
+Each expression stores `fvar_lb: u16` (lower bound on free bvar indices). Caches use
+depth-indexed frames: `bucket_idx = depth - fvar_lb`. Bucket 0 holds closed expressions
+(never evicted); higher buckets are pushed/popped with local context.
 
-Canonical hash = single u64, mixing struct_hash with normalized fvar_bloom via golden
-ratio multiply. Normalization: `bloom >> fvar_lb` (shift-invariant).
+**WHNF cache**: `FxHashMap<ExprPtr, ExprPtr>` per depth bucket. Shift-peels top-level
+Shifts before lookup (shift-equivariance).
 
-**All caches use fvar_lb-based bucketing**: `bucket_idx = depth - fvar_lb`. Expressions at
-different depths land in the same bucket only if they reference the same context range.
-Cross-depth hits use `shift_eq(stored, query, depth_delta)` and return shifted results.
+**Infer cache**: Separate check/no-check maps per depth bucket. Check entries serve
+both Check and InferOnly queries.
 
-**ChainMap (key-increment chaining)**: All caches use a unified `ChainMap<K, V>` that
-chains collisions via key-increment (K, K+1, K+2) in a single FxHashMap. Replaces the
-previous primary+overflow 2-HashMap pattern. `ChainKey` trait provides `chain_next()`
-for key types (u64 wrapping_add, (u64,u64) increment on second component).
+**DefEq cache (closed)**: `FxHashSet<(ExprPtr, ExprPtr)>` for positive results.
+`UnionFind<ExprPtr>` provides transitive equality in O(α(n)).
 
-**Cache hit promotion**: After a successful **same-depth** cache hit, replace the primary
-slot with the query for future pointer-equality fast-path. **Critical: never promote
-above-depth hits** — this would evict the low-depth canonical entry, causing cascading misses.
-
-**WHNF cache**: Keyed by canonical hash → `(input, result, stored_depth)`. Prefers lower
-stored_depth (more reusable). Above-depth hits return `push_shift(result, delta, 0)`.
-Below-depth whnf hits use `push_shift_down(result, abs_delta)` — full eager traversal
-that concretely resolves all Var indices to valid indices at the target depth. Guarded by
-`result_fvar_lb >= abs_delta` (ensures no negative indices). 17K hits on Init with zero
-measurable overhead (traversal cost offset by avoided whnf recomputation).
-
-**whnf_no_unfolding cache**: Same pattern as whnf cache. Uses inline 2-slot entries.
-Also peels top-level Shifts (shift-equivariance) before cache lookup. Identity caching:
-stores `e→e` at all break paths (Sort, Const, Lambda, Pi, etc.) unconditionally.
-
-**Infer cache**: Unified stack of maps. Bucket 0 holds closed expressions (never evicted).
-`checked=true` entries serve both Check and InferOnly queries. Below-depth hits supported
-(infer results are typically small enough for `push_shift_down`).
-
-**DefEq cache (closed)**: Canonical hash pair key, `sem_eq` verification. Pointer-based
-`UnionFind<ExprPtr>` provides transitive equality in O(α(n)). Shift-aware UF: when both
-sides are Shift nodes with matching amounts, also union inner expressions.
-
-**DefEq cache (open)**: Stack-of-maps like infer cache. Separate positive/negative stacks.
-`bucket_idx = depth - min(fvar_lb(x), fvar_lb(y))`.
+**DefEq cache (open)**: Per-depth positive/negative stacks (LazyMap per frame).
 
 ### OSNF parse-time normalization
 
@@ -165,7 +129,7 @@ broken because nothing was rewritten mid-computation.
 Before expensive whnf/delta work in `def_eq_inner`, speculatively try structural App
 congruence using only O(1) `cheap_eq` checks on each arg and the head.
 
-`cheap_eq(x, y)`: combines `sem_eq`, `eq_cache_contains`, UF check, and `defeq_open_lookup`.
+`cheap_eq(x, y)`: combines pointer equality (`==`), `eq_cache_contains`, UF check, and `defeq_open_lookup`.
 Never recurses — O(1). This is "almost-cached equality": the whole expression may not be
 cached, but all sub-components are.
 
@@ -188,20 +152,11 @@ Fixed worst outliers: #298261 from 11.5s to 830ms, #357120 from 2.3s to 85ms.
 - `stacker` crate for dynamic stack growth (deep recursion on mathlib)
 - 256 MB worker thread stack in `main.rs`
 - Iterative `whnf_no_unfolding_aux` (was recursive, caused stack overflow)
-- `GenCache`: generation-counted direct-mapped caches, pre-allocated once, reused across
-  declarations via O(1) generation bump. Eliminated 13.6% Init overhead from per-declaration
-  memset of shift_eq caches.
 - mk_var Vec cache (O(1) lookup by index) and 2-way set-associative mk_app cache (64K entries/1MB,
   lazily allocated after 10K misses). On hit in way-1, promote to way-0 (MRU). On miss,
   evict way-1, move way-0→way-1, insert in way-0. Eliminated billions of hash table lookups
   on pathological declarations. Originally 1M entries (16MB) but reduced to 64K — the 16MB
   cache exceeded L3, causing every access to miss. **14% improvement on Init from right-sizing.**
-- `alloc_expr_tc`: When any child has `DagMarker::TcCtx`, the expression cannot exist in the
-  export_file dag (PartialEq compares pointer fields, and export_file contains only ExportFile
-  pointers). Skips the export_file IndexSet lookup entirely — avoids ~100M L3-miss-inducing
-  probes per Init run. Used in mk_app, mk_lambda, mk_pi, mk_let, mk_proj (conditional on
-  children), and mk_shift_cutoff (unconditional — Shift nodes never exist in export_file).
-  **19.4% improvement on Init, ~20% on Mathlib 10K.**
 - `expr_nlbv: Vec<u16>` parallel array alongside `IndexSet<Expr>` in both export-file and
   per-declaration dags. `num_loose_bvars(ptr)` reads from this 2-byte Vec instead of the
   full 48-byte Expr. Most impactful for inst_aux's 48.7M early exits (nlbv=0 check) and
@@ -274,6 +229,16 @@ alloc_expr 2.3%, get_index_of 2.3%, HashMap::insert 2.1%, mk_shift_cutoff 1.8%.
 
 These approaches were tried and found counterproductive, unsound, or out of scope:
 
+- **alloc_expr_tc** (skip ExportFile probe for TC-generated expressions): When any child
+  has DagMarker::TcCtx, skip the export_file IndexSet lookup. Was a 19.4% improvement on
+  Init. Removed because it breaks pointer identity: structurally equal expressions can get
+  different pointers (one ExportFile, one TcCtx), making pointer-based caching unsound.
+  The 17% Init regression from removing it is the cost of correct pointer identity.
+- **Shift-equivalence caching** (struct_hash + fvar_bloom + canonical_hash + sem_eq):
+  Per-expression struct_hash (shift-invariant hash) and fvar_bloom (32-bit bloom filter of
+  free bvar indices) combined into canonical_hash for cache keys, with sem_eq verification
+  on hit. Replaced by pointer-based caching — simpler, matches nanoda, and enables future
+  OSNF-everywhere where pointer identity is exact. ~660 lines removed.
 - **Custom Deserialize for ExportJsonObject** (replacing `#[serde(flatten)]`): **~7.5%
   improvement on Mathlib 100K** (128s → 115s). Reverted because this is a design-neutral
   optimization that could equally be applied to nanoda — out of scope for the design comparison.
@@ -425,65 +390,52 @@ Not applicable:
 - `7981ff6` / `224b7c1` — README update for JSON export format
 - `514a1a5` / `14bbb5c` — semver bumps
 
-## Next: OSNF everywhere + ptr-based caching
+## Current status (2026-04-12)
 
-**Goal**: Replace shift-equivalence caching (canonical_hash + sem_eq + fvar_bloom) with
-OSNF-everywhere + nanoda-style ptr-based caches. Since all expressions are in OSNF,
-shift-equivalent expressions share the same core pointer. Caches use core ExprPtr as key
-(pointer identity via UniqueHashMap), no semantic equality verification needed.
+Ptr-based caching transition complete: all caches use ExprPtr keys, sem_eq/struct_hash/
+fvar_bloom/canonical_hash/ChainMap/alloc_expr_tc removed. ~660 lines deleted. Pointer
+equality (`==`) is the sole equality check, matching nanoda's design.
 
-### What changes
+### Performance
 
-**Phase 1: OSNF in TC expression constructors**
-- mk_app, mk_lambda, mk_pi, mk_let, mk_proj: if fvar_lb > 0, extract core (adjust_child
-  on each child), alloc core, wrap in Shift(fvar_lb, core). adjust_child for TC:
-  - bvar(i) → mk_var(i - amount)
-  - Shift(k, inner) → mk_shift(inner, k - amount) or inner if k == amount
-  - compound with fvar_lb=0 → use as-is
-  - nlbv ≤ cutoff → use as-is (bound variable)
+Init standalone (profiling build, 4 threads):
+- nanobruijn: 8.4s (17% regression from ExportFile probe — previously alloc_expr_tc skipped it)
+- nanoda: 5.1s release / 17.7s profiling
 
-**Phase 2: Cache key change**
-- Replace CacheKey (u64 canonical_hash) with ExprPtr in all caches
-- whnf_cache, infer_cache: keyed by core ExprPtr, per-depth
-- def_eq cache: keyed by (ExprPtr, ExprPtr) pair of core pointers
-- Use UniqueHashMap<ExprPtr, V> like nanoda (hash by pointer identity)
-- Remove ChainMap, LazyChainMap
+Profile hotspots (Init, profiling build):
+- nanobruijn: mk_app 19.5%, alloc_expr 7.5%, inst_aux 9.0%+3.8%, stacker 2.0%,
+  view_expr 1.6%, mk_shift_cutoff 1.2%
+- nanoda: mk_app 11.1%, HashMap::insert 12.9%, inst_aux 7.0%
 
-**Phase 3: Simplify cache lookup**
-- infer(Shift(n, core)): pop n from context, look up core in cache[depth-n], shift result
-- whnf(Shift(n, core)): pop n from context, look up core in cache[depth-n], shift result
-- No sem_eq verification — pointer identity is exact
-- No above-depth/below-depth shift adjustment
-
-**Phase 4: Remove dead code**
-- sem_eq, shift_eq_aux, shift_eq_pending, GenCache shift_eq caches
-- canonical_hash, bloom_normalize
-- fvar_bloom (may keep fvar_lb for OSNF computation)
-- struct_hash use in caching (keep for hash-consing)
-- ChainMap, ChainKey, LazyChainMap
-- push_shift_down (no more below-depth cache hits)
-
-### What stays
-- Depth-indexed cache frames (push_local / pop_local)
-- infer-under-shift (pop context, infer core, shift result)
-- whnf-under-shift (pop context, whnf core, shift result)
-- mk_shift, push_shift, view_expr
-- OSNF parse-time normalization
-- mk_app DM cache, mk_var cache
-- alloc_expr_tc optimization
-- ReusableDag, expr_nlbv
-
-### Key insight
-With OSNF, there is no shift-equivalence problem: every expression IS its canonical
-representative. The "60% regression" from TC-time OSNF rewriting (documented in "Paths
-not taken") was caused by breaking pointer equality mid-computation. With OSNF maintained
-as an invariant from the start (parse-time + TC constructors), pointer equality is never
-broken.
+**Mathlib**: nanobruijn OOMs at 16GB (nanoda completes at 16GB in 4:18). Parser creates
+116M DAG entries vs nanoda's ~88M (30% increase from OSNF core sharing expansion). Likely
+compounded by TC DAG bloat from cache misses and repeated whnf computations due to
+TC-generated expressions not being in OSNF (different pointers for same structural expression).
 
 ## TODO
+
+- **OSNF everywhere (including TC-generated expressions)**: Use OSNF even for TC-generated
+  expressions, not just parser expressions. Without this, pointer equality doesn't work
+  reliably (same structural expression can have different pointers if fvar_lb differs).
+  This is the most likely fix for the memory regression — cache misses cause repeated
+  computation, which creates more TC DAG entries.
+
+- **SExprPtr instead of Shift constructor**: Replace the Shift expression variant entirely
+  with a shifted pointer type `SExprPtr = (ExprPtr, u16)` used in recursive Expr positions.
+  An `Expr` is always a core expression. Benefits:
+  - Less allocation for Shift nodes (no DAG entries for Shifts)
+  - Fewer entries in the DAGs
+  - Caches only cache core expressions anyway
+
+- **fvar_lb removal**: If all expressions are in OSNF, then fvar_lb is derivable:
+  - Var(k) → fvar_lb = k
+  - Shift(n, core) → fvar_lb = n (core has fvar_lb = 0)
+  - Core compound → fvar_lb = 0
+  So fvar_lb could be removed as a stored field, shrinking Expr.
+
 - **Fill in Theory.lean sorry's**: OSNF uniqueness, erase preservation
 - **Remove remaining dead code**: thread_local profiling counters, dead locally-nameless
-  code (Local variant, FVarId, abstr, etc.)
+  code (Local variant, FVarId, abstr, etc.), stale TcTrace fields (verify_fail counters)
 
 ## References
 

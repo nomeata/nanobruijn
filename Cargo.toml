@@ -13,6 +13,11 @@ opt-level=3
 overflow-checks=true
 lto=true
 
+[profile.profiling]
+inherits = "release"
+debug = true
+lto = false
+
 [profile.test]
 opt-level=3
 overflow-checks=true
