@@ -395,9 +395,13 @@ pub(crate) fn parse_export_file<'p, R: BufRead>(
         }
     }
     
+    let total_inserted = parser.expr_remap.len() + parser.osnf_count as usize;
+    let dag_size = parser.dag.exprs.len();
+    let dedup_pct = if total_inserted > 0 && dag_size <= total_inserted {
+        100 - (100 * dag_size / total_inserted)
+    } else { 0 };
     eprintln!("OSNF: {} expressions normalized, {} parser entries → {} DAG entries ({}% dedup from core sharing)",
-        parser.osnf_count, parser.expr_remap.len(), parser.dag.exprs.len(),
-        if parser.dag.exprs.len() > 0 { 100 - (100 * parser.dag.exprs.len() / (parser.expr_remap.len() + parser.osnf_count as usize)) } else { 0 });
+        parser.osnf_count, parser.expr_remap.len(), dag_size, dedup_pct);
     let name_cache = parser.dag.mk_name_cache();
     let export_file = crate::util::ExportFile {
         dag: parser.dag,
