@@ -29,7 +29,11 @@ pub(crate) fn test_get_export_file<'p>(config_path: Option<&Path>) -> Result<(Ex
             num_threads: 1,
             print_success_message: true,
             print_axioms: true,
-            unsafe_permit_all_axioms: false
+            unsafe_permit_all_axioms: false,
+            max_declarations: 0,
+            skip_declarations: 0,
+            declaration_timeout_secs: 0,
+            use_nanoda_tc: false,
         },
         Some(config_path) => Config::try_from(config_path)?,
     };
