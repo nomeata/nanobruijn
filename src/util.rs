@@ -913,7 +913,16 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         }
     }
 
-    // alloc_expr_tc removed: always use alloc_expr to check both DAGs (nanoda approach).
+    /// Like alloc_expr but skips the export_file lookup. Used when the expression
+    /// contains TcCtx pointers (the export_file can't contain such expressions).
+    #[inline(always)]
+    fn alloc_expr_tc(&mut self, e: Expr<'t>) -> ExprPtr<'t> {
+        self.trace.alloc_expr_calls += 1;
+        let nlbv = e.num_loose_bvars();
+        let (idx, inserted) = self.dag.exprs.insert_full(e);
+        if inserted { self.dag.expr_nlbv.push(nlbv); }
+        Ptr::from(DagMarker::TcCtx, idx)
+    }
 
     /// Store a string (a `CowStr`), getting back a pointer to the allocated item. If the item was
     /// already stored, forego the allocation and return a pointer to the previously inserted
@@ -1271,7 +1280,11 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
             else { fun_e.get_fvar_lb().min(arg_e.get_fvar_lb()) }
         };
         let app_expr = Expr::App { fun, arg, num_loose_bvars, has_fvars, hash, struct_hash, fvar_bloom, fvar_lb };
-        let result = self.alloc_expr(app_expr);
+        let result = if fun.dag_marker() == DagMarker::TcCtx || arg.dag_marker() == DagMarker::TcCtx {
+            self.alloc_expr_tc(app_expr)
+        } else {
+            self.alloc_expr(app_expr)
+        };
         // Lazily allocate DM cache after enough misses to justify 1MB
         if dm_len == 0 {
             self.expr_cache.mk_app_miss_count += 1;
@@ -1321,7 +1334,11 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
             else { ty_e.get_fvar_lb().min(b_lb) }
         };
         let lambda_expr = Expr::Lambda { binder_name, binder_style, binder_type, body, num_loose_bvars, has_fvars, hash, struct_hash, fvar_bloom, fvar_lb };
-        let result = self.alloc_expr(lambda_expr);
+        let result = if binder_type.dag_marker() == DagMarker::TcCtx || body.dag_marker() == DagMarker::TcCtx {
+            self.alloc_expr_tc(lambda_expr)
+        } else {
+            self.alloc_expr(lambda_expr)
+        };
         self.expr_cache.mk_lambda_cache.insert(key, result);
         result
     }
@@ -1356,7 +1373,11 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
             else { ty_e.get_fvar_lb().min(b_lb) }
         };
         let pi_expr = Expr::Pi { binder_name, binder_style, binder_type, body, num_loose_bvars, has_fvars, hash, struct_hash, fvar_bloom, fvar_lb };
-        let result = self.alloc_expr(pi_expr);
+        let result = if binder_type.dag_marker() == DagMarker::TcCtx || body.dag_marker() == DagMarker::TcCtx {
+            self.alloc_expr_tc(pi_expr)
+        } else {
+            self.alloc_expr(pi_expr)
+        };
         self.expr_cache.mk_pi_cache.insert(key, result);
         result
     }
@@ -1397,7 +1418,11 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
             if lb == u16::MAX { 0 } else { lb }
         };
         let let_expr = Expr::Let { binder_name, binder_type, val, body, num_loose_bvars, has_fvars, hash, nondep, struct_hash, fvar_bloom, fvar_lb };
-        self.alloc_expr(let_expr)
+        if binder_type.dag_marker() == DagMarker::TcCtx || val.dag_marker() == DagMarker::TcCtx || body.dag_marker() == DagMarker::TcCtx {
+            self.alloc_expr_tc(let_expr)
+        } else {
+            self.alloc_expr(let_expr)
+        }
     }
 
     pub fn mk_proj(&mut self, ty_name: NamePtr<'t>, idx: u32, structure: ExprPtr<'t>) -> ExprPtr<'t> {
@@ -1409,7 +1434,12 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         let struct_hash = hash64!(crate::expr::PROJ_HASH, ty_name, idx, s_e.get_struct_hash());
         let fvar_bloom = s_e.get_fvar_bloom();
         let fvar_lb = s_e.get_fvar_lb();
-        self.alloc_expr(Expr::Proj { ty_name, idx, structure, num_loose_bvars, has_fvars, hash, struct_hash, fvar_bloom, fvar_lb })
+        let proj_expr = Expr::Proj { ty_name, idx, structure, num_loose_bvars, has_fvars, hash, struct_hash, fvar_bloom, fvar_lb };
+        if structure.dag_marker() == DagMarker::TcCtx {
+            self.alloc_expr_tc(proj_expr)
+        } else {
+            self.alloc_expr(proj_expr)
+        }
     }
 
     pub fn mk_string_lit(&mut self, string_ptr: StringPtr<'t>) -> Option<ExprPtr<'t>> {
@@ -1580,9 +1610,12 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
             if amount > 0 { low | high.checked_shl(amount as u32).unwrap_or(0) | (if high & 0x80000000 != 0 { 0x80000000 } else { 0 }) }
             else { low | (high >> ((-amount) as u32)) }
         };
-        // Shift nodes may exist in the export_file dag (from OSNF parse-time normalization).
-        // TC-created Shift nodes use tc-only alloc.
-        let result = self.alloc_expr(Expr::Shift { hash, struct_hash, fvar_bloom, fvar_lb, inner, amount, cutoff, num_loose_bvars: new_nlbv, has_fvars });
+        let shift_expr = Expr::Shift { hash, struct_hash, fvar_bloom, fvar_lb, inner, amount, cutoff, num_loose_bvars: new_nlbv, has_fvars };
+        let result = if inner.dag_marker() == DagMarker::TcCtx {
+            self.alloc_expr_tc(shift_expr)
+        } else {
+            self.alloc_expr(shift_expr)
+        };
         self.expr_cache.shift_dedup.insert(dedup_key, result);
         result
     }
