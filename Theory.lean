@@ -710,11 +710,9 @@ theorem osnf_unique (e₁ e₂ : SExpr) (h₁ : IsOSNF e₁) (h₂ : IsOSNF e₂
     (heq : e₁.erase = e₂.erase) : e₁ = e₂ := by
   sorry
 
-/-- **Corollary**: `to_osnf` is idempotent.
-    Requires showing `to_osnf` is the identity on its own outputs, which needs
-    reasoning about `adjust_child` outputs and a corrected `osnf_unique`. -/
-theorem to_osnf_idempotent (e : SExpr) : to_osnf (to_osnf e) = to_osnf e := by
-  sorry
+/-- **Corollary**: `to_osnf` is idempotent. -/
+theorem to_osnf_idempotent (e : SExpr) : to_osnf (to_osnf e) = to_osnf e :=
+  osnf_unique _ _ (to_osnf_isOSNF _) (to_osnf_isOSNF _) (to_osnf_erase _)
 
 /-- **Corollary**: Two expressions are shift-equivalent iff they have the same OSNF. -/
 theorem equiv_iff_osnf_eq (e₁ e₂ : SExpr) :
