@@ -1455,6 +1455,10 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         if expr.num_loose_bvars() <= cutoff {
             return e;
         }
+        // If all free bvars are >= cutoff, the cutoff is irrelevant — use O(1) cutoff=0 path.
+        if cutoff > 0 && expr.get_fvar_lb() >= cutoff {
+            return self.push_shift_down_cutoff(e, amount, 0);
+        }
         let cache_key = (e, amount, cutoff);
         if let Some(&result) = self.expr_cache.shift_down_cache.get(&cache_key) {
             return result;

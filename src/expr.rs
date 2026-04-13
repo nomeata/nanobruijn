@@ -493,6 +493,11 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         if self.num_loose_bvars(e) <= cutoff {
             return e
         }
+        // If all free bvars are already >= cutoff, the cutoff is irrelevant —
+        // this is a uniform shift, so use O(1) mk_shift instead of traversing.
+        if self.read_expr(e).get_fvar_lb() >= cutoff {
+            return self.mk_shift(e, amount);
+        }
         if let Some(&cached) = self.expr_cache.shift_cache.get(&(e, amount, cutoff)) {
             return cached;
         }

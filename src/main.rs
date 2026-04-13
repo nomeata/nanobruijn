@@ -35,10 +35,6 @@ fn use_config(config_path: &Path) -> Result<Option<String>, Box<dyn Error>> {
     // Make sure the target pretty printer destination is accessible before doing any real work.
     let mut pp_destination = cfg.get_pp_destination()?;
     let (mut export_file, skipped_axioms) = cfg.to_export_file()?;
-    // OSNF: normalize export DAG to outermost-shift normal form.
-    // Disabled: expression rewriting causes 60% slowdown (broken pointer equality).
-    // Cache-key approach not needed: pointer equality suffices after hash-consing.
-    // nanobruijn::osnf::osnf_normalize(&mut export_file);
     // Check the environment
     let panic_count = export_file.check_all_declars();
     // Pretty print as necessary

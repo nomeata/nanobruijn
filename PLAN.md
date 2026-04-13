@@ -42,6 +42,10 @@ Nested shifts are impossible (inner can't be Shift since inner.fvar_lb == 0).
   checking, and def_eq for all pattern matches on compound constructors.
 - `shift_expr(e, amount, cutoff)`: full traversal for cutoff > 0. Cached via shift_cache.
   Rebuilds via mk_* constructors, producing OSNF results.
+- **fvar_lb optimization**: In `shift_expr_aux` and `push_shift_down_cutoff`, when
+  `fvar_lb >= cutoff`, all free bvars are above the cutoff, so the cutoff is irrelevant.
+  Converts to O(1) cutoff=0 path (mk_shift or Shift adjustment) instead of full traversal.
+  Critical for avoiding O(depth) recursion on deeply nested binder chains.
 
 **Shift composition in inst_aux**: When `inst_aux` carries pending shift `(sh_amt, sh_cut)`
 and encounters `Shift(inner, amount, cutoff)`, it composes the shifts directly when
@@ -124,10 +128,10 @@ avoid infinite loops.
 **Parse-time core extraction**: During parsing, `adjust_child(child, fvar_lb, cutoff)`
 extracts cores. Uses `expr_remap: Vec<usize>` for sequential-to-DAG index mapping.
 
-**Results** (parse-time only, A/B/A on full Mathlib, 630K declarations):
-- 47M of 88M parser expressions normalized (53%), 14% core dedup
-- **-7% user time** (baseline avg 1175s → 1095s), +18% RSS (7.9GB → 9.3GB)
-- Init: +17% overhead (6.5s → 7.6s) — parsing overhead dominates on smaller input
+**Results** (parse-time + TC enforcement, Init benchmark, single-thread):
+- 2.9M of 5.7M parser expressions normalized, 10% core dedup → 7.8M DAG entries
+- **Init: 26.7s vs nanoda 34.0s (22% faster), 587MB vs 471MB (+24% memory)**
+- Parse-time only (full Mathlib): 47M of 88M normalized, -7% time, +18% RSS
 
 ### Speculative app congruence in def_eq
 
