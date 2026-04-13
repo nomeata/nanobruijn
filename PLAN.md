@@ -156,6 +156,37 @@ When inst_aux detects all free bvars are past the substitution range
 `n_substs >= 4` (lower thresholds regress due to HashMap overhead outweighing savings).
 Fixed worst outliers: #298261 from 11.5s to 830ms, #357120 from 2.3s to 85ms.
 
+### OSNF dead-substitution in inst_aux_quick and inst/inst_beta
+
+Under OSNF, `fvar_lb` directly tells us the minimum free variable index. When
+`fvar_lb >= offset + n_substs`, ALL substituted variables are dead — no variable gets
+substituted. This is O(1) for Shift and Var nodes (push_shift_down or identity).
+
+Three levels of the check:
+1. **inst_beta/inst top level**: if `fvar_lb(e) >= n_substs`, short-circuit before entering
+   inst_aux entirely. For inst_beta: `push_shift_down(e, n_substs)`. For inst: return `e`.
+2. **inst_aux_quick sh_amt==0**: on per-depth cache miss, check fvar_lb. Catches all Shift
+   children in single-arg beta reduction (the common case), since Shift implies fvar_lb ≥ 1.
+3. **inst_aux_quick sh_amt>0**: when `fvar_lb > sh_cut`, compute effective_fvar_lb and check.
+
+Also: `expr_fvar_lb: Vec<u16>` parallel array (like `expr_nlbv`) for O(1) fvar_lb access
+without reading the full Expr. inst_cache enlarged from 4096 to 64K entries.
+
+**Impact**: Declaration #272519 from 48.5s → 28.5s (41% faster). inst_aux calls 398M → 280M.
+Full Mathlib panics: 6 → 5 (borderline declarations still ~28-30s vs 30s timeout).
+
+### Pre-peel cache for infer/whnf/wnu
+
+Before peeling Shift(core, n) at depth d (expensive split_off/extend), check if core's
+result is already cached at the inner depth d-n. If so, shift the cached result and return
+without peeling. Eliminates >99% of infer/whnf peels and 67% of wnu peels.
+
+### inst_aux_quick fast path
+
+Inlined `#[inline(always)]` wrapper that checks nlbv and fvar_lb early exits before calling
+the full inst_aux (which involves stacker::maybe_grow + cache lookup). Avoids ~24M+ function
+calls for trivial cases (closed expressions, nlbv below offset, dead substitutions).
+
 ### Infrastructure
 
 - `stacker` crate for dynamic stack growth (deep recursion on mathlib)
