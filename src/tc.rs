@@ -653,10 +653,26 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         // Temporarily shrink the context to depth d-k, infer inner, restore, shift result.
         // Only works for cutoff=0 (top-level shifts). For cutoff>0, force first.
         if let Expr::Shift { inner, amount, .. } = self.ctx.read_expr(e) {
-            let new_depth = self.depth() - amount as usize;
+            let depth = self.depth();
+            let is_check = flag == InferFlag::Check;
+            // Fast path: check if inner's result is already cached at the lower depth.
+            // This avoids the expensive split_off/extend peel entirely.
+            let inner_depth = depth - amount as usize;
+            let inner_bucket = if self.ctx.num_loose_bvars(inner) == 0 { 0 } else { inner_depth };
+            if let Some(inner_cached) = self.tc_cache.infer_cache_get(inner_bucket, &inner, true) {
+                self.ctx.trace.infer_cache_hits += 1;
+                return self.ctx.mk_shift(inner_cached, amount);
+            }
+            if !is_check {
+                if let Some(inner_cached) = self.tc_cache.infer_cache_get(inner_bucket, &inner, false) {
+                    self.ctx.trace.infer_cache_hits += 1;
+                    return self.ctx.mk_shift(inner_cached, amount);
+                }
+            }
+            // Peel: shrink context to depth d-k, infer inner, restore, shift result.
             self.ctx.trace.infer_shift_peel += 1;
             self.ctx.trace.shift_peel_frames_total += amount as u64;
-            let saved = self.tc_cache.split_off(new_depth);
+            let saved = self.tc_cache.split_off(inner_depth);
             let inner_type = self.infer(inner, flag);
             self.tc_cache.extend(saved);
             return self.ctx.mk_shift(inner_type, amount);
@@ -925,11 +941,21 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             e = inner;
         }
         if total_shift > 0 {
-            if self.depth() == 0 {
+            let depth = self.depth();
+            // Fast path: check if inner's whnf result is already cached at the lower depth.
+            if depth > 0 {
+                let inner_depth = depth - total_shift as usize;
+                let inner_bucket = if self.ctx.num_loose_bvars(e) == 0 { 0 } else { inner_depth };
+                if let Some(inner_cached) = self.tc_cache.whnf_cache_get(inner_bucket, &e) {
+                    self.ctx.trace.whnf_cache_hits += 1;
+                    return self.ctx.mk_shift(inner_cached, total_shift);
+                }
+            }
+            if depth == 0 {
                 let r = self.whnf(e);
                 return self.ctx.mk_shift(r, total_shift);
             }
-            let new_depth = self.depth() - total_shift as usize;
+            let new_depth = depth - total_shift as usize;
             self.ctx.trace.whnf_shift_peel += 1;
             self.ctx.trace.shift_peel_frames_total += total_shift as u64;
             let saved = self.tc_cache.split_off(new_depth);
@@ -982,13 +1008,23 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             e = inner;
         }
         if total_shift > 0 {
+            let depth = self.depth();
+            // Fast path: check if inner's wnu result is already cached at the lower depth.
+            if depth > 0 {
+                let inner_depth = depth - total_shift as usize;
+                let inner_bucket = if self.ctx.num_loose_bvars(e) == 0 { 0 } else { inner_depth };
+                if let Some(inner_cached) = self.tc_cache.wnu_cache_get(inner_bucket, &e) {
+                    self.ctx.trace.wnu_cache_hits += 1;
+                    return self.ctx.push_shift_up(inner_cached, total_shift);
+                }
+            }
             self.ctx.trace.wnu_shift_peel += 1;
             self.ctx.trace.shift_peel_frames_total += total_shift as u64;
-            if self.depth() == 0 {
+            if depth == 0 {
                 let r = self.whnf_no_unfolding_aux(e, cheap_proj);
                 return self.ctx.push_shift_up(r, total_shift);
             }
-            let new_depth = self.depth() - total_shift as usize;
+            let new_depth = depth - total_shift as usize;
             let saved = self.tc_cache.split_off(new_depth);
             let r = self.whnf_no_unfolding_aux(e, cheap_proj);
             self.tc_cache.extend(saved);
