@@ -321,6 +321,7 @@ fn compute_core(
             let (vi, inserted) = dag.exprs.insert_full(new_var);
             if inserted {
                 dag.expr_nlbv.push(new_idx + 1);
+                dag.expr_fvar_lb.push(new_idx);
             }
             (vi, inserted)
         }
@@ -345,7 +346,7 @@ fn compute_core(
                 has_fvars, hash, fvar_lb,
             };
             let (ai, inserted) = dag.exprs.insert_full(app);
-            if inserted { dag.expr_nlbv.push(new_nlbv); }
+            if inserted { dag.expr_nlbv.push(new_nlbv); dag.expr_fvar_lb.push(fvar_lb); }
             (ai, inserted)
         }
         Expr::Lambda { binder_name, binder_style, binder_type, body, has_fvars, .. } => {
@@ -388,7 +389,7 @@ fn compute_core(
                 fvar_lb,
             };
             let (li, inserted) = dag.exprs.insert_full(let_e);
-            if inserted { dag.expr_nlbv.push(new_nlbv); }
+            if inserted { dag.expr_nlbv.push(new_nlbv); dag.expr_fvar_lb.push(fvar_lb); }
             (li, inserted)
         }
         Expr::Proj { ty_name, idx: proj_idx, structure, has_fvars, .. } => {
@@ -404,7 +405,7 @@ fn compute_core(
                 fvar_lb,
             };
             let (pi, inserted) = dag.exprs.insert_full(proj);
-            if inserted { dag.expr_nlbv.push(struct_nlbv); }
+            if inserted { dag.expr_nlbv.push(struct_nlbv); dag.expr_fvar_lb.push(fvar_lb); }
             (pi, inserted)
         }
         // Closed expressions — already handled by nlbv <= cutoff fast path
@@ -462,6 +463,6 @@ fn make_binder_core<'a>(
         }
     };
     let (bi, inserted) = dag.exprs.insert_full(expr);
-    if inserted { dag.expr_nlbv.push(new_nlbv); }
+    if inserted { dag.expr_nlbv.push(new_nlbv); dag.expr_fvar_lb.push(fvar_lb); }
     (bi, inserted)
 }

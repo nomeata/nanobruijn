@@ -233,13 +233,13 @@ pub(crate) fn nat_lor(x: BigUint, y: BigUint) -> BigUint {
 }
 
 pub struct ExprCache<'t> {
-    /// Caches (e, offset) |-> output for instantiation. This cache is reset
-    /// before every new call to `inst`, so there's no need to cache the sequence
-    /// of substitutions.
-    /// inst_cache key: (expr, offset | sh_amt << 16 | sh_cut << 32) -> result.
-    /// Direct-mapped cache with generation counter for O(1) clear.
-    pub(crate) inst_cache: Vec<(u32, u64, ExprPtr<'t>, ExprPtr<'t>)>,  // (gen, params, key_expr, result)
-    pub(crate) inst_cache_gen: u32,
+    /// Caches (e, substs_id, params) |-> output for instantiation.
+    /// Persistent across inst/inst_beta calls within a declaration — substs identity
+    /// is encoded in substs_id (hash of substitution values + shift_down flag).
+    /// inst_cache key: (expr, substs_id, offset | sh_amt << 16 | sh_cut << 32) -> result.
+    pub(crate) inst_cache: Vec<(u64, u64, ExprPtr<'t>, ExprPtr<'t>)>,  // (substs_id, params, key_expr, result)
+    /// Current substs identity for inst_cache. Set at the start of each inst/inst_beta call.
+    pub(crate) inst_substs_id: u64,
     /// Caches (e, ks, vs) |-> output for level substitution.
     pub(crate) subst_cache: FxHashMap<(ExprPtr<'t>, LevelsPtr<'t>, LevelsPtr<'t>), ExprPtr<'t>>,
     pub(crate) dsubst_cache: FxHashMap<(ExprPtr<'t>, LevelsPtr<'t>, LevelsPtr<'t>), ExprPtr<'t>>,
@@ -274,7 +274,7 @@ impl<'t> ExprCache<'t> {
     fn new() -> Self {
         Self {
             inst_cache: Vec::new(),
-            inst_cache_gen: 0,
+            inst_substs_id: 0,
             abstr_cache: new_fx_hash_map(),
             subst_cache: new_fx_hash_map(),
             dsubst_cache: new_fx_hash_map(),
@@ -304,7 +304,7 @@ impl ReusableDag {
 
 pub const MK_APP_CACHE_SIZE: usize = 1 << 16; // 64K entries (1MB)
 pub const MK_APP_DM_THRESHOLD: u32 = 1_000; // allocate DM cache after this many misses
-pub const INST_CACHE_SIZE: usize = 1 << 12; // 4096 entries for inst_cache DM
+pub const INST_CACHE_SIZE: usize = 1 << 16; // 64K entries for inst_cache DM
 
 pub struct ExportFile<'p> {
     /// The underlying storage for `Name`, `Level`, and `Expr` items (and Strings).
@@ -729,8 +729,9 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
             Ptr::from(DagMarker::ExportFile, idx)
         } else {
             let nlbv = e.num_loose_bvars();
+            let fvar_lb = e.get_fvar_lb();
             let (idx, inserted) = self.dag.exprs.insert_full(e);
-            if inserted { self.dag.expr_nlbv.push(nlbv); }
+            if inserted { self.dag.expr_nlbv.push(nlbv); self.dag.expr_fvar_lb.push(fvar_lb); }
             Ptr::from(DagMarker::TcCtx, idx)
         }
     }
@@ -1683,6 +1684,9 @@ pub struct LeanDag<'a> {
     /// Parallel array: expr_nlbv[i] = exprs[i].num_loose_bvars().
     /// Allows O(1) nlbv lookup without reading the full 48-byte Expr.
     pub expr_nlbv: Vec<u16>,
+    /// Parallel array: expr_fvar_lb[i] = exprs[i].get_fvar_lb().
+    /// Allows O(1) fvar_lb lookup for OSNF dead-substitution checks.
+    pub expr_fvar_lb: Vec<u16>,
     pub uparams: FxIndexSet<Arc<[LevelPtr<'a>]>>,
     pub strings: FxIndexSet<CowStr<'a>>,
     pub bignums: Option<FxIndexSet<BigUint>>,
@@ -1705,6 +1709,7 @@ impl<'a> LeanDag<'a> {
         self.levels.clear();
         self.exprs.clear();
         self.expr_nlbv.clear();
+        self.expr_fvar_lb.clear();
         self.uparams.clear();
         self.strings.clear();
         if let Some(ref mut bignums) = self.bignums {
@@ -1729,6 +1734,11 @@ impl<'a> LeanDag<'a> {
                 new_unique_index_set()
             },
             expr_nlbv: if expr_capacity > 0 {
+                Vec::with_capacity(expr_capacity)
+            } else {
+                Vec::new()
+            },
+            expr_fvar_lb: if expr_capacity > 0 {
                 Vec::with_capacity(expr_capacity)
             } else {
                 Vec::new()

@@ -530,8 +530,9 @@ impl<'a, R: BufRead> Parser<'a, R> {
     /// Insert an expression and track its nlbv in the parallel Vec.
     fn insert_expr(&mut self, e: Expr<'a>) -> (usize, bool) {
         let nlbv = e.num_loose_bvars();
+        let fvar_lb = e.get_fvar_lb();
         let result = self.dag.exprs.insert_full(e);
-        if result.1 { self.dag.expr_nlbv.push(nlbv); }
+        if result.1 { self.dag.expr_nlbv.push(nlbv); self.dag.expr_fvar_lb.push(fvar_lb); }
         result
     }
 

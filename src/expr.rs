@@ -210,7 +210,13 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         if substs.is_empty() {
             return e
         }
-        self.expr_cache.inst_cache_gen = self.expr_cache.inst_cache_gen.wrapping_add(1);
+        // OSNF fast path: if fvar_lb >= n_substs, no substituted variable appears.
+        // For inst (no shift_down), the expression is unchanged.
+        let fvar_lb = self.fvar_lb(e);
+        if fvar_lb >= substs.len() as u16 {
+            return e;
+        }
+        self.expr_cache.inst_substs_id = self.expr_cache.inst_substs_id.wrapping_add(1);
         self.inst_aux(e, substs, 0, false, 0, 0)
     }
 
@@ -221,7 +227,14 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         if substs.is_empty() {
             return e
         }
-        self.expr_cache.inst_cache_gen = self.expr_cache.inst_cache_gen.wrapping_add(1);
+        // OSNF fast path: if fvar_lb >= n_substs, all substituted variables are dead.
+        // Result is just shift_down by n_substs — O(1) for Shift and Var nodes.
+        let n_substs = substs.len() as u16;
+        let fvar_lb = self.fvar_lb(e);
+        if fvar_lb >= n_substs {
+            return self.push_shift_down(e, n_substs);
+        }
+        self.expr_cache.inst_substs_id = self.expr_cache.inst_substs_id.wrapping_add(1);
         self.inst_aux(e, substs, 0, true, 0, 0)
     }
 
@@ -230,6 +243,51 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
     /// instantiation, without creating intermediate Shift wrapper expressions.
     fn inst_aux(&mut self, e: ExprPtr<'t>, substs: &[ExprPtr<'t>], offset: u16, shift_down: bool, sh_amt: i16, sh_cut: u16) -> ExprPtr<'t> {
         stacker::maybe_grow(64 * 1024, 2 * 1024 * 1024, || self.inst_aux_body(e, substs, offset, shift_down, sh_amt, sh_cut))
+    }
+
+    /// Inlined fast path for inst_aux on children: avoids function call + stacker overhead
+    /// for the common early-exit cases (closed expressions, nlbv below offset).
+    #[inline(always)]
+    fn inst_aux_quick(&mut self, e: ExprPtr<'t>, substs: &[ExprPtr<'t>], offset: u16, shift_down: bool, sh_amt: i16, sh_cut: u16) -> ExprPtr<'t> {
+        let nlbv = self.num_loose_bvars(e);
+        let n_substs = substs.len() as u16;
+        if sh_amt == 0 {
+            if nlbv <= offset { return e; }
+            // OSNF dead-substitution: if all free vars are past the substitution range,
+            // no variable gets substituted. O(1) for Shift/Var nodes.
+            let fvar_lb = self.fvar_lb(e);
+            if fvar_lb >= offset + n_substs {
+                if shift_down {
+                    return self.push_shift_down_cutoff(e, n_substs, offset);
+                } else {
+                    return e;
+                }
+            }
+        } else {
+            if nlbv == 0 { return e; }
+            let effective_nlbv = if nlbv <= sh_cut { nlbv as i16 } else { nlbv as i16 + sh_amt };
+            if effective_nlbv <= offset as i16 {
+                if nlbv <= sh_cut { return e; }
+                if sh_cut == 0 { return self.mk_shift(e, sh_amt as u16); }
+                return self.shift_expr(e, sh_amt as u16, sh_cut);
+            }
+            // OSNF dead-substitution for shifted case: if fvar_lb > sh_cut (shift applies to lowest var),
+            // and the effective lower bound is past the subst range, short-circuit.
+            let fvar_lb = self.fvar_lb(e);
+            if fvar_lb > sh_cut {
+                let effective_fvar_lb = fvar_lb + sh_amt as u16;
+                if effective_fvar_lb >= offset + n_substs {
+                    if shift_down {
+                        let shifted = if sh_cut == 0 { self.mk_shift(e, sh_amt as u16) } else { self.shift_expr(e, sh_amt as u16, sh_cut) };
+                        return self.push_shift_down_cutoff(shifted, n_substs, offset);
+                    } else {
+                        if sh_cut == 0 { return self.mk_shift(e, sh_amt as u16); }
+                        return self.shift_expr(e, sh_amt as u16, sh_cut);
+                    }
+                }
+            }
+        }
+        self.inst_aux(e, substs, offset, shift_down, sh_amt, sh_cut)
     }
 
     fn inst_aux_body(&mut self, e: ExprPtr<'t>, substs: &[ExprPtr<'t>], offset: u16, shift_down: bool, sh_amt: i16, sh_cut: u16) -> ExprPtr<'t> {
@@ -265,16 +323,16 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         }
 
         let params = (offset as u64) | ((sh_amt as u16 as u64) << 16) | ((sh_cut as u64) << 32);
+        let substs_id = self.expr_cache.inst_substs_id;
         let cache_tag = e.get_hash().wrapping_mul(0x517cc1b727220a95) ^ params;
-        let gen = self.expr_cache.inst_cache_gen;
         // Lazily allocate the DM cache
         if self.expr_cache.inst_cache.is_empty() {
             let dummy: ExprPtr<'t> = crate::util::Ptr::from(crate::util::DagMarker::ExportFile, 0);
             self.expr_cache.inst_cache.resize(crate::util::INST_CACHE_SIZE, (0, 0, dummy, dummy));
         }
         let slot = (cache_tag as usize) & (crate::util::INST_CACHE_SIZE - 1);
-        let (g, p, ke, result) = self.expr_cache.inst_cache[slot];
-        if g == gen && p == params && ke == e {
+        let (sid, p, ke, result) = self.expr_cache.inst_cache[slot];
+        if sid == substs_id && p == params && ke == e {
             self.trace.inst_aux_cache_hits += 1;
             return result;
         }
@@ -293,7 +351,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         if sh_amt > 0 && shift_down && sh_amt == n_substs as i16 && sh_cut == offset {
             self.trace.inst_aux_shift_skip_clean += 1;
             self.trace.inst_aux_elided += 1;
-            self.expr_cache.inst_cache[slot] = (gen, params, e,e);
+            self.expr_cache.inst_cache[slot] = (substs_id, params, e,e);
             return e;
         }
         // More general case: shift pushes vars past substitution range but sh_amt > n_substs
@@ -318,7 +376,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
                 }
             };
             self.trace.inst_aux_elided += 1;
-            self.expr_cache.inst_cache[slot] = (gen, params, e,r);
+            self.expr_cache.inst_cache[slot] = (substs_id, params, e,r);
             return r;
         }
 
@@ -331,7 +389,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
             let lb = self.read_expr(e).get_fvar_lb();
             if lb >= offset + n_substs {
                 let r = self.push_shift_down_cutoff(e, n_substs, offset);
-                self.expr_cache.inst_cache[slot] = (gen, params, e,r);
+                self.expr_cache.inst_cache[slot] = (substs_id, params, e,r);
                 return r;
             }
         }
@@ -349,7 +407,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
                     if sh_cut == 0 {
                         // Compose: Shift(inner, n) with pending (sh_amt, 0) = (sh_amt + n, 0)
                         let r = self.inst_aux(inner, substs, offset, shift_down, sh_amt + amount as i16, 0);
-                        self.expr_cache.inst_cache[slot] = (gen, params, e,r);
+                        self.expr_cache.inst_cache[slot] = (substs_id, params, e,r);
                         return r;
                     }
                     // sh_cut > 0: cutoffs don't match. Force via push_shift, then recurse.
@@ -357,7 +415,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
                         // All vars >= 0 become >= amount >= sh_cut, compose uniformly
                         self.trace.inst_aux_shift_compose += 1;
                         let r = self.inst_aux(inner, substs, offset, shift_down, sh_amt + amount as i16, 0);
-                        self.expr_cache.inst_cache[slot] = (gen, params, e,r);
+                        self.expr_cache.inst_cache[slot] = (substs_id, params, e,r);
                         return r;
                     }
                     // n < sh_cut: can't compose shifts simply. Use view_expr to see
@@ -381,32 +439,32 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
                             }
                         }
                         App { fun, arg, .. } => {
-                            let new_fun = self.inst_aux(fun, substs, offset, shift_down, sh_amt, sh_cut);
-                            let new_arg = self.inst_aux(arg, substs, offset, shift_down, sh_amt, sh_cut);
+                            let new_fun = self.inst_aux_quick(fun, substs, offset, shift_down, sh_amt, sh_cut);
+                            let new_arg = self.inst_aux_quick(arg, substs, offset, shift_down, sh_amt, sh_cut);
                             self.mk_app(new_fun, new_arg)
                         }
                         Pi { binder_name, binder_style, binder_type, body, .. } => {
-                            let new_type = self.inst_aux(binder_type, substs, offset, shift_down, sh_amt, sh_cut);
-                            let new_body = self.inst_aux(body, substs, offset + 1, shift_down, sh_amt, sh_cut + 1);
+                            let new_type = self.inst_aux_quick(binder_type, substs, offset, shift_down, sh_amt, sh_cut);
+                            let new_body = self.inst_aux_quick(body, substs, offset + 1, shift_down, sh_amt, sh_cut + 1);
                             self.mk_pi(binder_name, binder_style, new_type, new_body)
                         }
                         Lambda { binder_name, binder_style, binder_type, body, .. } => {
-                            let new_type = self.inst_aux(binder_type, substs, offset, shift_down, sh_amt, sh_cut);
-                            let new_body = self.inst_aux(body, substs, offset + 1, shift_down, sh_amt, sh_cut + 1);
+                            let new_type = self.inst_aux_quick(binder_type, substs, offset, shift_down, sh_amt, sh_cut);
+                            let new_body = self.inst_aux_quick(body, substs, offset + 1, shift_down, sh_amt, sh_cut + 1);
                             self.mk_lambda(binder_name, binder_style, new_type, new_body)
                         }
                         Let { binder_name, binder_type, val, body, nondep, .. } => {
-                            let new_type = self.inst_aux(binder_type, substs, offset, shift_down, sh_amt, sh_cut);
-                            let new_val = self.inst_aux(val, substs, offset, shift_down, sh_amt, sh_cut);
-                            let new_body = self.inst_aux(body, substs, offset + 1, shift_down, sh_amt, sh_cut + 1);
+                            let new_type = self.inst_aux_quick(binder_type, substs, offset, shift_down, sh_amt, sh_cut);
+                            let new_val = self.inst_aux_quick(val, substs, offset, shift_down, sh_amt, sh_cut);
+                            let new_body = self.inst_aux_quick(body, substs, offset + 1, shift_down, sh_amt, sh_cut + 1);
                             self.mk_let(binder_name, new_type, new_val, new_body, nondep)
                         }
                         Proj { ty_name, idx, structure, .. } => {
-                            let new_structure = self.inst_aux(structure, substs, offset, shift_down, sh_amt, sh_cut);
+                            let new_structure = self.inst_aux_quick(structure, substs, offset, shift_down, sh_amt, sh_cut);
                             self.mk_proj(ty_name, idx, new_structure)
                         }
                     };
-                    self.expr_cache.inst_cache[slot] = (gen, params, e, r);
+                    self.expr_cache.inst_cache[slot] = (substs_id, params, e, r);
                     return r;
                 }
                 Var { dbj_idx, .. } => {
@@ -436,28 +494,28 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
                     }
                 }
                 App { fun, arg, .. } => {
-                    let new_fun = self.inst_aux(fun, substs, offset, shift_down, sh_amt, sh_cut);
-                    let new_arg = self.inst_aux(arg, substs, offset, shift_down, sh_amt, sh_cut);
+                    let new_fun = self.inst_aux_quick(fun, substs, offset, shift_down, sh_amt, sh_cut);
+                    let new_arg = self.inst_aux_quick(arg, substs, offset, shift_down, sh_amt, sh_cut);
                     if new_fun == fun && new_arg == arg { self.trace.inst_aux_shifted_identity += 1; e } else { self.trace.inst_aux_shifted_alloc += 1; self.mk_app(new_fun, new_arg) }
                 }
                 Pi { binder_name, binder_style, binder_type, body, .. } => {
-                    let new_type = self.inst_aux(binder_type, substs, offset, shift_down, sh_amt, sh_cut);
-                    let new_body = self.inst_aux(body, substs, offset + 1, shift_down, sh_amt, sh_cut + 1);
+                    let new_type = self.inst_aux_quick(binder_type, substs, offset, shift_down, sh_amt, sh_cut);
+                    let new_body = self.inst_aux_quick(body, substs, offset + 1, shift_down, sh_amt, sh_cut + 1);
                     if new_type == binder_type && new_body == body { self.trace.inst_aux_shifted_identity += 1; e } else { self.trace.inst_aux_shifted_alloc += 1; self.mk_pi(binder_name, binder_style, new_type, new_body) }
                 }
                 Lambda { binder_name, binder_style, binder_type, body, .. } => {
-                    let new_type = self.inst_aux(binder_type, substs, offset, shift_down, sh_amt, sh_cut);
-                    let new_body = self.inst_aux(body, substs, offset + 1, shift_down, sh_amt, sh_cut + 1);
+                    let new_type = self.inst_aux_quick(binder_type, substs, offset, shift_down, sh_amt, sh_cut);
+                    let new_body = self.inst_aux_quick(body, substs, offset + 1, shift_down, sh_amt, sh_cut + 1);
                     if new_type == binder_type && new_body == body { self.trace.inst_aux_shifted_identity += 1; e } else { self.trace.inst_aux_shifted_alloc += 1; self.mk_lambda(binder_name, binder_style, new_type, new_body) }
                 }
                 Let { binder_name, binder_type, val, body, nondep, .. } => {
-                    let new_type = self.inst_aux(binder_type, substs, offset, shift_down, sh_amt, sh_cut);
-                    let new_val = self.inst_aux(val, substs, offset, shift_down, sh_amt, sh_cut);
-                    let new_body = self.inst_aux(body, substs, offset + 1, shift_down, sh_amt, sh_cut + 1);
+                    let new_type = self.inst_aux_quick(binder_type, substs, offset, shift_down, sh_amt, sh_cut);
+                    let new_val = self.inst_aux_quick(val, substs, offset, shift_down, sh_amt, sh_cut);
+                    let new_body = self.inst_aux_quick(body, substs, offset + 1, shift_down, sh_amt, sh_cut + 1);
                     if new_type == binder_type && new_val == val && new_body == body { self.trace.inst_aux_shifted_identity += 1; e } else { self.trace.inst_aux_shifted_alloc += 1; self.mk_let(binder_name, new_type, new_val, new_body, nondep) }
                 }
                 Proj { ty_name, idx, structure, .. } => {
-                    let new_structure = self.inst_aux(structure, substs, offset, shift_down, sh_amt, sh_cut);
+                    let new_structure = self.inst_aux_quick(structure, substs, offset, shift_down, sh_amt, sh_cut);
                     if new_structure == structure { self.trace.inst_aux_shifted_identity += 1; e } else { self.trace.inst_aux_shifted_alloc += 1; self.mk_proj(ty_name, idx, new_structure) }
                 }
             }
@@ -469,7 +527,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
                     self.trace.inst_aux_shift_nodes += 1;
                     // OSNF: Shift always has cutoff=0. Carry as parameters.
                     let r = self.inst_aux(inner, substs, offset, shift_down, amount as i16, 0);
-                    self.expr_cache.inst_cache[slot] = (gen, params, e,r);
+                    self.expr_cache.inst_cache[slot] = (substs_id, params, e,r);
                     return r;
                 }
                 Var { dbj_idx, .. } => {
@@ -489,33 +547,33 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
                     }
                 }
                 App { fun, arg, .. } => {
-                    let new_fun = self.inst_aux(fun, substs, offset, shift_down, 0, 0);
-                    let new_arg = self.inst_aux(arg, substs, offset, shift_down, 0, 0);
+                    let new_fun = self.inst_aux_quick(fun, substs, offset, shift_down, 0, 0);
+                    let new_arg = self.inst_aux_quick(arg, substs, offset, shift_down, 0, 0);
                     if new_fun == fun && new_arg == arg { self.trace.inst_aux_nonshift_identity += 1; e } else { self.mk_app(new_fun, new_arg) }
                 }
                 Pi { binder_name, binder_style, binder_type, body, .. } => {
-                    let new_type = self.inst_aux(binder_type, substs, offset, shift_down, 0, 0);
-                    let new_body = self.inst_aux(body, substs, offset + 1, shift_down, 0, 0);
+                    let new_type = self.inst_aux_quick(binder_type, substs, offset, shift_down, 0, 0);
+                    let new_body = self.inst_aux_quick(body, substs, offset + 1, shift_down, 0, 0);
                     if new_type == binder_type && new_body == body { self.trace.inst_aux_nonshift_identity += 1; e } else { self.mk_pi(binder_name, binder_style, new_type, new_body) }
                 }
                 Lambda { binder_name, binder_style, binder_type, body, .. } => {
-                    let new_type = self.inst_aux(binder_type, substs, offset, shift_down, 0, 0);
-                    let new_body = self.inst_aux(body, substs, offset + 1, shift_down, 0, 0);
+                    let new_type = self.inst_aux_quick(binder_type, substs, offset, shift_down, 0, 0);
+                    let new_body = self.inst_aux_quick(body, substs, offset + 1, shift_down, 0, 0);
                     if new_type == binder_type && new_body == body { self.trace.inst_aux_nonshift_identity += 1; e } else { self.mk_lambda(binder_name, binder_style, new_type, new_body) }
                 }
                 Let { binder_name, binder_type, val, body, nondep, .. } => {
-                    let new_type = self.inst_aux(binder_type, substs, offset, shift_down, 0, 0);
-                    let new_val = self.inst_aux(val, substs, offset, shift_down, 0, 0);
-                    let new_body = self.inst_aux(body, substs, offset + 1, shift_down, 0, 0);
+                    let new_type = self.inst_aux_quick(binder_type, substs, offset, shift_down, 0, 0);
+                    let new_val = self.inst_aux_quick(val, substs, offset, shift_down, 0, 0);
+                    let new_body = self.inst_aux_quick(body, substs, offset + 1, shift_down, 0, 0);
                     if new_type == binder_type && new_val == val && new_body == body { self.trace.inst_aux_nonshift_identity += 1; e } else { self.mk_let(binder_name, new_type, new_val, new_body, nondep) }
                 }
                 Proj { ty_name, idx, structure, .. } => {
-                    let new_structure = self.inst_aux(structure, substs, offset, shift_down, 0, 0);
+                    let new_structure = self.inst_aux_quick(structure, substs, offset, shift_down, 0, 0);
                     if new_structure == structure { self.trace.inst_aux_nonshift_identity += 1; e } else { self.mk_proj(ty_name, idx, new_structure) }
                 }
             }
         };
-        self.expr_cache.inst_cache[slot] = (gen, params, e,calcd);
+        self.expr_cache.inst_cache[slot] = (substs_id, params, e,calcd);
         calcd
     }
 
@@ -1195,7 +1253,10 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
     pub(crate) fn has_fvars(&self, e: ExprPtr<'t>) -> bool { self.read_expr(e).has_fvars() }
 
     pub(crate) fn fvar_lb(&self, e: ExprPtr<'t>) -> u16 {
-        self.read_expr(e).get_fvar_lb()
+        match e.dag_marker() {
+            crate::util::DagMarker::ExportFile => self.export_file.dag.expr_fvar_lb[e.idx()],
+            crate::util::DagMarker::TcCtx => self.dag.expr_fvar_lb[e.idx()],
+        }
     }
 
 }
