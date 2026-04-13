@@ -259,7 +259,7 @@ pub struct ExprCache<'t> {
     pub(crate) shift_dedup: FxHashMap<(ExprPtr<'t>, u16, u16), ExprPtr<'t>>,
     /// Direct-mapped mk_app cache, lazily allocated after enough misses.
     /// Avoids 16MB alloc for trivial declarations while speeding up heavy ones.
-    pub(crate) mk_app_dm_cache: Vec<(u64, ExprPtr<'t>)>,
+    pub(crate) mk_app_dm_cache: Vec<(u64, ExprPtr<'t>, ExprPtr<'t>, ExprPtr<'t>)>,
     pub(crate) mk_app_miss_count: u32,
     /// Memoization cache for mk_pi: (name, style, type, body) → ExprPtr.
     pub(crate) mk_pi_cache: FxHashMap<(NamePtr<'t>, BinderStyle, ExprPtr<'t>, ExprPtr<'t>), ExprPtr<'t>>,
@@ -1006,33 +1006,27 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
     }
 
     pub fn mk_app(&mut self, fun: ExprPtr<'t>, arg: ExprPtr<'t>) -> ExprPtr<'t> {
-        // 2-way set-associative cache (only allocated for heavy declarations)
+        // 2-way set-associative cache keyed by (fun, arg) — stores result directly.
+        // Under OSNF, result may be Shift(App(cf, ca), fvar_lb), so we can't read the
+        // result to recover fun/arg. Store them explicitly.
         let tag = fun.get_hash().wrapping_mul(0x9e3779b97f4a7c15) ^ arg.get_hash();
         let dm_len = self.expr_cache.mk_app_dm_cache.len();
         if dm_len > 0 {
             let set = (tag as usize) & ((dm_len >> 1) - 1);
             let slot0 = set << 1;
             let slot1 = slot0 | 1;
-            let (tag0, result0) = self.expr_cache.mk_app_dm_cache[slot0];
-            if tag0 == tag {
-                if let Expr::App { fun: cf, arg: ca, .. } = self.read_expr(result0) {
-                    if cf == fun && ca == arg {
-                        self.trace.alloc_mk_app_cache_hit += 1;
-                        return result0;
-                    }
-                }
+            let (tag0, cf0, ca0, result0) = self.expr_cache.mk_app_dm_cache[slot0];
+            if tag0 == tag && cf0 == fun && ca0 == arg {
+                self.trace.alloc_mk_app_cache_hit += 1;
+                return result0;
             }
-            let (tag1, result1) = self.expr_cache.mk_app_dm_cache[slot1];
-            if tag1 == tag {
-                if let Expr::App { fun: cf, arg: ca, .. } = self.read_expr(result1) {
-                    if cf == fun && ca == arg {
-                        self.trace.alloc_mk_app_cache_hit += 1;
-                        // Promote to slot0 (MRU)
-                        self.expr_cache.mk_app_dm_cache[slot0] = (tag1, result1);
-                        self.expr_cache.mk_app_dm_cache[slot1] = (tag0, result0);
-                        return result1;
-                    }
-                }
+            let (tag1, cf1, ca1, result1) = self.expr_cache.mk_app_dm_cache[slot1];
+            if tag1 == tag && cf1 == fun && ca1 == arg {
+                self.trace.alloc_mk_app_cache_hit += 1;
+                // Promote to slot0 (MRU)
+                self.expr_cache.mk_app_dm_cache[slot0] = (tag1, cf1, ca1, result1);
+                self.expr_cache.mk_app_dm_cache[slot1] = (tag0, cf0, ca0, result0);
+                return result1;
             }
         }
         self.trace.alloc_mk_app += 1;
@@ -1053,25 +1047,33 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
             let cf = self.adjust_child_tc(fun, fvar_lb, 0);
             let ca = self.adjust_child_tc(arg, fvar_lb, 0);
             let core = self.mk_app(cf, ca);
-            return self.mk_shift(core, fvar_lb);
+            let result = self.mk_shift(core, fvar_lb);
+            // Cache the OSNF result keyed by original (fun, arg)
+            if dm_len > 0 {
+                let set = (tag as usize) & ((dm_len >> 1) - 1);
+                let slot0 = set << 1;
+                self.expr_cache.mk_app_dm_cache[slot0 | 1] = self.expr_cache.mk_app_dm_cache[slot0];
+                self.expr_cache.mk_app_dm_cache[slot0] = (tag, fun, arg, result);
+            }
+            return result;
         }
         let app_expr = Expr::App { fun, arg, num_loose_bvars, has_fvars, hash, fvar_lb };
         let result = self.alloc_expr(app_expr);
-        // Lazily allocate DM cache after enough misses to justify 1MB
+        // Lazily allocate DM cache after enough misses to justify the memory
         if dm_len == 0 {
             self.expr_cache.mk_app_miss_count += 1;
             if self.expr_cache.mk_app_miss_count >= MK_APP_DM_THRESHOLD {
                 let dummy: ExprPtr<'t> = Ptr::from(DagMarker::ExportFile, 0);
-                self.expr_cache.mk_app_dm_cache.resize(MK_APP_CACHE_SIZE, (0, dummy));
+                self.expr_cache.mk_app_dm_cache.resize(MK_APP_CACHE_SIZE, (0, dummy, dummy, dummy));
                 let set = (tag as usize) & ((MK_APP_CACHE_SIZE >> 1) - 1);
-                self.expr_cache.mk_app_dm_cache[set << 1] = (tag, result);
+                self.expr_cache.mk_app_dm_cache[set << 1] = (tag, fun, arg, result);
             }
         } else {
             let set = (tag as usize) & ((MK_APP_CACHE_SIZE >> 1) - 1);
             let slot0 = set << 1;
             // Evict slot1, move slot0 → slot1, put new in slot0
             self.expr_cache.mk_app_dm_cache[slot0 | 1] = self.expr_cache.mk_app_dm_cache[slot0];
-            self.expr_cache.mk_app_dm_cache[slot0] = (tag, result);
+            self.expr_cache.mk_app_dm_cache[slot0] = (tag, fun, arg, result);
         }
         result
     }
