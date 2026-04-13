@@ -225,11 +225,11 @@ impl<'x, 't: 'x, 'p: 't> NanodaTypeChecker<'x, 't, 'p> {
     }
 
     fn ensure_pi(&mut self, e: ExprPtr<'t>) -> ExprPtr<'t> {
-        if let Pi { .. } = self.ctx.read_expr(e) {
+        if let Pi { .. } = self.ctx.view_expr(e) {
             return e
         }
         let whnfd = self.whnf(e);
-        match self.ctx.read_expr(whnfd) {
+        match self.ctx.view_expr(whnfd) {
             Pi { .. } => whnfd,
             _ => panic!("ensure_pi could not produce a pi"),
         }
@@ -418,7 +418,7 @@ impl<'x, 't: 'x, 'p: 't> NanodaTypeChecker<'x, 't, 'p> {
         let mut ctor_ty = self.ctx.subst_declar_info_levels(*ctor_info, struct_ty_levels);
         for i in 0..(*num_params) {
             ctor_ty = self.whnf(ctor_ty);
-            match self.ctx.read_expr(ctor_ty) {
+            match self.ctx.view_expr(ctor_ty) {
                 Pi { body, .. } => {
                     ctor_ty = self.ctx.inst(body, &[struct_ty_args[i as usize]]);
                 }
@@ -427,7 +427,7 @@ impl<'x, 't: 'x, 'p: 't> NanodaTypeChecker<'x, 't, 'p> {
         }
         for i in 0..idx {
             ctor_ty = self.whnf(ctor_ty);
-            match self.ctx.read_expr(ctor_ty) {
+            match self.ctx.view_expr(ctor_ty) {
                 Pi { binder_type, body, .. } => {
                     if self.ctx.num_loose_bvars(body) != 0 {
                       if structure_ty_is_prop && !self.is_proposition(binder_type).0 {
@@ -510,7 +510,7 @@ impl<'x, 't: 'x, 'p: 't> NanodaTypeChecker<'x, 't, 'p> {
         let mut ctx = Vec::new();
         fun = self.infer(fun, flag);
         while !args.is_empty() {
-            match self.ctx.read_expr(fun) {
+            match self.ctx.view_expr(fun) {
                 Pi { binder_type, body, .. } => {
                     let arg = args.pop().unwrap();
                     if flag == Check {
@@ -532,7 +532,7 @@ impl<'x, 't: 'x, 'p: 't> NanodaTypeChecker<'x, 't, 'p> {
                 _ => {
                     let as_pi = self.ctx.inst(fun, ctx.as_slice());
                     let as_pi = self.ensure_pi(as_pi);
-                    match self.ctx.read_expr(as_pi) {
+                    match self.ctx.view_expr(as_pi) {
                         Pi { .. } => {
                             // Only clear what we just instantiated.
                             ctx.clear();
@@ -573,7 +573,7 @@ impl<'x, 't: 'x, 'p: 't> NanodaTypeChecker<'x, 't, 'p> {
     fn infer_lambda(&mut self, mut e: ExprPtr<'t>, flag: InferFlag) -> ExprPtr<'t> {
         let mut locals = Vec::new();
         let start_pos = self.ctx.dbj_level_counter;
-        while let Lambda { binder_name, binder_style, binder_type, body, .. } = self.ctx.read_expr(e) {
+        while let Lambda { binder_name, binder_style, binder_type, body, .. } = self.ctx.view_expr(e) {
             let binder_type = self.ctx.inst(binder_type, locals.as_slice());
             if let Check = flag {
                 self.infer_sort_of(binder_type, flag);
@@ -604,7 +604,7 @@ impl<'x, 't: 'x, 'p: 't> NanodaTypeChecker<'x, 't, 'p> {
         let mut universes = Vec::new();
         let mut locals = Vec::new();
         let c0 = self.ctx.dbj_level_counter;
-        while let Pi { binder_name, binder_style, binder_type, body, .. } = self.ctx.read_expr(e) {
+        while let Pi { binder_name, binder_style, binder_type, body, .. } = self.ctx.view_expr(e) {
             let binder_type = self.ctx.inst(binder_type, locals.as_slice());
             let dom_univ = self.infer_sort_of(binder_type, flag);
             universes.push(dom_univ);
@@ -656,7 +656,7 @@ impl<'x, 't: 'x, 'p: 't> NanodaTypeChecker<'x, 't, 'p> {
             return cached
         }
 
-        let out = match self.ctx.read_expr(e) {
+        let out = match self.ctx.view_expr(e) {
             Expr::App {fun, arg, ..} => {
                 let f = self.strong_reduce(fun, reduce_types, reduce_proofs);
                 let arg = self.strong_reduce(arg, reduce_types, reduce_proofs);
@@ -741,7 +741,7 @@ impl<'x, 't: 'x, 'p: 't> NanodaTypeChecker<'x, 't, 'p> {
             return cached
         }
         let (e_fun, args, _) = self.ctx.unfold_apps(e);
-        let (should_cache, eprime) = match self.ctx.read_expr(e_fun) {
+        let (should_cache, eprime) = match self.ctx.view_expr(e_fun) {
             Proj { idx, structure, .. } =>
                 if let Some(e) = self.reduce_proj(idx as usize, structure, cheap_proj) {
                     let e = self.ctx.foldl_apps(e, args.into_iter());
@@ -757,7 +757,7 @@ impl<'x, 't: 'x, 'p: 't> NanodaTypeChecker<'x, 't, 'p> {
             }
             Lambda { .. } if !args.is_empty() => {
                 let (mut e, mut n_args) = (e_fun, 0usize);
-                while let (Lambda { body, .. }, [_arg, _rest @ ..]) = (self.ctx.read_expr(e), &args[n_args..]) {
+                while let (Lambda { body, .. }, [_arg, _rest @ ..]) = (self.ctx.view_expr(e), &args[n_args..]) {
                     n_args += 1;
                     e = body;
                 }
@@ -813,7 +813,7 @@ impl<'x, 't: 'x, 'p: 't> NanodaTypeChecker<'x, 't, 'p> {
     }
 
     fn def_eq_binder_multi(&mut self, x: ExprPtr<'t>, y: ExprPtr<'t>) -> Option<bool> {
-        if matches!(self.ctx.read_expr_pair(x, y), (Pi { .. }, Pi { .. }) | (Lambda { .. }, Lambda { .. })) {
+        if matches!(self.ctx.view_expr_pair(x, y), (Pi { .. }, Pi { .. }) | (Lambda { .. }, Lambda { .. })) {
             self.def_eq_binder_aux(x, y)
         } else {
             None
@@ -830,7 +830,7 @@ impl<'x, 't: 'x, 'p: 't> NanodaTypeChecker<'x, 't, 'p> {
         | (
             Lambda { binder_name, binder_style, binder_type: t1, body: body1, .. },
             Lambda { binder_type: t2, body: body2, .. },
-        ) = self.ctx.read_expr_pair(x, y)
+        ) = self.ctx.view_expr_pair(x, y)
         {
             let t1 = self.ctx.inst(t1, locals.as_slice());
             let t2 = self.ctx.inst(t2, locals.as_slice());
@@ -852,7 +852,7 @@ impl<'x, 't: 'x, 'p: 't> NanodaTypeChecker<'x, 't, 'p> {
     }
 
     fn def_eq_proj(&mut self, x: ExprPtr<'t>, y: ExprPtr<'t>) -> bool {
-        match self.ctx.read_expr_pair(x, y) {
+        match self.ctx.view_expr_pair(x, y) {
             (Proj { idx: idx_l, structure: structure_l, .. }, Proj { idx: idx_r, structure: structure_r, .. }) =>
                 idx_l == idx_r && self.def_eq(structure_l, structure_r),
             _ => false,
@@ -1171,7 +1171,7 @@ impl<'x, 't: 'x, 'p: 't> NanodaTypeChecker<'x, 't, 'p> {
             return None
         }
 
-        match self.ctx.read_expr_pair(x, y) {
+        match self.ctx.view_expr_pair(x, y) {
             (App { .. }, App { .. }) if (x_defname == y_defname) => {
                 let (l_fun, l_args, _) = self.ctx.unfold_apps(x);
                 let (r_fun, r_args, _) = self.ctx.unfold_apps(y);
@@ -1195,7 +1195,7 @@ impl<'x, 't: 'x, 'p: 't> NanodaTypeChecker<'x, 't, 'p> {
 
     fn try_unfold_proj_app(&mut self, e: ExprPtr<'t>) -> Option<ExprPtr<'t>> {
         let fun = self.ctx.unfold_apps_fun(e);
-        if let Proj { .. } = self.ctx.read_expr(fun) {
+        if let Proj { .. } = self.ctx.view_expr(fun) {
             let eprime = self.whnf_no_unfolding(e);
             if eprime != e {
                 return Some(eprime)
@@ -1297,9 +1297,9 @@ impl<'x, 't: 'x, 'p: 't> NanodaTypeChecker<'x, 't, 'p> {
     }
 
     fn try_eta_expansion_aux(&mut self, x: ExprPtr<'t>, y: ExprPtr<'t>) -> bool {
-        if let Lambda { .. } = self.ctx.read_expr(x) {
+        if let Lambda { .. } = self.ctx.view_expr(x) {
             let y_ty = self.infer_then_whnf(y, InferOnly);
-            if let Pi { binder_name, binder_type, binder_style, .. } = self.ctx.read_expr(y_ty) {
+            if let Pi { binder_name, binder_type, binder_style, .. } = self.ctx.view_expr(y_ty) {
                 let v0 = self.ctx.mk_var(0);
                 let new_body = self.ctx.mk_app(y, v0);
                 let new_lambda = self.ctx.mk_lambda(binder_name, binder_style, binder_type, new_body);

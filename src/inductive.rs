@@ -20,9 +20,11 @@ impl<'t, 'p: 't> ExportFile<'p> {
                 tc.collect_unmodified_mutuals(ind)
             });
 
+
             // Initialize the big chunk of state used throughout the process of checking
             // this inductive declaration.
             let mut st = ctx.with_tc(env_limit, |tc| tc.specialize_nested(ind, unmodified_tys_ctors.clone()));
+
 
             // Check the (potentially modified) inductive specs against the base environment.
             ctx.with_tc(env_limit, |tc| tc.check_inductive_specs(&mut st));
@@ -30,6 +32,7 @@ impl<'t, 'p: 't> ExportFile<'p> {
             // The first temporary environment extension, containing any specialized
             // types to deal with nested inductives.
             let ind_ty_ext1 = ctx.mk_ind_tys_env_ext(&st);
+
 
             // Check the constructors against the environment with the base extension.
             ctx.with_tc_and_env_ext(&ind_ty_ext1, env_limit, |tc| {
@@ -39,6 +42,7 @@ impl<'t, 'p: 't> ExportFile<'p> {
                     }
                 }
             });
+
 
             // The second temporary environment extension, which also includes the constructors.
             let ctor_extension = ctx.mk_ctors_env_ext(&st, ind_ty_ext1);
@@ -52,6 +56,7 @@ impl<'t, 'p: 't> ExportFile<'p> {
                 tc.mk_minors(&mut st);
                 tc.mk_recursors(&st)
             });
+
 
             // The last temporary environment extension, which also includes the recursors.
             let recursor_extension = {
@@ -336,7 +341,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
     fn get_local_params(&mut self, mut e: ExprPtr<'t>, num_params: u16) -> (Vec<ExprPtr<'t>>, ExprPtr<'t>) {
         let mut param_locals = Vec::with_capacity(num_params as usize);
         for _ in 0..num_params {
-            match self.ctx.read_expr(e) {
+            match self.ctx.view_expr(e) {
                 Pi { binder_name, binder_style, binder_type, body, .. } => {
                     let local_ = self.ctx.mk_unique(binder_name, binder_style, binder_type);
                     e = self.ctx.inst(body, &[local_]);
@@ -358,7 +363,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         ind_ty_cursor = self.whnf(ind_ty_cursor);
         let mut indices_locals = Vec::new();
         let mut i = 0;
-        while let Pi { binder_name, binder_style, binder_type, body, .. } = self.ctx.read_expr(ind_ty_cursor) {
+        while let Pi { binder_name, binder_style, binder_type, body, .. } = self.ctx.view_expr(ind_ty_cursor) {
             if i < st.local_params.len() {
                 let local_ = st.local_params[i];
                 match self.ctx.read_expr(local_) {
@@ -396,7 +401,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         let mut ind_ty_cursor = self.whnf(ind.ty);
         let mut indices_locals = Vec::new();
         let mut i = 0;
-        while let Pi { binder_name, binder_style, binder_type, body, .. } = self.ctx.read_expr(ind_ty_cursor) {
+        while let Pi { binder_name, binder_style, binder_type, body, .. } = self.ctx.view_expr(ind_ty_cursor) {
             if i < st.local_params.len() {
                 ind_ty_cursor = self.ctx.inst(body, &[st.local_params[i]]);
                 ind_ty_cursor = self.whnf(ind_ty_cursor);
@@ -434,7 +439,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
     }
 
     fn is_nested_ind_app(&mut self, st: &InductiveCheckState<'t>, e: ExprPtr<'t>) -> Option<InductiveData<'t>> {
-        if !(matches!(self.ctx.read_expr(e), App { .. })) {
+        if !(matches!(self.ctx.view_expr(e), App { .. })) {
             return None
         }
         let (_f, name, _levels, args) = self.ctx.unfold_const_apps(e)?;
@@ -616,7 +621,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         if let Some(eprime) = self.replace_if_nested(e, st, outgoing_params) {
             eprime
         } else {
-            match self.ctx.read_expr(e) {
+            match self.ctx.view_expr(e) {
                 Var { .. } | Sort { .. } | Const { .. } | Local { .. } | NatLit { .. } | StringLit { .. } => e,
                 Pi { binder_name, binder_style, binder_type, body, .. } => {
                     let binder_type = self.replace_all_nested(binder_type, st, outgoing_params);
@@ -643,10 +648,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                     let structure = self.replace_all_nested(structure, st, outgoing_params);
                     self.ctx.mk_proj(ty_name, idx, structure)
                 }
-                Shift { inner, amount, cutoff, .. } => {
-                    let shallow = self.ctx.push_shift(inner, amount, cutoff);
-                    self.replace_all_nested(shallow, st, outgoing_params)
-                }
+                Shift { .. } => unreachable!("view_expr never returns Shift"),
             }
         }
     }
@@ -670,7 +672,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
     fn check_positivity1(&mut self, st: &InductiveCheckState<'t>, mut ctor_type_cursor: ExprPtr<'t>) {
         loop {
             ctor_type_cursor = self.whnf(ctor_type_cursor);
-            match self.ctx.read_expr(ctor_type_cursor) {
+            match self.ctx.view_expr(ctor_type_cursor) {
                 _any if !self.has_ind_occ(ctor_type_cursor, st.ind_consts.as_ref()) => return,
                 Pi { binder_name, binder_style, binder_type, body, .. } => {
                     if self.has_ind_occ(binder_type, st.ind_consts.as_ref()) {
@@ -799,7 +801,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         self.tc_cache.clear();
         for i in 0..st.local_params.len() {
             let local_param = st.local_params[i];
-            match self.ctx.read_expr_pair(ctor_type_cursor, local_param) {
+            match (self.ctx.view_expr(ctor_type_cursor), self.ctx.read_expr(local_param)) {
                 (Pi { binder_type, body, .. }, Local { binder_type: local_type, .. }) => {
                     self.assert_def_eq(binder_type, local_type);
                     ctor_type_cursor = self.ctx.inst(body, &[local_param]);
@@ -808,7 +810,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             }
         }
         // Non-param constructor args.
-        while let Pi { binder_name, binder_type, binder_style, body, .. } = self.ctx.read_expr(ctor_type_cursor) {
+        while let Pi { binder_name, binder_type, binder_style, body, .. } = self.ctx.view_expr(ctor_type_cursor) {
             let s = self.ensure_infers_as_sort(binder_type);
             // The inductive being constructed either has to be a `Prop`,
             // or the constructor argument's type has to be <= the inductive's
@@ -850,7 +852,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         self.tc_cache.clear();
         let mut non_prop_ctor_telescope_elems = Vec::new();
         loop {
-            match self.ctx.read_expr(ctor_type_cursor) {
+            match self.ctx.view_expr(ctor_type_cursor) {
                 Pi { binder_name, binder_style, binder_type, body, .. } if rem_params != 0 => {
                     let local = self.ctx.mk_unique(binder_name, binder_style, binder_type);
                     ctor_type_cursor = self.ctx.inst(body, &[local]);
@@ -993,7 +995,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
 
     fn is_rec_argument(&mut self, st: &InductiveCheckState<'t>, mut ctor_btype_cursor: ExprPtr<'t>) -> Option<usize> {
         ctor_btype_cursor = self.whnf(ctor_btype_cursor);
-        if let Pi { binder_name, binder_style, binder_type, body, .. } = self.ctx.read_expr(ctor_btype_cursor) {
+        if let Pi { binder_name, binder_style, binder_type, body, .. } = self.ctx.view_expr(ctor_btype_cursor) {
             let local = self.ctx.mk_unique(binder_name, binder_style, binder_type);
             ctor_btype_cursor = self.ctx.inst(body, &[local]);
             self.is_rec_argument(st, ctor_btype_cursor)
@@ -1004,7 +1006,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
 
     fn handle_rec_args_aux(&mut self, mut rec_arg_cursor: ExprPtr<'t>) -> (ExprPtr<'t>, Vec<ExprPtr<'t>>) {
         let mut xs = Vec::new();
-        while let Pi { binder_name, binder_style, binder_type, body, .. } = self.ctx.read_expr(rec_arg_cursor) {
+        while let Pi { binder_name, binder_style, binder_type, body, .. } = self.ctx.view_expr(rec_arg_cursor) {
             let local = self.ctx.mk_unique(binder_name, binder_style, binder_type);
             rec_arg_cursor = self.ctx.inst(body, &[local]);
             rec_arg_cursor = self.whnf(rec_arg_cursor);
@@ -1023,14 +1025,14 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         let mut rec_args = Vec::new();
         self.tc_cache.clear();
         for i in 0..st.local_params.len() {
-            match (self.ctx.read_expr(ctor_type_cursor), rem_params[i]) {
+            match (self.ctx.view_expr(ctor_type_cursor), rem_params[i]) {
                 (Pi { body, .. }, local_param) => {
                     ctor_type_cursor = self.ctx.inst(body, &[local_param]);
                 }
                 _ => panic!(),
             }
         }
-        while let Pi { binder_name, binder_style, binder_type, body, .. } = self.ctx.read_expr(ctor_type_cursor) {
+        while let Pi { binder_name, binder_style, binder_type, body, .. } = self.ctx.view_expr(ctor_type_cursor) {
             let local = self.ctx.mk_unique(binder_name, binder_style, binder_type);
             ctor_type_cursor = self.ctx.inst(body, &[local]);
             all_args.push(local);
@@ -1395,7 +1397,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
     ) -> ExprPtr<'t> {
         match self.replace_f(e, local_params, st, specialized_rec_names_to_unspecialized_rec_names) {
             Some(out) => out,
-            None => match self.ctx.read_expr(e) {
+            None => match self.ctx.view_expr(e) {
                 Var { .. } | Sort { .. } | Const { .. } | Local { .. } | StringLit { .. } | NatLit { .. } => e,
                 Lambda { binder_name, binder_style, binder_type, body, .. } => {
                     let binder_type = self.restore_replace(
@@ -1448,10 +1450,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                         self.restore_replace(arg, local_params, st, specialized_rec_names_to_unspecialized_rec_names);
                     self.ctx.mk_app(fun, arg)
                 }
-                Shift { inner, amount, cutoff, .. } => {
-                    let shallow = self.ctx.push_shift(inner, amount, cutoff);
-                    self.restore_replace(shallow, local_params, st, specialized_rec_names_to_unspecialized_rec_names)
-                }
+                Shift { .. } => unreachable!("view_expr never returns Shift"),
             },
         }
     }
@@ -1526,10 +1525,10 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         mut e: ExprPtr<'t>,
         nested_rec_name_to_rec_name: &FxIndexMap<NamePtr<'t>, NamePtr<'t>>,
     ) -> ExprPtr<'t> {
-        let is_pi = matches!(self.ctx.read_expr(e), Pi { .. });
+        let is_pi = matches!(self.ctx.view_expr(e), Pi { .. });
         let mut locals = Vec::new();
         for _ in 0..st.local_params.len() {
-            match self.ctx.read_expr(e) {
+            match self.ctx.view_expr(e) {
                 // Also match on Lambda for restoring recursor rules.
                 Pi { binder_name, binder_style, binder_type, body, .. }
                 | Lambda { binder_name, binder_style, binder_type, body, .. } => {

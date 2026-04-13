@@ -830,8 +830,8 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
                 let short = n.rsplit('.').next().unwrap_or(&n);
                 format!("Proj({}.{},{})", short, idx, self.expr_desc(structure, max_depth - 1))
             }
-            Expr::Shift { inner, amount, cutoff, .. } => {
-                format!("Sh({},+{},c={})", self.expr_desc(inner, max_depth - 1), amount, cutoff)
+            Expr::Shift { inner, amount, .. } => {
+                format!("Sh({},+{})", self.expr_desc(inner, max_depth - 1), amount)
             }
             Expr::Local { .. } => "Local".to_string(),
             Expr::NatLit { .. } => "Nat".to_string(),
@@ -935,14 +935,14 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
                 debug_assert!(dbj_idx >= amount, "adjust_child_tc: bvar {} < amount {}", dbj_idx, amount);
                 self.mk_var(dbj_idx - amount)
             }
-            Expr::Shift { inner, amount: child_amount, cutoff: 0, .. } => {
-                debug_assert!(child_amount as u16 >= amount,
+            Expr::Shift { inner, amount: child_amount, .. } => {
+                debug_assert!(child_amount >= amount,
                     "adjust_child_tc: shift amount {} < adjustment {}", child_amount, amount);
-                let new_amount = child_amount as u16 - amount;
+                let new_amount = child_amount - amount;
                 if new_amount == 0 {
                     inner
                 } else {
-                    self.mk_shift(inner, new_amount as i16)
+                    self.mk_shift(inner, new_amount)
                 }
             }
             _ => {
@@ -976,31 +976,31 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
                 let cf = self.adjust_child_tc(fun, fvar_lb, 0);
                 let ca = self.adjust_child_tc(arg, fvar_lb, 0);
                 let core = self.mk_app(cf, ca);
-                self.mk_shift(core, fvar_lb as i16)
+                self.mk_shift(core, fvar_lb)
             }
             Expr::Lambda { binder_name, binder_style, binder_type, body, .. } => {
                 let ct = self.adjust_child_tc(binder_type, fvar_lb, 0);
                 let cb = self.adjust_child_tc(body, fvar_lb, 1);
                 let core = self.mk_lambda(binder_name, binder_style, ct, cb);
-                self.mk_shift(core, fvar_lb as i16)
+                self.mk_shift(core, fvar_lb)
             }
             Expr::Pi { binder_name, binder_style, binder_type, body, .. } => {
                 let ct = self.adjust_child_tc(binder_type, fvar_lb, 0);
                 let cb = self.adjust_child_tc(body, fvar_lb, 1);
                 let core = self.mk_pi(binder_name, binder_style, ct, cb);
-                self.mk_shift(core, fvar_lb as i16)
+                self.mk_shift(core, fvar_lb)
             }
             Expr::Let { binder_name, binder_type, val, body, nondep, .. } => {
                 let ct = self.adjust_child_tc(binder_type, fvar_lb, 0);
                 let cv = self.adjust_child_tc(val, fvar_lb, 0);
                 let cb = self.adjust_child_tc(body, fvar_lb, 1);
                 let core = self.mk_let(binder_name, ct, cv, cb, nondep);
-                self.mk_shift(core, fvar_lb as i16)
+                self.mk_shift(core, fvar_lb)
             }
             Expr::Proj { ty_name, idx, structure, .. } => {
                 let cs = self.adjust_child_tc(structure, fvar_lb, 0);
                 let core = self.mk_proj(ty_name, idx, cs);
-                self.mk_shift(core, fvar_lb as i16)
+                self.mk_shift(core, fvar_lb)
             }
         }
     }
@@ -1048,6 +1048,13 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
             else if a_nlbv == 0 { fun_e.get_fvar_lb() }
             else { fun_e.get_fvar_lb().min(arg_e.get_fvar_lb()) }
         };
+        // OSNF: if fvar_lb > 0, build core (fvar_lb=0) and wrap in Shift
+        if fvar_lb > 0 {
+            let cf = self.adjust_child_tc(fun, fvar_lb, 0);
+            let ca = self.adjust_child_tc(arg, fvar_lb, 0);
+            let core = self.mk_app(cf, ca);
+            return self.mk_shift(core, fvar_lb);
+        }
         let app_expr = Expr::App { fun, arg, num_loose_bvars, has_fvars, hash, fvar_lb };
         let result = self.alloc_expr(app_expr);
         // Lazily allocate DM cache after enough misses to justify 1MB
@@ -1095,6 +1102,15 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
             else if b_nlbv <= 1 { ty_e.get_fvar_lb() }
             else { ty_e.get_fvar_lb().min(b_lb) }
         };
+        // OSNF: if fvar_lb > 0, build core and wrap in Shift
+        if fvar_lb > 0 {
+            let ct = self.adjust_child_tc(binder_type, fvar_lb, 0);
+            let cb = self.adjust_child_tc(body, fvar_lb, 1);
+            let core = self.mk_lambda(binder_name, binder_style, ct, cb);
+            let result = self.mk_shift(core, fvar_lb);
+            self.expr_cache.mk_lambda_cache.insert(key, result);
+            return result;
+        }
         let lambda_expr = Expr::Lambda { binder_name, binder_style, binder_type, body, num_loose_bvars, has_fvars, hash, fvar_lb };
         let result = self.alloc_expr(lambda_expr);
         self.expr_cache.mk_lambda_cache.insert(key, result);
@@ -1127,6 +1143,15 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
             else if b_nlbv <= 1 { ty_e.get_fvar_lb() }
             else { ty_e.get_fvar_lb().min(b_lb) }
         };
+        // OSNF: if fvar_lb > 0, build core and wrap in Shift
+        if fvar_lb > 0 {
+            let ct = self.adjust_child_tc(binder_type, fvar_lb, 0);
+            let cb = self.adjust_child_tc(body, fvar_lb, 1);
+            let core = self.mk_pi(binder_name, binder_style, ct, cb);
+            let result = self.mk_shift(core, fvar_lb);
+            self.expr_cache.mk_pi_cache.insert(key, result);
+            return result;
+        }
         let pi_expr = Expr::Pi { binder_name, binder_style, binder_type, body, num_loose_bvars, has_fvars, hash, fvar_lb };
         let result = self.alloc_expr(pi_expr);
         self.expr_cache.mk_pi_cache.insert(key, result);
@@ -1162,6 +1187,14 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
             if b_nlbv > 1 || (b_nlbv == 1 && body_e.get_fvar_lb() > 0) { lb = lb.min(b_lb); }
             if lb == u16::MAX { 0 } else { lb }
         };
+        // OSNF: if fvar_lb > 0, build core and wrap in Shift
+        if fvar_lb > 0 {
+            let ct = self.adjust_child_tc(binder_type, fvar_lb, 0);
+            let cv = self.adjust_child_tc(val, fvar_lb, 0);
+            let cb = self.adjust_child_tc(body, fvar_lb, 1);
+            let core = self.mk_let(binder_name, ct, cv, cb, nondep);
+            return self.mk_shift(core, fvar_lb);
+        }
         let let_expr = Expr::Let { binder_name, binder_type, val, body, num_loose_bvars, has_fvars, hash, nondep, fvar_lb };
         self.alloc_expr(let_expr)
     }
@@ -1173,6 +1206,12 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         let num_loose_bvars = s_e.num_loose_bvars();
         let has_fvars = s_e.has_fvars();
         let fvar_lb = s_e.get_fvar_lb();
+        // OSNF: if fvar_lb > 0, build core and wrap in Shift
+        if fvar_lb > 0 {
+            let cs = self.adjust_child_tc(structure, fvar_lb, 0);
+            let core = self.mk_proj(ty_name, idx, cs);
+            return self.mk_shift(core, fvar_lb);
+        }
         let proj_expr = Expr::Proj { ty_name, idx, structure, num_loose_bvars, has_fvars, hash, fvar_lb };
         self.alloc_expr(proj_expr)
     }
@@ -1270,147 +1309,130 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
 
     /// Create a delayed shift node: Shift(inner, amount) means all free Var indices
     /// in `inner` are shifted up by `amount`. O(1) — no traversal.
-    /// Collapses nested shifts and elides shifts on closed expressions.
-    pub fn mk_shift(&mut self, inner: ExprPtr<'t>, amount: i16) -> ExprPtr<'t> {
-        self.mk_shift_cutoff(inner, amount, 0)
-    }
-
-    /// Create a delayed shift node: Shift(inner, amount, cutoff) means free Var indices
-    /// in `inner` with index >= cutoff are shifted by `amount` (positive=up, negative=down).
-    /// O(1) — no traversal. Collapses nested shifts when cutoffs match.
-    pub fn mk_shift_cutoff(&mut self, inner: ExprPtr<'t>, amount: i16, cutoff: u16) -> ExprPtr<'t> {
+    /// OSNF invariant: inner.fvar_lb == 0, amount > 0. Collapses nested shifts.
+    pub fn mk_shift(&mut self, inner: ExprPtr<'t>, amount: u16) -> ExprPtr<'t> {
         if amount == 0 {
             return inner;
         }
         let inner_expr = self.read_expr(inner);
         let nlbv = inner_expr.num_loose_bvars();
-        if nlbv <= cutoff {
+        if nlbv == 0 {
             return inner;
         }
-        // Normalize cutoff to 0 when all free vars are >= cutoff.
+        // Collapse nested shifts: Shift(Shift(e, j), k) -> Shift(e, j+k)
+        if let Expr::Shift { inner: inner2, amount: prev, .. } = inner_expr {
+            return self.mk_shift(inner2, prev + amount);
+        }
+        // Eagerly force Var (O(1))
+        if let Expr::Var { dbj_idx, .. } = inner_expr {
+            return self.mk_var(dbj_idx + amount);
+        }
+        // OSNF enforcement: if inner has fvar_lb > 0, it's not a proper core.
+        // Extract core first, then shift core by fvar_lb + amount.
         let inner_lb = inner_expr.get_fvar_lb();
-        let cutoff = if cutoff > 0 && inner_lb >= cutoff { 0 } else { cutoff };
-        // OSNF canonicalization: disabled for now. Rewriting Shift(e, amount, 0) →
-        // Shift(core, fvar_lb + amount, 0) during TC breaks pointer equality and triggers
-        // expensive comparisons when encountered inside Lambda bodies
-        // (where tracking cutoff > 0 but Shift cutoff is 0). This causes a ~60% slowdown
-        // on Mathlib 100K. TODO: use OSNF cores for cache-based lookups instead.
-        // For negative shifts with cutoff=0, validate that fvar_lb won't go negative.
-        debug_assert!(amount >= 0 || cutoff > 0 || (inner_lb as i16) + amount >= 0,
-            "mk_shift: negative shift would produce invalid fvar indices: fvar_lb={}, amount={}, cutoff={}",
-            inner_lb, amount, cutoff);
-        // Collapse nested shifts when cutoffs match: Shift(Shift(e, j, c), k, c) -> Shift(e, j+k, c)
-        if let Expr::Shift { inner: inner2, amount: prev, cutoff: prev_cutoff, .. } = inner_expr {
-            if prev_cutoff == cutoff {
-                return self.mk_shift_cutoff(inner2, prev + amount, cutoff);
-            }
+        if inner_lb > 0 {
+            let core_inner = self.to_osnf(inner);
+            // to_osnf returns Shift(inner_lb, core) or inner unchanged
+            return self.mk_shift(core_inner, amount);
         }
-        // Eagerly force simple expressions (O(1))
-        if cutoff == 0 {
-            if let Expr::Var { dbj_idx, .. } = inner_expr {
-                let new_idx = dbj_idx as i16 + amount;
-                debug_assert!(new_idx >= 0, "mk_shift: Var({}) + {} would go negative", dbj_idx, amount);
-                return self.mk_var(new_idx as u16);
-            }
-        }
-        // Dedup: return existing Shift node if we've created this exact (inner, amount, cutoff) before.
-        let dedup_key = (inner, amount as u16, cutoff);
+        // Dedup: return existing Shift node if we've created this exact (inner, amount) before.
+        let dedup_key = (inner, amount, 0u16);
         if let Some(&existing) = self.expr_cache.shift_dedup.get(&dedup_key) {
             self.trace.shift_dedup_hits += 1;
             return existing;
         }
         self.trace.alloc_mk_shift += 1;
         let has_fvars = inner_expr.has_fvars();
-        let hash = hash64!(crate::expr::SHIFT_HASH, inner, amount as u16, cutoff);
-        let new_nlbv = (nlbv as i16 + amount).max(0) as u16;
-        // Compute fvar_lb for Shift
-        let fvar_lb = if new_nlbv == 0 { 0 }
-            else if inner_lb >= cutoff { (inner_lb as i32 + amount as i32).max(0) as u16 }
-            else { inner_lb };
-        let shift_expr = Expr::Shift { hash, fvar_lb, inner, amount, cutoff, num_loose_bvars: new_nlbv, has_fvars };
+        let hash = hash64!(crate::expr::SHIFT_HASH, inner, amount, 0u16);
+        let new_nlbv = nlbv + amount;
+        let fvar_lb = amount; // inner.fvar_lb == 0, so Shift fvar_lb = amount
+        let shift_expr = Expr::Shift { hash, fvar_lb, inner, amount, num_loose_bvars: new_nlbv, has_fvars };
         let result = self.alloc_expr(shift_expr);
         self.expr_cache.shift_dedup.insert(dedup_key, result);
         result
     }
 
-    /// Shallow shift: peel one level of constructor, wrapping children in lazy Shift nodes.
-    /// `push_shift(Shift(Pi(ty, body), k))` → `Pi(Shift(ty, k), Shift(body, k+1))`
-    /// O(1) per binder node vs O(n) for full traversal. For App, recurses into both fun
-    /// and arg to keep the App spine shift-free. Returns e unchanged if no shift needed.
-    pub fn push_shift(&mut self, e: ExprPtr<'t>, amount: i16, cutoff: u16) -> ExprPtr<'t> {
+    /// Push Shift(n, core) one level into core's constructor (cutoff=0).
+    /// Under OSNF, view_expr(Shift(n, core)) calls this.
+    /// Non-binder children: mk_shift(child, amount) — O(1).
+    /// Binder bodies: shift_expr(body, amount, 1) — traversal, cached.
+    pub fn push_shift_up(&mut self, e: ExprPtr<'t>, amount: u16) -> ExprPtr<'t> {
         self.trace.push_shift_calls += 1;
         if amount == 0 {
             return e;
         }
         let expr = self.read_expr(e);
-        if expr.num_loose_bvars() <= cutoff {
+        if expr.num_loose_bvars() == 0 {
             return e;
         }
-        let cache_key = (e, amount as u16, cutoff);
+        let cache_key = (e, amount, 0u16);
         if let Some(&result) = self.expr_cache.shift_cache.get(&cache_key) {
             self.trace.push_shift_cache_hits += 1;
             return result;
         }
-        let result = stacker::maybe_grow(64 * 1024, 2 * 1024 * 1024, || self.push_shift_inner(e, amount, cutoff));
+        let result = stacker::maybe_grow(64 * 1024, 2 * 1024 * 1024, || self.push_shift_up_inner(e, amount));
         self.expr_cache.shift_cache.insert(cache_key, result);
         result
     }
 
-    fn push_shift_inner(&mut self, e: ExprPtr<'t>, amount: i16, cutoff: u16) -> ExprPtr<'t> {
+    fn push_shift_up_inner(&mut self, e: ExprPtr<'t>, amount: u16) -> ExprPtr<'t> {
         let expr = self.read_expr(e);
-        if expr.num_loose_bvars() <= cutoff {
+        if expr.num_loose_bvars() == 0 {
             return e;
         }
         match expr {
-            Expr::Shift { inner, amount: prev, cutoff: prev_cutoff, .. } => {
-                if prev_cutoff == cutoff {
-                    // Collapse: Shift(Shift(inner, prev, c), amount, c) → shallow(inner, prev+amount, c)
-                    self.push_shift(inner, prev + amount, cutoff)
-                } else {
-                    // Different cutoffs — shallow-force inner first, then shallow outer
-                    let forced = self.push_shift(inner, prev, prev_cutoff);
-                    self.push_shift(forced, amount, cutoff)
-                }
+            Expr::Shift { inner, amount: prev, .. } => {
+                // Collapse: Shift(Shift(inner, prev), amount) → push_shift_up(inner, prev+amount)
+                self.push_shift_up(inner, prev + amount)
             }
             Expr::Var { dbj_idx, .. } => {
-                if dbj_idx >= cutoff {
-                    let new_idx = dbj_idx as i16 + amount;
-                    debug_assert!(new_idx >= 0, "push_shift: Var({}) + {} would go negative", dbj_idx, amount);
-                    self.mk_var(new_idx as u16)
-                } else {
-                    e
-                }
+                self.mk_var(dbj_idx + amount)
             }
-            Expr::App { fun, arg, .. } => {
-                // Recurse into fun to keep the App spine visible (unfold_apps compat).
-                // Args are lazily Shift-wrapped to avoid traversing large arg subtrees.
-                // unfold_apps handles Shift-wrapped args via pending_shift accumulation.
-                let fun = self.push_shift(fun, amount, cutoff);
-                let arg = self.mk_shift_cutoff(arg, amount, cutoff);
-                self.mk_app(fun, arg)
+            Expr::App { fun, arg, has_fvars, .. } => {
+                // Recurse into fun to keep App spine visible. Shift-wrap arg.
+                // Allocate directly to avoid OSNF circularity in mk_app.
+                let fun = self.push_shift_up(fun, amount);
+                let arg = self.mk_shift(arg, amount);
+                let fun_e = self.read_expr(fun);
+                let arg_e = self.read_expr(arg);
+                let num_loose_bvars = fun_e.num_loose_bvars().max(arg_e.num_loose_bvars());
+                let hash = hash64!(crate::expr::APP_HASH, fun, arg);
+                let fvar_lb = if num_loose_bvars == 0 { 0 } else {
+                    let f_nlbv = fun_e.num_loose_bvars();
+                    let a_nlbv = arg_e.num_loose_bvars();
+                    if f_nlbv == 0 { arg_e.get_fvar_lb() }
+                    else if a_nlbv == 0 { fun_e.get_fvar_lb() }
+                    else { fun_e.get_fvar_lb().min(arg_e.get_fvar_lb()) }
+                };
+                self.alloc_expr(Expr::App { fun, arg, num_loose_bvars, has_fvars, hash, fvar_lb })
             }
             Expr::Pi { binder_name, binder_style, binder_type, body, .. } => {
-                let binder_type = self.mk_shift_cutoff(binder_type, amount, cutoff);
-                let body = self.mk_shift_cutoff(body, amount, cutoff + 1);
+                let binder_type = self.mk_shift(binder_type, amount);
+                let body = self.shift_expr(body, amount, 1);
                 self.mk_pi(binder_name, binder_style, binder_type, body)
             }
             Expr::Lambda { binder_name, binder_style, binder_type, body, .. } => {
-                let binder_type = self.mk_shift_cutoff(binder_type, amount, cutoff);
-                let body = self.mk_shift_cutoff(body, amount, cutoff + 1);
+                let binder_type = self.mk_shift(binder_type, amount);
+                let body = self.shift_expr(body, amount, 1);
                 self.mk_lambda(binder_name, binder_style, binder_type, body)
             }
             Expr::Let { binder_name, binder_type, val, body, nondep, .. } => {
-                let binder_type = self.mk_shift_cutoff(binder_type, amount, cutoff);
-                let val = self.mk_shift_cutoff(val, amount, cutoff);
-                let body = self.mk_shift_cutoff(body, amount, cutoff + 1);
+                let binder_type = self.mk_shift(binder_type, amount);
+                let val = self.mk_shift(val, amount);
+                let body = self.shift_expr(body, amount, 1);
                 self.mk_let(binder_name, binder_type, val, body, nondep)
             }
-            Expr::Proj { ty_name, idx, structure, .. } => {
-                let structure = self.mk_shift_cutoff(structure, amount, cutoff);
-                self.mk_proj(ty_name, idx, structure)
+            Expr::Proj { ty_name, idx, structure, has_fvars, .. } => {
+                // Allocate directly to avoid OSNF circularity in mk_proj.
+                let structure = self.mk_shift(structure, amount);
+                let s_e = self.read_expr(structure);
+                let num_loose_bvars = s_e.num_loose_bvars();
+                let hash = hash64!(crate::expr::PROJ_HASH, ty_name, idx, structure);
+                let fvar_lb = s_e.get_fvar_lb();
+                self.alloc_expr(Expr::Proj { ty_name, idx, structure, num_loose_bvars, has_fvars, hash, fvar_lb })
             }
             Expr::Sort { .. } | Expr::Const { .. } | Expr::Local { .. } | Expr::StringLit { .. } | Expr::NatLit { .. } => {
-                panic!("push_shift on closed expression")
+                panic!("push_shift_up on closed expression")
             }
         }
     }
@@ -1448,23 +1470,19 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
             return e;
         }
         match expr {
-            Expr::Shift { inner, amount: prev, cutoff: prev_cutoff, .. } => {
-                if prev_cutoff == cutoff {
-                    // Cutoffs match: Shift(inner, prev, c) shift_down(amount, c)
-                    // = Shift(inner, prev - amount, c) if prev >= amount, else force + recurse.
-                    if prev >= amount as i16 {
-                        self.mk_shift_cutoff(inner, prev - amount as i16, cutoff)
+            Expr::Shift { inner, amount: prev, .. } => {
+                // OSNF: Shift always has cutoff=0.
+                if cutoff == 0 {
+                    // O(1): Shift(inner, prev) shift_down(amount, 0) = Shift(inner, prev - amount) or inner
+                    debug_assert!(prev >= amount, "push_shift_down: Shift amount {} < shift_down {}", prev, amount);
+                    if prev > amount {
+                        self.mk_shift(inner, prev - amount)
                     } else {
-                        // prev < amount: force the Shift, then shift down the remainder
-                        let forced = self.push_shift(inner, prev, prev_cutoff);
-                        self.push_shift_down_cutoff(forced, amount, cutoff)
+                        inner
                     }
                 } else {
-                    // Different cutoffs — force inner Shift, then shift down.
-                    // Cannot use mk_shift_cutoff shortcut when cutoffs differ because
-                    // vars below prev_cutoff are unshifted by the inner Shift and need
-                    // different treatment than vars above prev_cutoff.
-                    let forced = self.push_shift(inner, prev, prev_cutoff);
+                    // cutoff > 0: force the Shift, then shift down
+                    let forced = self.push_shift_up(inner, prev);
                     self.push_shift_down_cutoff(forced, amount, cutoff)
                 }
             }
@@ -1510,15 +1528,119 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
 
     /// View an expression with Shift pushed one level inside.
     /// Never returns `Expr::Shift` — children may be Shift-wrapped.
-    /// Replaces the common `force_shift(e); match read_expr(e)` pattern
-    /// with the cheaper `match view_expr(e)` (O(1) per node via push_shift).
+    /// Under OSNF, we synthesize the Expr value directly with mk_shift-wrapped children,
+    /// without allocating through mk_app/mk_pi/etc (which would re-OSNF-normalize).
     pub fn view_expr(&mut self, e: ExprPtr<'t>) -> Expr<'t> {
-        match self.read_expr(e) {
-            Expr::Shift { inner, amount, cutoff, .. } => {
-                let shallow = self.push_shift(inner, amount, cutoff);
-                self.read_expr(shallow)
+        let expr = self.read_expr(e);
+        match expr {
+            Expr::Shift { inner, amount, .. } => {
+                self.view_expr_shifted(inner, amount)
             }
             other => other
+        }
+    }
+
+    /// Synthesize an Expr view of `inner` shifted up by `amount` (cutoff=0).
+    /// Returns the Expr struct directly — does NOT allocate through OSNF-enforcing mk_*.
+    /// Children are Shift-wrapped via mk_shift (O(1)).
+    /// Binder bodies use shift_expr(body, amount, 1) which traverses and rebuilds.
+    fn view_expr_shifted(&mut self, inner: ExprPtr<'t>, amount: u16) -> Expr<'t> {
+        let expr = self.read_expr(inner);
+        match expr {
+            Expr::Shift { inner: inner2, amount: prev, .. } => {
+                // Nested shift: compose and retry
+                self.view_expr_shifted(inner2, prev + amount)
+            }
+            Expr::Var { dbj_idx, .. } => {
+                let new_idx = dbj_idx + amount;
+                let hash = hash64!(crate::expr::VAR_HASH, new_idx);
+                Expr::Var { dbj_idx: new_idx, hash, fvar_lb: new_idx }
+            }
+            Expr::App { fun, arg, has_fvars, .. } => {
+                let fun = self.mk_shift(fun, amount);
+                let arg = self.mk_shift(arg, amount);
+                let fun_e = self.read_expr(fun);
+                let arg_e = self.read_expr(arg);
+                let num_loose_bvars = fun_e.num_loose_bvars().max(arg_e.num_loose_bvars());
+                let hash = hash64!(crate::expr::APP_HASH, fun, arg);
+                let fvar_lb = if num_loose_bvars == 0 { 0 } else {
+                    let f_nlbv = fun_e.num_loose_bvars();
+                    let a_nlbv = arg_e.num_loose_bvars();
+                    if f_nlbv == 0 { arg_e.get_fvar_lb() }
+                    else if a_nlbv == 0 { fun_e.get_fvar_lb() }
+                    else { fun_e.get_fvar_lb().min(arg_e.get_fvar_lb()) }
+                };
+                Expr::App { fun, arg, num_loose_bvars, has_fvars, hash, fvar_lb }
+            }
+            Expr::Pi { binder_name, binder_style, binder_type, body, has_fvars, .. } => {
+                let binder_type = self.mk_shift(binder_type, amount);
+                let body = self.shift_expr(body, amount, 1);
+                let ty_e = self.read_expr(binder_type);
+                let body_e = self.read_expr(body);
+                let num_loose_bvars = ty_e.num_loose_bvars().max(body_e.num_loose_bvars().saturating_sub(1));
+                let hash = hash64!(crate::expr::PI_HASH, binder_name, binder_style, binder_type, body);
+                let fvar_lb = if num_loose_bvars == 0 { 0 } else {
+                    let t_nlbv = ty_e.num_loose_bvars();
+                    let b_nlbv = body_e.num_loose_bvars();
+                    let b_lb = body_e.get_fvar_lb().saturating_sub(1);
+                    if t_nlbv == 0 && b_nlbv <= 1 { 0 }
+                    else if t_nlbv == 0 { b_lb }
+                    else if b_nlbv <= 1 { ty_e.get_fvar_lb() }
+                    else { ty_e.get_fvar_lb().min(b_lb) }
+                };
+                Expr::Pi { binder_name, binder_style, binder_type, body, num_loose_bvars, has_fvars, hash, fvar_lb }
+            }
+            Expr::Lambda { binder_name, binder_style, binder_type, body, has_fvars, .. } => {
+                let binder_type = self.mk_shift(binder_type, amount);
+                let body = self.shift_expr(body, amount, 1);
+                let ty_e = self.read_expr(binder_type);
+                let body_e = self.read_expr(body);
+                let num_loose_bvars = ty_e.num_loose_bvars().max(body_e.num_loose_bvars().saturating_sub(1));
+                let hash = hash64!(crate::expr::LAMBDA_HASH, binder_name, binder_style, binder_type, body);
+                let fvar_lb = if num_loose_bvars == 0 { 0 } else {
+                    let t_nlbv = ty_e.num_loose_bvars();
+                    let b_nlbv = body_e.num_loose_bvars();
+                    let b_lb = body_e.get_fvar_lb().saturating_sub(1);
+                    if t_nlbv == 0 && b_nlbv <= 1 { 0 }
+                    else if t_nlbv == 0 { b_lb }
+                    else if b_nlbv <= 1 { ty_e.get_fvar_lb() }
+                    else { ty_e.get_fvar_lb().min(b_lb) }
+                };
+                Expr::Lambda { binder_name, binder_style, binder_type, body, num_loose_bvars, has_fvars, hash, fvar_lb }
+            }
+            Expr::Let { binder_name, binder_type, val, body, nondep, has_fvars, .. } => {
+                let binder_type = self.mk_shift(binder_type, amount);
+                let val = self.mk_shift(val, amount);
+                let body = self.shift_expr(body, amount, 1);
+                let ty_e = self.read_expr(binder_type);
+                let val_e = self.read_expr(val);
+                let body_e = self.read_expr(body);
+                let ty_ub = ty_e.num_loose_bvars();
+                let val_ub = val_e.num_loose_bvars();
+                let body_ub = body_e.num_loose_bvars();
+                let num_loose_bvars = ty_ub.max(val_ub.max(body_ub.saturating_sub(1)));
+                let hash = hash64!(crate::expr::LET_HASH, binder_name, binder_type, val, body, nondep);
+                let fvar_lb = if num_loose_bvars == 0 { 0 } else {
+                    let mut lb = u16::MAX;
+                    if ty_ub > 0 { lb = lb.min(ty_e.get_fvar_lb()); }
+                    if val_ub > 0 { lb = lb.min(val_e.get_fvar_lb()); }
+                    if body_ub > 1 || (body_ub == 1 && body_e.get_fvar_lb() > 0) { lb = lb.min(body_e.get_fvar_lb().saturating_sub(1)); }
+                    if lb == u16::MAX { 0 } else { lb }
+                };
+                Expr::Let { binder_name, binder_type, val, body, num_loose_bvars, has_fvars, hash, nondep, fvar_lb }
+            }
+            Expr::Proj { ty_name, idx, structure, has_fvars, .. } => {
+                let structure = self.mk_shift(structure, amount);
+                let s_e = self.read_expr(structure);
+                let num_loose_bvars = s_e.num_loose_bvars();
+                let hash = hash64!(crate::expr::PROJ_HASH, ty_name, idx, structure);
+                let fvar_lb = s_e.get_fvar_lb();
+                Expr::Proj { ty_name, idx, structure, num_loose_bvars, has_fvars, hash, fvar_lb }
+            }
+            Expr::Sort { .. } | Expr::Const { .. } | Expr::Local { .. }
+            | Expr::StringLit { .. } | Expr::NatLit { .. } => {
+                expr // closed, shift is no-op
+            }
         }
     }
 

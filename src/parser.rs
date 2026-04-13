@@ -469,9 +469,9 @@ impl<'a, R: BufRead> Parser<'a, R> {
             Expr::Var { dbj_idx, .. } => {
                 self.find_or_insert_bvar(dbj_idx - amount)
             }
-            Expr::Shift { inner, amount: child_amount, cutoff: 0, .. } => {
-                debug_assert!(child_amount as u16 >= amount);
-                let new_amount = child_amount as u16 - amount;
+            Expr::Shift { inner, amount: child_amount, .. } => {
+                debug_assert!(child_amount >= amount);
+                let new_amount = child_amount - amount;
                 if new_amount == 0 {
                     inner
                 } else {
@@ -546,7 +546,7 @@ impl<'a, R: BufRead> Parser<'a, R> {
         crate::util::Ptr::from(DagMarker::ExportFile, dag_idx)
     }
 
-    /// Insert a Shift(amount, inner, cutoff=0) into the DAG. For OSNF wrapping during parse.
+    /// Insert a Shift(amount, inner) into the DAG. For OSNF wrapping during parse.
     fn insert_shift(&mut self, inner: ExprPtr<'a>, amount: u16) -> usize {
         let inner_expr = *self.dag.exprs.get_index(inner.idx()).unwrap();
         let inner_nlbv = inner_expr.num_loose_bvars();
@@ -556,8 +556,8 @@ impl<'a, R: BufRead> Parser<'a, R> {
         let new_nlbv = inner_nlbv + amount;
         let fvar_lb = inner_lb + amount;
         self.insert_expr(Expr::Shift {
-            hash, fvar_lb, inner, amount: amount as i16,
-            cutoff: 0, num_loose_bvars: new_nlbv, has_fvars,
+            hash, fvar_lb, inner, amount,
+            num_loose_bvars: new_nlbv, has_fvars,
         }).0
     }
 

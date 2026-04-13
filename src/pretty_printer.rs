@@ -758,8 +758,8 @@ impl<'x, 't, 'p> PrettyPrinter<'x, 't, 'p> {
                         .concat(DocPtr::from((idx + 1).to_string()))
                         .as_unparenable()
                 }
-                Shift { inner, amount, cutoff, .. } => {
-                    DocPtr::from(if cutoff > 0 { format!("⇑{}/{}(", amount, cutoff) } else { format!("⇑{}(", amount) })
+                Shift { inner, amount, .. } => {
+                    DocPtr::from(format!("⇑{}(", amount))
                         .concat(self.pp_expr_aux(inner).parens(MAX_LEVEL))
                         .concat(DocPtr::from(")"))
                         .as_unparenable()

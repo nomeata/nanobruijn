@@ -408,7 +408,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
     }
 
     fn ensure_pi(&mut self, e: ExprPtr<'t>) -> ExprPtr<'t> {
-        if let Pi { .. } = self.ctx.read_expr(e) {
+        if let Pi { .. } = self.ctx.view_expr(e) {
             return e
         }
         let whnfd = self.whnf(e);
@@ -652,20 +652,14 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         // Handle Shift nodes without forcing: infer(Shift(inner, k, 0), d) = mk_shift(infer(inner, d-k), k).
         // Temporarily shrink the context to depth d-k, infer inner, restore, shift result.
         // Only works for cutoff=0 (top-level shifts). For cutoff>0, force first.
-        if let Expr::Shift { inner, amount, cutoff, .. } = self.ctx.read_expr(e) {
-            if cutoff == 0 && amount > 0 {
-                let new_depth = self.depth() - amount as usize;
-                self.ctx.trace.infer_shift_peel += 1;
-                self.ctx.trace.shift_peel_frames_total += amount as u64;
-                let saved = self.tc_cache.split_off(new_depth);
-                let inner_type = self.infer(inner, flag);
-                self.tc_cache.extend(saved);
-                return self.ctx.mk_shift(inner_type, amount);
-            } else {
-                // Negative shift or non-zero cutoff: force one level and re-infer.
-                let forced = self.ctx.push_shift(inner, amount, cutoff);
-                return self.infer(forced, flag);
-            }
+        if let Expr::Shift { inner, amount, .. } = self.ctx.read_expr(e) {
+            let new_depth = self.depth() - amount as usize;
+            self.ctx.trace.infer_shift_peel += 1;
+            self.ctx.trace.shift_peel_frames_total += amount as u64;
+            let saved = self.tc_cache.split_off(new_depth);
+            let inner_type = self.infer(inner, flag);
+            self.tc_cache.extend(saved);
+            return self.ctx.mk_shift(inner_type, amount);
         }
         // Pointer-based infer cache: bucket 0 for closed, bucket depth for open OSNF cores.
         let depth = self.depth() as u16;
@@ -924,17 +918,11 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         // Peel off cutoff=0 Shift nodes (iteratively). For cutoff>0, force first.
         // Must also shrink local_ctx because whnf can indirectly call infer
         // (via reduce_rec → to_ctor_when_k) which depends on local_ctx.
-        let mut total_shift: i16 = 0;
+        let mut total_shift: u16 = 0;
         let mut e = e;
-        while let Shift { inner, amount, cutoff, .. } = self.ctx.read_expr(e) {
-            if cutoff == 0 && amount > 0 {
-                total_shift += amount;
-                e = inner;
-            } else if cutoff > 0 {
-                e = self.ctx.push_shift(inner, amount, cutoff);
-            } else {
-                break; // negative shift with cutoff=0: can't peel (would need higher depth)
-            }
+        while let Shift { inner, amount, .. } = self.ctx.read_expr(e) {
+            total_shift += amount;
+            e = inner;
         }
         if total_shift > 0 {
             if self.depth() == 0 {
@@ -987,30 +975,24 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         // whnf_no_unfolding is shift-equivariant: peel top-level Shifts.
         // Must also shrink local_ctx because reduce_rec → to_ctor_when_k → infer
         // depends on local_ctx.
-        let mut total_shift: i16 = 0;
+        let mut total_shift: u16 = 0;
         let mut e = e;
-        while let Shift { inner, amount, cutoff, .. } = self.ctx.read_expr(e) {
-            if cutoff == 0 && amount > 0 {
-                total_shift += amount;
-                e = inner;
-            } else if cutoff > 0 {
-                e = self.ctx.push_shift(inner, amount, cutoff);
-            } else {
-                break; // negative shift with cutoff=0: can't peel (would need higher depth)
-            }
+        while let Shift { inner, amount, .. } = self.ctx.read_expr(e) {
+            total_shift += amount;
+            e = inner;
         }
         if total_shift > 0 {
             self.ctx.trace.wnu_shift_peel += 1;
             self.ctx.trace.shift_peel_frames_total += total_shift as u64;
             if self.depth() == 0 {
                 let r = self.whnf_no_unfolding_aux(e, cheap_proj);
-                return self.ctx.push_shift(r, total_shift, 0);
+                return self.ctx.push_shift_up(r, total_shift);
             }
             let new_depth = self.depth() - total_shift as usize;
             let saved = self.tc_cache.split_off(new_depth);
             let r = self.whnf_no_unfolding_aux(e, cheap_proj);
             self.tc_cache.extend(saved);
-            return self.ctx.push_shift(r, total_shift, 0);
+            return self.ctx.push_shift_up(r, total_shift);
         }
         // Iterative version: tail-recursive calls become loop iterations.
         // We track original inputs to cache on exit.
@@ -1029,13 +1011,11 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                 cur = cached;
                 break cur;
             }
-            let (mut e_fun, args, shifted) = self.ctx.unfold_apps(cur);
-            // Force any Shift wrapper on the head so the match sees real constructors.
-            // unfold_apps handles Shift for App spines but wraps non-App heads in mk_shift.
-            if let Expr::Shift { inner, amount, cutoff, .. } = self.ctx.read_expr(e_fun) {
-                e_fun = self.ctx.push_shift(inner, amount, cutoff);
-            }
-            match self.ctx.read_expr(e_fun) {
+            let (e_fun, args, shifted) = self.ctx.unfold_apps(cur);
+            // Use view_expr to see through Shift wrappers transparently.
+            // push_shift_up can't always eliminate Shifts (OSNF normalization may
+            // re-wrap the result), so we use view_expr instead of forcing.
+            match self.ctx.view_expr(e_fun) {
                 Proj { idx, structure, .. } =>
                     if let Some(e) = self.reduce_proj(idx, structure, cheap_proj) {
                         let next = self.ctx.foldl_apps(e, args.into_iter());
@@ -1134,13 +1114,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                     cache_entries.push(cur);
                     break r;
                 }
-                Shift { inner, amount, cutoff, .. } => {
-                    let forced = self.ctx.push_shift(inner, amount, cutoff);
-                    let next = self.ctx.foldl_apps(forced, args.into_iter());
-                    if !cheap_proj { cache_entries.push(cur); }
-                    cur = next;
-                    continue;
-                }
+                Shift { .. } => unreachable!("view_expr never returns Shift"),
             }
         };
         // Cache intermediate inputs (non-cheap_proj only).
@@ -1174,7 +1148,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
     }
 
     fn def_eq_binder_multi(&mut self, x: ExprPtr<'t>, y: ExprPtr<'t>) -> Option<bool> {
-        if matches!(self.ctx.read_expr_pair(x, y), (Pi { .. }, Pi { .. }) | (Lambda { .. }, Lambda { .. })) {
+        if matches!(self.ctx.view_expr_pair(x, y), (Pi { .. }, Pi { .. }) | (Lambda { .. }, Lambda { .. })) {
             self.def_eq_binder_aux(x, y)
         } else {
             None
@@ -1208,7 +1182,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
     }
 
     fn def_eq_proj(&mut self, x: ExprPtr<'t>, y: ExprPtr<'t>) -> bool {
-        match self.ctx.read_expr_pair(x, y) {
+        match self.ctx.view_expr_pair(x, y) {
             (Proj { idx: idx_l, structure: structure_l, .. }, Proj { idx: idx_r, structure: structure_r, .. }) =>
                 idx_l == idx_r && self.def_eq(structure_l, structure_r),
             _ => false,
@@ -1304,34 +1278,37 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             eprintln!("  assert_def_eq FAILED:");
             eprintln!("    u = {} (marker={:?} idx={})", self.ctx.expr_desc(u, 15), u.dag_marker(), u.idx());
             eprintln!("    v = {} (marker={:?} idx={})", self.ctx.expr_desc(v, 15), v.dag_marker(), v.idx());
-            // Try to find first difference
             self.find_diff(u, v, 0);
             panic!("assert_def_eq failed");
         }
     }
 
     fn find_diff(&mut self, u: ExprPtr<'t>, v: ExprPtr<'t>, depth: u32) {
-        if depth > 20 { return; }
-        if u == v { return; }
+        if depth > 20 || u == v { return; }
+        let prefix = "    ".repeat(depth as usize + 1);
+        // Peel through raw Shift nodes
+        if let (Expr::Shift { inner: i1, amount: a1, .. }, Expr::Shift { inner: i2, amount: a2, .. })
+            = (self.ctx.read_expr(u), self.ctx.read_expr(v))
+        {
+            eprintln!("{}Shift amt={}/{} inner {:?}@{} vs {:?}@{}", prefix,
+                a1, a2, i1.dag_marker(), i1.idx(), i2.dag_marker(), i2.idx());
+            if i1 != i2 { self.find_diff(i1, i2, depth); }
+            return;
+        }
         let ue = self.ctx.view_expr(u);
         let ve = self.ctx.view_expr(v);
-        let prefix = "    ".repeat(depth as usize + 1);
         match (ue, ve) {
             (Expr::App { fun: f1, arg: a1, .. }, Expr::App { fun: f2, arg: a2, .. }) => {
-                if f1 != f2 || a1 != a2 {
-                    eprintln!("{}DIFF App at depth {}:", prefix, depth);
-                    if f1 != f2 { self.find_diff(f1, f2, depth+1); }
-                    if a1 != a2 { self.find_diff(a1, a2, depth+1); }
-                }
+                eprintln!("{}DIFF App at depth {}", prefix, depth);
+                if f1 != f2 { self.find_diff(f1, f2, depth+1); }
+                if a1 != a2 { self.find_diff(a1, a2, depth+1); }
             }
             (Expr::Pi { binder_type: t1, body: b1, .. }, Expr::Pi { binder_type: t2, body: b2, .. })
             | (Expr::Lambda { binder_type: t1, body: b1, .. }, Expr::Lambda { binder_type: t2, body: b2, .. }) => {
-                if t1 != t2 || b1 != b2 {
-                    let kind = if matches!(ue, Expr::Pi { .. }) { "Pi" } else { "Lam" };
-                    eprintln!("{}DIFF {} at depth {}:", prefix, kind, depth);
-                    if t1 != t2 { self.find_diff(t1, t2, depth+1); }
-                    if b1 != b2 { self.find_diff(b1, b2, depth+1); }
-                }
+                let kind = if matches!(ue, Expr::Pi { .. }) { "Pi" } else { "Lam" };
+                eprintln!("{}DIFF {} at depth {}", prefix, kind, depth);
+                if t1 != t2 { self.find_diff(t1, t2, depth+1); }
+                if b1 != b2 { self.find_diff(b1, b2, depth+1); }
             }
             _ => {
                 eprintln!("{}LEAF DIFF at depth {}: {} vs {}", prefix, depth,
@@ -1354,7 +1331,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         // Speculative app congruence: if both sides are applications, try comparing
         // their spines via cheap O(1) checks (ptr_eq + caches) before doing whnf.
         // Avoids expensive whnf/delta steps for cases resolvable by structural congruence.
-        if matches!((self.ctx.read_expr(x), self.ctx.read_expr(y)), (App { .. }, App { .. })) {
+        if matches!((self.ctx.view_expr(x), self.ctx.view_expr(y)), (App { .. }, App { .. })) {
             if let Some(true) = self.spec_app_congruence(x, y) {
                 // Cache the result for future lookups
                 self.eq_cache_insert(x, y);
@@ -1381,7 +1358,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         }
 
         // Second speculative app congruence on whnf-reduced forms (x_n, y_n)
-        if (x_n != x || y_n != y) && matches!((self.ctx.read_expr(x_n), self.ctx.read_expr(y_n)), (App { .. }, App { .. })) {
+        if (x_n != x || y_n != y) && matches!((self.ctx.view_expr(x_n), self.ctx.view_expr(y_n)), (App { .. }, App { .. })) {
             self.ctx.trace.spec_app2_tried += 1;
             let spec_result = {
                 let (mut fx, mut fy) = (x_n, y_n);
@@ -1442,12 +1419,12 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             // Sound because Shift(a,k,0) = Shift(b,k,0) iff a = b.
             // Only attempt when at least one side is a Shift (avoid overhead on common case).
             if matches!((self.ctx.read_expr(x), self.ctx.read_expr(y)), (Expr::Shift { .. }, Expr::Shift { .. })) {
-                let (mut xi, mut xa) = (x, 0i16);
-                while let Expr::Shift { inner, amount, cutoff: 0, .. } = self.ctx.read_expr(xi) {
+                let (mut xi, mut xa) = (x, 0u16);
+                while let Expr::Shift { inner, amount, .. } = self.ctx.read_expr(xi) {
                     xa += amount; xi = inner;
                 }
-                let (mut yi, mut ya) = (y, 0i16);
-                while let Expr::Shift { inner, amount, cutoff: 0, .. } = self.ctx.read_expr(yi) {
+                let (mut yi, mut ya) = (y, 0u16);
+                while let Expr::Shift { inner, amount, .. } = self.ctx.read_expr(yi) {
                     ya += amount; yi = inner;
                 }
                 if xa == ya && xa > 0 {
@@ -1648,12 +1625,12 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         // Shift-aware UF: strip matching Shift wrappers and check inner expressions.
         // Checked after open cache (cheaper checks first). Only when at least one is Shift.
         if matches!((self.ctx.read_expr(x), self.ctx.read_expr(y)), (Expr::Shift { .. }, Expr::Shift { .. })) {
-            let (mut xi, mut xa) = (x, 0i16);
-            while let Expr::Shift { inner, amount, cutoff: 0, .. } = self.ctx.read_expr(xi) {
+            let (mut xi, mut xa) = (x, 0u16);
+            while let Expr::Shift { inner, amount, .. } = self.ctx.read_expr(xi) {
                 xa += amount; xi = inner;
             }
-            let (mut yi, mut ya) = (y, 0i16);
-            while let Expr::Shift { inner, amount, cutoff: 0, .. } = self.ctx.read_expr(yi) {
+            let (mut yi, mut ya) = (y, 0u16);
+            while let Expr::Shift { inner, amount, .. } = self.ctx.read_expr(yi) {
                 ya += amount; yi = inner;
             }
             if xa == ya && xa > 0 && self.tc_cache.eq_cache_uf.check_uf_eq(xi, yi) {
@@ -1793,7 +1770,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             return None
         }
 
-        match self.ctx.read_expr_pair(x, y) {
+        match self.ctx.view_expr_pair(x, y) {
             (App { .. }, App { .. }) if (x_defname == y_defname) => {
                 let (l_fun, l_args, _) = self.ctx.unfold_apps(x);
                 let (r_fun, r_args, _) = self.ctx.unfold_apps(y);
@@ -1817,7 +1794,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
 
     fn try_unfold_proj_app(&mut self, e: ExprPtr<'t>) -> Option<ExprPtr<'t>> {
         let f = self.ctx.unfold_apps_fun(e);
-        if let Proj { .. } = self.ctx.read_expr(f) {
+        if let Proj { .. } = self.ctx.view_expr(f) {
             let eprime = self.whnf_no_unfolding(e);
             if eprime != e {
                 return Some(eprime)

@@ -189,7 +189,7 @@ fn core_hash(
         | Expr::Local { .. } => expr.get_hash(),
         Expr::Shift { inner, amount, .. } => {
             // OSNF Shift nodes from parse-time normalization: hash the inner core shifted
-            core_hash(dag, inner.idx(), shift + amount as u16, cutoff, memo)
+            core_hash(dag, inner.idx(), shift + amount, cutoff, memo)
         }
     };
 
@@ -412,7 +412,7 @@ fn compute_core(
         | Expr::StringLit { .. } | Expr::Local { .. } => (idx, false),
         Expr::Shift { inner, amount, .. } => {
             // OSNF Shift nodes from parse-time normalization: recurse into inner with combined shift
-            let (core_idx, was_new) = compute_core(dag, inner.idx(), shift + amount as u16, cutoff, memo);
+            let (core_idx, was_new) = compute_core(dag, inner.idx(), shift + amount, cutoff, memo);
             (core_idx, was_new)
         }
     };

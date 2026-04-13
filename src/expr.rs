@@ -110,17 +110,14 @@ pub enum Expr<'a> {
         binder_type: ExprPtr<'a>,
         id: FVarId,
     },
-    /// Delayed shift: free Var indices in `inner` with index >= `cutoff` are shifted by `amount`.
-    /// Positive amount = shift up, negative = shift down (only valid when shifted-away vars unused).
-    /// Created by mk_shift (cutoff=0) or mk_shift_cutoff (cutoff>0).
-    /// Collapsed on nesting when cutoffs match: Shift(Shift(e, j, c), k, c) → Shift(e, j+k, c).
-    /// Elided when inner has no free bvars above cutoff.
+    /// Delayed shift: all free Var indices in `inner` are shifted up by `amount`.
+    /// Always cutoff=0. `amount > 0` and `inner.fvar_lb == 0` (OSNF invariant).
+    /// Nested shifts are impossible (inner can't be Shift since inner.fvar_lb == 0).
     Shift {
         hash: u64,
         fvar_lb: u16,
         inner: ExprPtr<'a>,
-        amount: i16,
-        cutoff: u16,
+        amount: u16,
         num_loose_bvars: u16,
         has_fvars: bool,
     },
@@ -259,7 +256,11 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
                     return e;
                 }
                 // Otherwise the shifted form has bvars but all <= offset, return shifted expr
-                return self.mk_shift_cutoff(e, sh_amt, sh_cut);
+                if sh_cut == 0 {
+                    return self.mk_shift(e, sh_amt as u16);
+                } else {
+                    return self.shift_expr(e, sh_amt as u16, sh_cut);
+                }
             }
         }
 
@@ -303,10 +304,18 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
                 let new_amt = sh_amt - n_substs as i16;
                 debug_assert!(new_amt > 0);
                 self.trace.inst_aux_shift_skip_wrap += 1;
-                self.mk_shift_cutoff(e, new_amt, sh_cut)
+                if sh_cut == 0 {
+                    self.mk_shift(e, new_amt as u16)
+                } else {
+                    self.shift_expr(e, new_amt as u16, sh_cut)
+                }
             } else {
                 self.trace.inst_aux_shift_skip_wrap += 1;
-                self.mk_shift_cutoff(e, sh_amt, sh_cut)
+                if sh_cut == 0 {
+                    self.mk_shift(e, sh_amt as u16)
+                } else {
+                    self.shift_expr(e, sh_amt as u16, sh_cut)
+                }
             };
             self.trace.inst_aux_elided += 1;
             self.expr_cache.inst_cache[slot] = (gen, params, e,r);
@@ -334,27 +343,25 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
                     // Closed expression, shift is no-op
                     return e;
                 }
-                Shift { inner, amount, cutoff, .. } => {
+                Shift { inner, amount, .. } => {
                     self.trace.inst_aux_shift_nodes += 1;
-                    // Compose shifts when cutoffs match: Shift(inner, a2, c) with pending (a1, c) = (a1+a2, c)
-                    if cutoff == sh_cut {
-                        let r = self.inst_aux(inner, substs, offset, shift_down, sh_amt + amount, sh_cut);
+                    // OSNF: Shift always has cutoff=0.
+                    if sh_cut == 0 {
+                        // Compose: Shift(inner, n) with pending (sh_amt, 0) = (sh_amt + n, 0)
+                        let r = self.inst_aux(inner, substs, offset, shift_down, sh_amt + amount as i16, 0);
                         self.expr_cache.inst_cache[slot] = (gen, params, e,r);
                         return r;
                     }
-                    // Compose when inner shift moves all vars past outer cutoff:
-                    // If cutoff < sh_cut and amount >= (sh_cut - cutoff), then
-                    // all vars >= cutoff become >= cutoff + amount >= sh_cut,
-                    // so both shifts apply uniformly. Compose as (sh_amt + amount, cutoff).
-                    if cutoff < sh_cut && amount >= (sh_cut - cutoff) as i16 {
+                    // sh_cut > 0: cutoffs don't match. Force via push_shift, then recurse.
+                    if amount as i16 >= sh_cut as i16 {
+                        // All vars >= 0 become >= amount >= sh_cut, compose uniformly
                         self.trace.inst_aux_shift_compose += 1;
-                        let r = self.inst_aux(inner, substs, offset, shift_down, sh_amt + amount, cutoff);
+                        let r = self.inst_aux(inner, substs, offset, shift_down, sh_amt + amount as i16, 0);
                         self.expr_cache.inst_cache[slot] = (gen, params, e,r);
                         return r;
                     }
-                    // Different cutoffs where composition doesn't work: push the inner shift, then apply outer
                     self.trace.inst_aux_shift_mismatch += 1;
-                    let forced = self.push_shift(inner, amount, cutoff);
+                    let forced = self.push_shift_up(inner, amount);
                     let r = self.inst_aux(forced, substs, offset, shift_down, sh_amt, sh_cut);
                     self.expr_cache.inst_cache[slot] = (gen, params, e,r);
                     return r;
@@ -369,14 +376,18 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
                         if rel_idx < n_substs {
                             self.trace.inst_aux_shifted_var_subst += 1;
                             let val = substs[substs.len() - 1 - rel_idx as usize];
-                            if offset > 0 { self.mk_shift(val, offset as i16) } else { val }
+                            if offset > 0 { self.mk_shift(val, offset) } else { val }
                         } else {
                             self.trace.inst_aux_shifted_var_nosubst += 1;
                             if shift_down {
                                 self.mk_var(shifted_idx - n_substs)
                             } else {
-                                // Return Shift(Var(dbj_idx), sh_amt, sh_cut) — the original shifted form
-                                self.mk_shift_cutoff(e, sh_amt, sh_cut)
+                                // Return the shifted var directly
+                                if sh_cut == 0 {
+                                    self.mk_shift(e, sh_amt as u16)
+                                } else {
+                                    self.shift_expr(e, sh_amt as u16, sh_cut)
+                                }
                             }
                         }
                     }
@@ -411,11 +422,10 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
             // No pending shift — original inst_aux logic
             match self.read_expr(e) {
                 Sort { .. } | Const { .. } | Local { .. } | StringLit { .. } | NatLit { .. } => panic!(),
-                Shift { inner, amount, cutoff, .. } => {
+                Shift { inner, amount, .. } => {
                     self.trace.inst_aux_shift_nodes += 1;
-                    // Instead of creating Shift wrappers for children, carry the shift
-                    // as parameters and recurse directly on inner's children.
-                    let r = self.inst_aux(inner, substs, offset, shift_down, amount, cutoff);
+                    // OSNF: Shift always has cutoff=0. Carry as parameters.
+                    let r = self.inst_aux(inner, substs, offset, shift_down, amount as i16, 0);
                     self.expr_cache.inst_cache[slot] = (gen, params, e,r);
                     return r;
                 }
@@ -425,7 +435,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
                     if rel_idx < n_substs {
                         let val = substs[substs.len() - 1 - rel_idx as usize];
                         if offset > 0 {
-                            self.mk_shift(val, offset as i16)
+                            self.mk_shift(val, offset)
                         } else {
                             val
                         }
@@ -474,7 +484,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
             return e
         }
         if cutoff == 0 {
-            return self.mk_shift(e, amount as i16);
+            return self.mk_shift(e, amount);
         }
         self.shift_expr_aux(e, amount, cutoff)
     }
@@ -547,9 +557,15 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         } else if let Some(cached) = self.expr_cache.abstr_cache.get(&(e, offset)) {
             *cached
         } else {
-            let calcd = match self.read_expr(e) {
-                Local { .. } =>
-                    locals.iter().rev().position(|x| *x == e).map(|pos| self.mk_var(u16::try_from(pos).unwrap() + offset)).unwrap_or(e),
+            // Use view_expr to see through Shift nodes transparently.
+            // This avoids an infinite loop where push_shift_up(core, n) can produce
+            // Shift(n, core) — a fixpoint — causing unbounded recursion.
+            let calcd = match self.view_expr(e) {
+                Local { .. } => {
+                    // Under OSNF, Locals never appear under Shift (nlbv=0),
+                    // so `e` is the Local pointer itself.
+                    locals.iter().rev().position(|x| *x == e).map(|pos| self.mk_var(u16::try_from(pos).unwrap() + offset)).unwrap_or(e)
+                }
                 App { fun, arg, .. } => {
                     let fun = self.abstr_aux(fun, locals, offset);
                     let arg = self.abstr_aux(arg, locals, offset);
@@ -576,10 +592,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
                     let structure = self.abstr_aux(structure, locals, offset);
                     self.mk_proj(ty_name, idx, structure)
                 }
-                Shift { inner, amount, cutoff, .. } => {
-                    let shallow = self.push_shift(inner, amount, cutoff);
-                    self.abstr_aux(shallow, locals, offset)
-                }
+                Shift { .. } => unreachable!("view_expr never returns Shift"),
                 Var { .. } | Sort { .. } | Const { .. } => panic!("should flag as no locals"),
             };
 
@@ -607,7 +620,8 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         } else if let Some(cached) = self.expr_cache.abstr_cache_levels.get(&(e, start_pos, num_open_binders)) {
             *cached
         } else {
-            let calcd = match self.read_expr(e) {
+            // Use view_expr to see through Shift nodes transparently (same fix as abstr_aux_body).
+            let calcd = match self.view_expr(e) {
                 Local { id: FVarId::DbjLevel(serial), .. } =>
                     if serial < start_pos {
                         e
@@ -641,10 +655,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
                     let structure = self.abstr_aux_levels(structure, start_pos, num_open_binders);
                     self.mk_proj(ty_name, idx, structure)
                 }
-                Shift { inner, amount, cutoff, .. } => {
-                    let shallow = self.push_shift(inner, amount, cutoff);
-                    self.abstr_aux_levels(shallow, start_pos, num_open_binders)
-                }
+                Shift { .. } => unreachable!("view_expr never returns Shift"),
                 Var { .. } | Sort { .. } | Const { .. } => panic!("should flag as no locals"),
             };
             self.expr_cache.abstr_cache_levels.insert((e, start_pos, num_open_binders), calcd);
@@ -673,9 +684,9 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
             // This avoids expanding Shift via view_expr which creates new pointers
             // that miss the subst_cache, causing quadratic re-traversal.
             let r = match self.read_expr(e) {
-                Shift { inner, amount, cutoff, .. } => {
+                Shift { inner, amount, .. } => {
                     let inner_subst = self.subst_aux(inner, ks, vs);
-                    if inner_subst == inner { e } else { self.mk_shift_cutoff(inner_subst, amount, cutoff) }
+                    if inner_subst == inner { e } else { self.mk_shift(inner_subst, amount) }
                 }
                 _ => match self.view_expr(e) {
                     Var { .. } | NatLit { .. } | StringLit { .. } => e,
@@ -756,8 +767,8 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
             match self.view_expr(e) {
                 App { fun, .. } => e = fun,
                 _ => {
-                    if let Expr::Shift { inner, amount, cutoff, .. } = self.read_expr(e) {
-                        return self.push_shift(inner, amount, cutoff);
+                    if let Expr::Shift { inner, amount, .. } = self.read_expr(e) {
+                        return self.push_shift_up(inner, amount);
                     }
                     return e;
                 }
@@ -770,24 +781,14 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
     /// `shifted` is true if any Shift nodes were encountered (args/fun may differ from original).
     pub fn unfold_apps(&mut self, mut e: ExprPtr<'t>) -> (ExprPtr<'t>, AppArgs<'t>, bool) {
         let mut args = AppArgs::new();
-        let mut pending_shift: i16 = 0;
+        let mut pending_shift: u16 = 0;
         let mut shifted = false;
         loop {
             match self.read_expr(e) {
-                Shift { inner, amount, cutoff: 0, .. } => {
+                Shift { inner, amount, .. } => {
                     pending_shift += amount;
                     shifted = true;
                     e = inner;
-                }
-                Shift { inner, amount, cutoff, .. } => {
-                    let forced = self.push_shift(inner, amount, cutoff);
-                    shifted = true;
-                    if pending_shift != 0 {
-                        e = self.mk_shift(forced, pending_shift);
-                        pending_shift = 0;
-                    } else {
-                        e = forced;
-                    }
                 }
                 App { fun, arg, .. } => {
                     e = fun;
@@ -838,8 +839,8 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
                     e = fun;
                 }
                 _ => {
-                    if let Expr::Shift { inner, amount, cutoff, .. } = self.read_expr(e) {
-                        e = self.push_shift(inner, amount, cutoff);
+                    if let Expr::Shift { inner, amount, .. } = self.read_expr(e) {
+                        e = self.push_shift_up(inner, amount);
                     }
                     break
                 }
@@ -1097,9 +1098,9 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
     }
 
     /// Return the number of leading `Pi` binders on this expression.
-    pub(crate) fn pi_telescope_size(&self, mut e: ExprPtr<'t>) -> u16 {
+    pub(crate) fn pi_telescope_size(&mut self, mut e: ExprPtr<'t>) -> u16 {
         let mut size = 0u16;
-        while let Pi { body, .. } = self.read_expr(e) {
+        while let Pi { body, .. } = self.view_expr(e) {
             size += 1;
             e = body;
         }
