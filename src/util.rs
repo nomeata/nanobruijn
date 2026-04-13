@@ -1392,14 +1392,11 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
                 self.mk_var(dbj_idx + amount)
             }
             Expr::App { fun, arg, has_fvars, .. } => {
-                // Recurse into fun to keep App spine visible. Shift-wrap arg.
-                // Allocate directly to avoid OSNF circularity in mk_app.
                 let fun = self.push_shift_up(fun, amount);
                 let arg = self.mk_shift(arg, amount);
                 let fun_e = self.read_expr(fun);
                 let arg_e = self.read_expr(arg);
                 let num_loose_bvars = fun_e.num_loose_bvars().max(arg_e.num_loose_bvars());
-                let hash = hash64!(crate::expr::APP_HASH, fun, arg);
                 let fvar_lb = if num_loose_bvars == 0 { 0 } else {
                     let f_nlbv = fun_e.num_loose_bvars();
                     let a_nlbv = arg_e.num_loose_bvars();
@@ -1407,7 +1404,21 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
                     else if a_nlbv == 0 { fun_e.get_fvar_lb() }
                     else { fun_e.get_fvar_lb().min(arg_e.get_fvar_lb()) }
                 };
-                self.alloc_expr(Expr::App { fun, arg, num_loose_bvars, has_fvars, hash, fvar_lb })
+                if fvar_lb > 0 {
+                    // OSNF: extract core by adjusting children down, then Shift-wrap.
+                    // Inlined from mk_app to avoid DM cache + recursive mk_app overhead.
+                    let cf = self.adjust_child_tc(fun, fvar_lb, 0);
+                    let ca = self.adjust_child_tc(arg, fvar_lb, 0);
+                    let core_hash = hash64!(crate::expr::APP_HASH, cf, ca);
+                    let core = self.alloc_expr(Expr::App {
+                        fun: cf, arg: ca, num_loose_bvars: num_loose_bvars - fvar_lb,
+                        has_fvars, hash: core_hash, fvar_lb: 0
+                    });
+                    self.mk_shift(core, fvar_lb)
+                } else {
+                    let hash = hash64!(crate::expr::APP_HASH, fun, arg);
+                    self.alloc_expr(Expr::App { fun, arg, num_loose_bvars, has_fvars, hash, fvar_lb })
+                }
             }
             Expr::Pi { binder_name, binder_style, binder_type, body, .. } => {
                 let binder_type = self.mk_shift(binder_type, amount);
@@ -1426,13 +1437,22 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
                 self.mk_let(binder_name, binder_type, val, body, nondep)
             }
             Expr::Proj { ty_name, idx, structure, has_fvars, .. } => {
-                // Allocate directly to avoid OSNF circularity in mk_proj.
                 let structure = self.mk_shift(structure, amount);
                 let s_e = self.read_expr(structure);
-                let num_loose_bvars = s_e.num_loose_bvars();
-                let hash = hash64!(crate::expr::PROJ_HASH, ty_name, idx, structure);
                 let fvar_lb = s_e.get_fvar_lb();
-                self.alloc_expr(Expr::Proj { ty_name, idx, structure, num_loose_bvars, has_fvars, hash, fvar_lb })
+                if fvar_lb > 0 {
+                    let cs = self.adjust_child_tc(structure, fvar_lb, 0);
+                    let core_hash = hash64!(crate::expr::PROJ_HASH, ty_name, idx, cs);
+                    let core = self.alloc_expr(Expr::Proj {
+                        ty_name, idx, structure: cs, num_loose_bvars: s_e.num_loose_bvars() - fvar_lb,
+                        has_fvars, hash: core_hash, fvar_lb: 0
+                    });
+                    self.mk_shift(core, fvar_lb)
+                } else {
+                    let num_loose_bvars = s_e.num_loose_bvars();
+                    let hash = hash64!(crate::expr::PROJ_HASH, ty_name, idx, structure);
+                    self.alloc_expr(Expr::Proj { ty_name, idx, structure, num_loose_bvars, has_fvars, hash, fvar_lb })
+                }
             }
             Expr::Sort { .. } | Expr::Const { .. } | Expr::Local { .. } | Expr::StringLit { .. } | Expr::NatLit { .. } => {
                 panic!("push_shift_up on closed expression")
