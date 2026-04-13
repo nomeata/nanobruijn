@@ -360,10 +360,53 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
                         self.expr_cache.inst_cache[slot] = (gen, params, e,r);
                         return r;
                     }
+                    // n < sh_cut: can't compose shifts simply. Use view_expr to see
+                    // through the Shift and process compound children directly.
+                    // This avoids the fixpoint loop where push_shift_up(core, n) → Shift(n, core).
                     self.trace.inst_aux_shift_mismatch += 1;
-                    let forced = self.push_shift_up(inner, amount);
-                    let r = self.inst_aux(forced, substs, offset, shift_down, sh_amt, sh_cut);
-                    self.expr_cache.inst_cache[slot] = (gen, params, e,r);
+                    let viewed = self.view_expr(e);
+                    let r = match viewed {
+                        Shift { .. } => unreachable!("view_expr never returns Shift"),
+                        Sort { .. } | Const { .. } | Local { .. } | StringLit { .. } | NatLit { .. } => unreachable!("Shift inner is open"),
+                        Var { dbj_idx, .. } => {
+                            let shifted_idx = if dbj_idx >= sh_cut { (dbj_idx as i16 + sh_amt) as u16 } else { dbj_idx };
+                            if shifted_idx < offset { self.mk_var(shifted_idx) }
+                            else {
+                                let rel_idx = shifted_idx - offset;
+                                if rel_idx < n_substs {
+                                    let val = substs[substs.len() - 1 - rel_idx as usize];
+                                    if offset > 0 { self.mk_shift(val, offset) } else { val }
+                                } else if shift_down { self.mk_var(shifted_idx - n_substs) }
+                                else { self.mk_var(shifted_idx) }
+                            }
+                        }
+                        App { fun, arg, .. } => {
+                            let new_fun = self.inst_aux(fun, substs, offset, shift_down, sh_amt, sh_cut);
+                            let new_arg = self.inst_aux(arg, substs, offset, shift_down, sh_amt, sh_cut);
+                            self.mk_app(new_fun, new_arg)
+                        }
+                        Pi { binder_name, binder_style, binder_type, body, .. } => {
+                            let new_type = self.inst_aux(binder_type, substs, offset, shift_down, sh_amt, sh_cut);
+                            let new_body = self.inst_aux(body, substs, offset + 1, shift_down, sh_amt, sh_cut + 1);
+                            self.mk_pi(binder_name, binder_style, new_type, new_body)
+                        }
+                        Lambda { binder_name, binder_style, binder_type, body, .. } => {
+                            let new_type = self.inst_aux(binder_type, substs, offset, shift_down, sh_amt, sh_cut);
+                            let new_body = self.inst_aux(body, substs, offset + 1, shift_down, sh_amt, sh_cut + 1);
+                            self.mk_lambda(binder_name, binder_style, new_type, new_body)
+                        }
+                        Let { binder_name, binder_type, val, body, nondep, .. } => {
+                            let new_type = self.inst_aux(binder_type, substs, offset, shift_down, sh_amt, sh_cut);
+                            let new_val = self.inst_aux(val, substs, offset, shift_down, sh_amt, sh_cut);
+                            let new_body = self.inst_aux(body, substs, offset + 1, shift_down, sh_amt, sh_cut + 1);
+                            self.mk_let(binder_name, new_type, new_val, new_body, nondep)
+                        }
+                        Proj { ty_name, idx, structure, .. } => {
+                            let new_structure = self.inst_aux(structure, substs, offset, shift_down, sh_amt, sh_cut);
+                            self.mk_proj(ty_name, idx, new_structure)
+                        }
+                    };
+                    self.expr_cache.inst_cache[slot] = (gen, params, e, r);
                     return r;
                 }
                 Var { dbj_idx, .. } => {
