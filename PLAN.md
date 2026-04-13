@@ -25,22 +25,23 @@ We use a local context array with `push_local`/`pop_local` (zero allocation).
 
 ### Shift nodes (delayed shifting)
 
-`Shift { inner, amount: i16, cutoff }` expression variant wraps expressions for O(1) shifting.
-Semantics: free Var indices in `inner` with index >= `cutoff` are shifted by `amount`
-(positive = up, negative = down). Negative amounts are valid when shifted-away vars are unused.
+`Shift { inner, amount: u16 }` expression variant wraps expressions for O(1) shifting.
+OSNF invariant: `inner.fvar_lb == 0`, `amount > 0`. No cutoff field, no negative amounts.
+Nested shifts are impossible (inner can't be Shift since inner.fvar_lb == 0).
 
-- `mk_shift` (cutoff=0): creates wrappers, collapses nested same-cutoff Shifts, elides on
-  closed expressions, eagerly forces `Var` (O(1))
-- `mk_shift_cutoff`: general version with cutoff parameter. Deduplicates via
-  `(ExprPtr, amount, cutoff) → ExprPtr` table for pointer identity preservation.
-- `push_shift(e, amount, cutoff)`: pushes shift one level into constructor.
-  App → recurses into `fun` only, lazily Shift-wraps `arg`. Ensures App spine nodes are
-  real constructors (not Shift wrappers) while deferring arg work.
-  Lambda/Pi → `Lambda(Shift(ty, k, c), Shift(body, k, c+1))` — fully lazy, no traversal.
-- `view_expr(e)`: view function that transparently handles Shift nodes via `push_shift`.
-  Never returns `Shift` variant; children may be Shift-wrapped. Used throughout the system
-  wherever expressions are pattern-matched.
-- `force_shift_aux` has been deleted. All shifting uses `mk_shift` or `push_shift`.
+- `mk_shift(inner, amount: u16)`: creates wrappers, collapses nested Shifts, elides on
+  closed expressions, eagerly forces `Var(k)` → `Var(k+amount)`. Enforces OSNF: if inner
+  has fvar_lb > 0, normalizes to core first.
+- `push_shift_up(e, amount)`: pushes Shift one level into constructor (cutoff=0).
+  Non-binder children: `mk_shift(child, amount)` (O(1)).
+  Binder bodies: `shift_expr(body, amount, 1)` (traversal, cached).
+  App: recurses into `fun`, Shift-wraps `arg`. Allocates directly (bypasses mk_app OSNF).
+  Pi/Lambda: delegates to `mk_pi`/`mk_lambda` which enforce OSNF — result may be Shift-wrapped.
+- `view_expr(e)`: transparently sees through Shift nodes via `view_expr_shifted`.
+  Never returns `Shift` variant; children may be Shift-wrapped. Used throughout TC, inductive
+  checking, and def_eq for all pattern matches on compound constructors.
+- `shift_expr(e, amount, cutoff)`: full traversal for cutoff > 0. Cached via shift_cache.
+  Rebuilds via mk_* constructors, producing OSNF results.
 
 **Shift composition in inst_aux**: When `inst_aux` carries pending shift `(sh_amt, sh_cut)`
 and encounters `Shift(inner, amount, cutoff)`, it composes the shifts directly when
@@ -91,35 +92,39 @@ both Check and InferOnly queries.
 
 **DefEq cache (open)**: Per-depth positive/negative stacks (LazyMap per frame).
 
-### OSNF parse-time normalization
+### OSNF (Outermost-Shift Normal Form) — everywhere
 
-Outermost-Shift Normal Form (OSNF): every expression in the export file DAG with
-`fvar_lb > 0` is stored as `Shift(fvar_lb, core)` where `core` has `fvar_lb = 0`.
-The core is the expression with all free bvar indices uniformly shifted down by `fvar_lb`.
-Two expressions that differ only by a uniform shift of their free variables share the
-same core — this is the structural sharing benefit.
+Every expression in the DAG is in exactly one of these forms:
+1. **Var(n)**: variable reference
+2. **Core compound** (App, Pi, Lambda, Let, Proj, Sort, Const, Lit): always `fvar_lb = 0`
+3. **Shift(n, core)**: `n > 0`, `core.fvar_lb = 0`
 
-**Parse-time core extraction**: During parsing, for each compound expression (App, Lambda,
-Pi, Let, Proj) with `fvar_lb > 0`:
-1. Adjust each child for core extraction via `adjust_child(child, fvar_lb, cutoff)`:
-   - BVar(n) → BVar(n - fvar_lb) (insert adjusted BVar into DAG)
-   - Shift(k, inner_core) → Shift(k - fvar_lb, inner_core) or just inner_core if k = fvar_lb
-   - Compound with fvar_lb=0 → use as-is (already a core)
-   - nlbv ≤ cutoff → use as-is (bound variable, unaffected)
-2. Insert core expression into DAG (may dedup with shift-equivalent cores)
-3. Insert `Shift(fvar_lb, core_ptr)` into DAG — this is the expression's entry
+No negative shifts. No cutoff field on Shift. No compound expressions with `fvar_lb > 0`.
+Pointer equality is reliable: same structural expression → same pointer.
 
-Uses `expr_remap: Vec<usize>` to map sequential parser indices to DAG indices (no longer
-1:1, since cores and intermediate Shift nodes create additional DAG entries).
+**Enforcement**: Both at parse time and during TC. The `mk_app`/`mk_pi`/`mk_lambda`/
+`mk_let`/`mk_proj` constructors all check `fvar_lb` after computing it from children.
+If > 0, they extract a core (adjusting children down via `adjust_child_tc`) and wrap in
+`Shift(fvar_lb, core)`. `adjust_child_tc` is O(1) per child under OSNF since children
+with `nlbv > cutoff` must be `Shift(k, core)` or `Var(j)` with `k, j >= amount`.
 
-**Why parse-time works but TC-time didn't**: The earlier attempt rewrote `Shift(e, amount)`
-→ `Shift(core, fvar_lb+amount)` inside `mk_shift_cutoff` during TC. This broke pointer
-equality: expressions that were identical pointers now differed. At parse time, the
-expressions start in OSNF from the beginning — all caches, pointer comparisons, and
-`sem_eq` checks see a consistent representation from the start. No pointer equality is
-broken because nothing was rewritten mid-computation.
+**view_expr migration**: All code that pattern-matches expression constructors (Pi, Lambda,
+App, Proj) must use `view_expr` instead of `read_expr`, since OSNF wraps open expressions
+in Shift nodes that `read_expr` doesn't see through. This applies to:
+- `inductive.rs`: get_local_params, check_ctor, sep_nonrec_rec_ctor_args, etc.
+- `nanoda_tc.rs`: infer_lambda, infer_pi, infer_app, def_eq_binder_aux, etc.
+- `tc.rs`: ensure_pi, whnf_no_unfolding_aux, def_eq_binder_multi, def_eq_proj, etc.
+- `expr.rs`: abstr_aux_body, abstr_aux_levels_body, pi_telescope_size
 
-**Results** (A/B/A test on full Mathlib, 630K declarations):
+**Fixpoint issue**: `push_shift_up(core_Pi, k)` can produce `Shift(k, core_Pi)` — the
+same expression — when OSNF normalization in mk_pi re-wraps the result. Code that forces
+Shifts via push_shift_up and then matches via read_expr must instead use `view_expr` to
+avoid infinite loops.
+
+**Parse-time core extraction**: During parsing, `adjust_child(child, fvar_lb, cutoff)`
+extracts cores. Uses `expr_remap: Vec<usize>` for sequential-to-DAG index mapping.
+
+**Results** (parse-time only, A/B/A on full Mathlib, 630K declarations):
 - 47M of 88M parser expressions normalized (53%), 14% core dedup
 - **-7% user time** (baseline avg 1175s → 1095s), +18% RSS (7.9GB → 9.3GB)
 - Init: +17% overhead (6.5s → 7.6s) — parsing overhead dominates on smaller input
