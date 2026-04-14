@@ -675,8 +675,9 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
     // Read about issues with non-positive occurrences here:
     // https://counterexamples.org/strict-positivity.html?highlight=posi#positivity-strict-and-otherwise
     fn check_positivity1(&mut self, st: &InductiveCheckState<'t>, ctor_type_cursor: SPtr<'t>) {
-        let mut cursor = self.whnf(ctor_type_cursor);
+        let mut cursor = ctor_type_cursor;
         loop {
+            cursor = self.whnf(cursor);
             match self.ctx.view_sptr(cursor) {
                 _any if !self.has_ind_occ(cursor.ptr, st.ind_consts.as_ref()) => return,
                 Pi { binder_name, binder_style, binder_type, body, .. } => {
@@ -687,8 +688,6 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                     cursor = self.ctx.inst(body, &[local]);
                 }
                 _ => {
-                    // We only need to know that it's a valid ind-app for SOMETHING in the block, since
-                    // this is only a binder in the constructor, not the end of the telescope.
                     assert!(self.which_valid_ind_app(st, cursor).is_some());
                     return;
                 }
