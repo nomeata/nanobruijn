@@ -169,9 +169,9 @@ pub(crate) struct DepthFrame<'t> {
     /// Per-depth whnf_no_unfolding cache.
     pub(crate) whnf_no_unfolding_cache: LazyMap<ExprPtr<'t>, ExprPtr<'t>>,
     /// Per-depth infer cache (check mode): ExprPtr → result.
-    pub(crate) infer_cache_check: LazyMap<ExprPtr<'t>, ExprPtr<'t>>,
+    pub(crate) infer_cache_check: LazyMap<ExprPtr<'t>, SPtr<'t>>,
     /// Per-depth infer cache (no-check mode): ExprPtr → result.
-    pub(crate) infer_cache_no_check: LazyMap<ExprPtr<'t>, ExprPtr<'t>>,
+    pub(crate) infer_cache_no_check: LazyMap<ExprPtr<'t>, SPtr<'t>>,
     /// Per-depth positive def_eq cache for open expressions.
     pub(crate) defeq_pos_open: LazyMap<(ExprPtr<'t>, ExprPtr<'t>), (ExprPtr<'t>, ExprPtr<'t>, u16)>,
     /// Per-depth negative def_eq cache for open expressions.
@@ -1574,9 +1574,9 @@ pub(crate) struct TcCache<'t> {
     /// whnf_no_unfolding cache for closed expressions.
     pub(crate) wnu_cache_base: FxHashMap<ExprPtr<'t>, ExprPtr<'t>>,
     /// Infer cache (check mode) for closed expressions: ExprPtr → result.
-    pub(crate) infer_cache_check_base: FxHashMap<ExprPtr<'t>, ExprPtr<'t>>,
+    pub(crate) infer_cache_check_base: FxHashMap<ExprPtr<'t>, SPtr<'t>>,
     /// Infer cache (no-check mode) for closed expressions: ExprPtr → result.
-    pub(crate) infer_cache_no_check_base: FxHashMap<ExprPtr<'t>, ExprPtr<'t>>,
+    pub(crate) infer_cache_no_check_base: FxHashMap<ExprPtr<'t>, SPtr<'t>>,
     // === Flat caches (not depth-stacked) ===
     /// Positive def_eq cache for closed expressions (pointer-keyed set).
     pub(crate) eq_cache: FxHashSet<(ExprPtr<'t>, ExprPtr<'t>)>,
@@ -1694,7 +1694,7 @@ impl<'t> TcCache<'t> {
         else if let Some(f) = self.frames.get_mut(bucket_idx - 1) { f.whnf_no_unfolding_cache.insert(key, val); }
     }
 
-    pub(crate) fn infer_cache_get(&self, bucket_idx: usize, key: &ExprPtr<'t>, is_check: bool) -> Option<ExprPtr<'t>> {
+    pub(crate) fn infer_cache_get(&self, bucket_idx: usize, key: &ExprPtr<'t>, is_check: bool) -> Option<SPtr<'t>> {
         if bucket_idx == 0 {
             if is_check { self.infer_cache_check_base.get(key).copied() }
             else { self.infer_cache_no_check_base.get(key).copied() }
@@ -1705,7 +1705,7 @@ impl<'t> TcCache<'t> {
         }
     }
 
-    pub(crate) fn infer_cache_insert(&mut self, bucket_idx: usize, key: ExprPtr<'t>, val: ExprPtr<'t>, is_check: bool) {
+    pub(crate) fn infer_cache_insert(&mut self, bucket_idx: usize, key: ExprPtr<'t>, val: SPtr<'t>, is_check: bool) {
         if bucket_idx == 0 {
             if is_check { self.infer_cache_check_base.insert(key, val); }
             else { self.infer_cache_no_check_base.insert(key, val); }

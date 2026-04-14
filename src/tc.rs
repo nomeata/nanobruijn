@@ -661,12 +661,12 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             let inner_bucket = if self.ctx.num_loose_bvars(e.ptr) == 0 { 0 } else { inner_depth };
             if let Some(inner_cached) = self.tc_cache.infer_cache_get(inner_bucket, &e.ptr, true) {
                 self.ctx.trace.infer_cache_hits += 1;
-                return SPtr::new(inner_cached, e.shift);
+                return SPtr::new(inner_cached.ptr, inner_cached.shift + e.shift);
             }
             if !is_check {
                 if let Some(inner_cached) = self.tc_cache.infer_cache_get(inner_bucket, &e.ptr, false) {
                     self.ctx.trace.infer_cache_hits += 1;
-                    return SPtr::new(inner_cached, e.shift);
+                    return SPtr::new(inner_cached.ptr, inner_cached.shift + e.shift);
                 }
             }
             // Peel: shrink context to depth d-k, infer inner, restore, shift result.
@@ -688,12 +688,12 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         // Check cache subsumes no-check: try check first, then no-check.
         if let Some(cached_result) = self.tc_cache.infer_cache_get(bucket_idx, &e.ptr, true) {
             self.ctx.trace.infer_cache_hits += 1;
-            return SPtr::unshifted(cached_result);
+            return cached_result;
         }
         if !is_check {
             if let Some(cached_result) = self.tc_cache.infer_cache_get(bucket_idx, &e.ptr, false) {
                 self.ctx.trace.infer_cache_hits += 1;
-                return SPtr::unshifted(cached_result);
+                return cached_result;
             }
         }
         let r = match self.ctx.view_sptr(e) {
@@ -717,7 +717,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                 self.ctx.string_type().unwrap()
             }
         };
-        self.tc_cache.infer_cache_insert(bucket_idx, e.ptr, r.ptr, is_check);
+        self.tc_cache.infer_cache_insert(bucket_idx, e.ptr, r, is_check);
         r
     }
 
