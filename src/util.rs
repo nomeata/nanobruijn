@@ -1391,23 +1391,10 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
             Expr::Var { dbj_idx, .. } => {
                 self.mk_var(dbj_idx + amount)
             }
-            Expr::App { fun, arg, has_fvars, .. } => {
-                // Recurse into fun to keep App spine visible. Shift-wrap arg.
-                // Allocate directly to avoid OSNF circularity in mk_app.
+            Expr::App { fun, arg, .. } => {
                 let fun = self.push_shift_up(fun, amount);
                 let arg = self.mk_shift(arg, amount);
-                let fun_e = self.read_expr(fun);
-                let arg_e = self.read_expr(arg);
-                let num_loose_bvars = fun_e.num_loose_bvars().max(arg_e.num_loose_bvars());
-                let hash = hash64!(crate::expr::APP_HASH, fun, arg);
-                let fvar_lb = if num_loose_bvars == 0 { 0 } else {
-                    let f_nlbv = fun_e.num_loose_bvars();
-                    let a_nlbv = arg_e.num_loose_bvars();
-                    if f_nlbv == 0 { arg_e.get_fvar_lb() }
-                    else if a_nlbv == 0 { fun_e.get_fvar_lb() }
-                    else { fun_e.get_fvar_lb().min(arg_e.get_fvar_lb()) }
-                };
-                self.alloc_expr(Expr::App { fun, arg, num_loose_bvars, has_fvars, hash, fvar_lb })
+                self.mk_app(fun, arg)
             }
             Expr::Pi { binder_name, binder_style, binder_type, body, .. } => {
                 let binder_type = self.mk_shift(binder_type, amount);
@@ -1425,14 +1412,9 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
                 let body = self.shift_expr(body, amount, 1);
                 self.mk_let(binder_name, binder_type, val, body, nondep)
             }
-            Expr::Proj { ty_name, idx, structure, has_fvars, .. } => {
-                // Allocate directly to avoid OSNF circularity in mk_proj.
+            Expr::Proj { ty_name, idx, structure, .. } => {
                 let structure = self.mk_shift(structure, amount);
-                let s_e = self.read_expr(structure);
-                let num_loose_bvars = s_e.num_loose_bvars();
-                let hash = hash64!(crate::expr::PROJ_HASH, ty_name, idx, structure);
-                let fvar_lb = s_e.get_fvar_lb();
-                self.alloc_expr(Expr::Proj { ty_name, idx, structure, num_loose_bvars, has_fvars, hash, fvar_lb })
+                self.mk_proj(ty_name, idx, structure)
             }
             Expr::Sort { .. } | Expr::Const { .. } | Expr::Local { .. } | Expr::StringLit { .. } | Expr::NatLit { .. } => {
                 panic!("push_shift_up on closed expression")
