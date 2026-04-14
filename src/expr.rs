@@ -328,7 +328,6 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         self.inst_aux(e, substs, offset, shift_down, sh_amt, sh_cut)
     }
 
-    // TODO: inst_cache needs to be changed to store SPtr instead of ExprPtr in util.rs
     fn inst_aux_body(&mut self, e: ExprPtr<'t>, substs: &[SPtr<'t>], offset: u16, shift_down: bool, sh_amt: i16, sh_cut: u16) -> SPtr<'t> {
         self.trace.inst_aux_calls += 1;
         if sh_amt != 0 { self.trace.inst_aux_shifted_path += 1; }
@@ -480,8 +479,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
             return self.mk_shift(e, amount);
         }
         if let Some(&cached) = self.expr_cache.shift_cache.get(&(e, amount, cutoff)) {
-            // TODO: shift_cache stores ExprPtr, needs SPtr
-            return SPtr::unshifted(cached);
+            return cached;
         }
         let calcd = match self.read_expr(e) {
             Sort { .. } | Const { .. } | Local { .. } | StringLit { .. } | NatLit { .. } => panic!(),
@@ -518,8 +516,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
                 self.mk_proj(ty_name, idx, new_structure)
             }
         };
-        // TODO: shift_cache stores ExprPtr, needs SPtr - storing ptr only for now
-        self.expr_cache.shift_cache.insert((e, amount, cutoff), calcd.ptr);
+        self.expr_cache.shift_cache.insert((e, amount, cutoff), calcd);
         calcd
     }
 
@@ -550,7 +547,6 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         self.inst(e, &ingoing_sptrs)
     }
 
-    // TODO: abstr_cache in util.rs needs to store SPtr instead of ExprPtr
     fn abstr_aux(&mut self, e: ExprPtr<'t>, locals: &[ExprPtr<'t>], offset: u16) -> SPtr<'t> {
         stacker::maybe_grow(64 * 1024, 2 * 1024 * 1024, || self.abstr_aux_body(e, locals, offset))
     }
@@ -663,7 +659,6 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
 
     /// Abstraction by deBruijn level: converts DbjLevel locals back to Var.
     /// Used by nanoda's locally-nameless TC.
-    // TODO: abstr_cache_levels in util.rs needs to store SPtr instead of ExprPtr
     fn abstr_aux_levels(&mut self, e: ExprPtr<'t>, start_pos: u16, num_open_binders: u16) -> SPtr<'t> {
         stacker::maybe_grow(64 * 1024, 2 * 1024 * 1024, || self.abstr_aux_levels_body(e, start_pos, num_open_binders))
     }
@@ -671,9 +666,8 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
     fn abstr_aux_levels_body(&mut self, e: ExprPtr<'t>, start_pos: u16, num_open_binders: u16) -> SPtr<'t> {
         if !self.has_fvars(e) {
             SPtr::unshifted(e)
-        } else if let Some(cached) = self.expr_cache.abstr_cache_levels.get(&(e, start_pos, num_open_binders)) {
-            // TODO: cache stores ExprPtr, needs SPtr
-            SPtr::unshifted(*cached)
+        } else if let Some(&cached) = self.expr_cache.abstr_cache_levels.get(&(e, start_pos, num_open_binders)) {
+            cached
         } else {
             // Children are SPtr. Locals have nlbv=0 so never under shift.
             let calcd = match self.read_expr(e) {
@@ -712,8 +706,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
                 }
                 Var { .. } | Sort { .. } | Const { .. } => panic!("should flag as no locals"),
             };
-            // TODO: cache stores ExprPtr, needs SPtr - storing ptr only for now
-            self.expr_cache.abstr_cache_levels.insert((e, start_pos, num_open_binders), calcd.ptr);
+            self.expr_cache.abstr_cache_levels.insert((e, start_pos, num_open_binders), calcd);
             calcd
         }
     }
@@ -773,15 +766,13 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         self.abstr_aux_levels(e, start_pos, self.dbj_level_counter)
     }
 
-    // TODO: subst_cache and dsubst_cache in util.rs need to store SPtr instead of ExprPtr
     fn subst_aux(&mut self, e: ExprPtr<'t>, ks: LevelsPtr<'t>, vs: LevelsPtr<'t>) -> SPtr<'t> {
         stacker::maybe_grow(64 * 1024, 2 * 1024 * 1024, || self.subst_aux_body(e, ks, vs))
     }
 
     fn subst_aux_body(&mut self, e: ExprPtr<'t>, ks: LevelsPtr<'t>, vs: LevelsPtr<'t>) -> SPtr<'t> {
-        if let Some(cached) = self.expr_cache.subst_cache.get(&(e, ks, vs)) {
-            // TODO: cache stores ExprPtr, needs SPtr
-            return SPtr::unshifted(*cached);
+        if let Some(&cached) = self.expr_cache.subst_cache.get(&(e, ks, vs)) {
+            return cached;
         }
         // Level substitution commutes with variable shifting (they operate on
         // independent parts: levels vs. bvar indices). For SPtr children,
@@ -823,8 +814,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
                 if new_structure == structure { SPtr::unshifted(e) } else { self.mk_proj(ty_name, idx, new_structure) }
             }
         };
-        // TODO: cache stores ExprPtr, needs SPtr - storing ptr only for now
-        self.expr_cache.subst_cache.insert((e, ks, vs), r.ptr);
+        self.expr_cache.subst_cache.insert((e, ks, vs), r);
         r
     }
 
@@ -836,15 +826,13 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
     }
 
     pub fn subst_expr_levels(&mut self, e: ExprPtr<'t>, ks: LevelsPtr<'t>, vs: LevelsPtr<'t>) -> SPtr<'t> {
-        if let Some(cached) = self.expr_cache.dsubst_cache.get(&(e, ks, vs)).copied() {
-            // TODO: dsubst_cache stores ExprPtr, needs SPtr
-            return SPtr::unshifted(cached)
+        if let Some(&cached) = self.expr_cache.dsubst_cache.get(&(e, ks, vs)) {
+            return cached;
         }
         self.expr_cache.subst_cache.clear();
         assert_eq!(self.read_levels(ks).len(), self.read_levels(vs).len());
         let out = self.subst_aux(e, ks, vs);
-        // TODO: dsubst_cache stores ExprPtr, needs SPtr
-        self.expr_cache.dsubst_cache.insert((e, ks, vs), out.ptr);
+        self.expr_cache.dsubst_cache.insert((e, ks, vs), out);
         out
     }
 

@@ -268,19 +268,19 @@ pub(crate) fn nat_lor(x: BigUint, y: BigUint) -> BigUint {
 
 pub struct ExprCache<'t> {
     /// Caches (e, substs_id, params) |-> output for instantiation.
-    pub(crate) inst_cache: Vec<(u64, u64, ExprPtr<'t>, ExprPtr<'t>)>,
+    pub(crate) inst_cache: Vec<(u64, u64, ExprPtr<'t>, SPtr<'t>)>,
     pub(crate) inst_substs_id: u64,
     /// Caches (e, ks, vs) |-> output for level substitution.
-    pub(crate) subst_cache: FxHashMap<(ExprPtr<'t>, LevelsPtr<'t>, LevelsPtr<'t>), ExprPtr<'t>>,
-    pub(crate) dsubst_cache: FxHashMap<(ExprPtr<'t>, LevelsPtr<'t>, LevelsPtr<'t>), ExprPtr<'t>>,
+    pub(crate) subst_cache: FxHashMap<(ExprPtr<'t>, LevelsPtr<'t>, LevelsPtr<'t>), SPtr<'t>>,
+    pub(crate) dsubst_cache: FxHashMap<(ExprPtr<'t>, LevelsPtr<'t>, LevelsPtr<'t>), SPtr<'t>>,
     /// Caches (e, offset) |-> output for abstraction.
     pub(crate) abstr_cache: FxHashMap<(ExprPtr<'t>, u16), SPtr<'t>>,
     /// Caches (e, amount, cutoff) |-> output for shifting.
-    pub(crate) shift_cache: FxHashMap<(ExprPtr<'t>, u16, u16), ExprPtr<'t>>,
+    pub(crate) shift_cache: FxHashMap<(ExprPtr<'t>, u16, u16), SPtr<'t>>,
     /// Caches (e, amount, cutoff) |-> output for downward shifting.
     pub(crate) shift_down_cache: FxHashMap<(ExprPtr<'t>, u16, u16), ExprPtr<'t>>,
     /// Cache for abstr_aux_levels (nanoda TC).
-    pub(crate) abstr_cache_levels: FxHashMap<(ExprPtr<'t>, u16, u16), ExprPtr<'t>>,
+    pub(crate) abstr_cache_levels: FxHashMap<(ExprPtr<'t>, u16, u16), SPtr<'t>>,
     /// Direct-mapped mk_app cache.
     pub(crate) mk_app_dm_cache: Vec<(u64, SPtr<'t>, SPtr<'t>, SPtr<'t>)>,
     pub(crate) mk_app_miss_count: u32,
