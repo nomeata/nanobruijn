@@ -543,3 +543,27 @@ cascading cache misses → repeated whnf/infer → more expression creation → 
 - The `inst_aux_quick_sptr` function's mismatch case (0 < child.shift < sh_cut)
   falls back to view_sptr materialization, which may produce wrong results
 - push_shift_down is stubbed with todo\!() — needs proper SPtr implementation
+
+### SPtr Refactor Update (2026-04-14, later)
+
+**Test status**: 108/126 tutorial tests pass (86%)
+
+**Key fixes applied**:
+1. abstr_aux_sptr: offset must be adjusted by child.shift when recursing into core
+   (the core is at a lower binder depth, so Var indices need compensation)
+2. All caches (whnf, wnu, infer, abstr) changed to store SPtr instead of ExprPtr
+3. DepthFrame local context stores SPtr for correct shift tracking
+4. abstr_pi/apply_lambda/telescopes take body: SPtr
+5. binder_min_shift uses saturating_sub(1) for body contribution
+6. Peel mechanism uses saturating_sub for shift > depth cases
+
+**Remaining 18 failures**:
+- **Shift overflow** (8 tests: proofIrrelevance, eta, quotLift): whnf/def_eq loop
+  creates App chains with unbounded shift accumulation. Root cause: when whnf
+  unfolds a definition and the result is shifted, it creates new App nodes whose
+  children have increasing shifts. Each unfold-and-reapply cycle adds to the shift.
+  Need to investigate whether the whnf/inst interaction is creating non-terminating
+  shift growth.
+- **Nested inductives** (3 tests: rbTree): complex nested inductive handling
+- **Recursor reductions** (4 tests): rec rule application under shifts
+- **Recursor types** (3 tests): sortElimProp2, accRec, reduceCtorParam
