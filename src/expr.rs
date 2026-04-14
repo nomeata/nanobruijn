@@ -857,32 +857,29 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         I: Iterator<Item = ExprPtr<'t>> + DoubleEndedIterator, {
         // TODO: abstr_pi returns SPtr, but we chain multiple calls.
         // For now, we need a way to pass SPtr body to abstr_pi.
-        // Since abstr_pi takes ExprPtr body, we have a mismatch.
-        // This needs a deeper refactor.
         let mut result = SPtr::unshifted(body);
         while let Some(local) = binders.next_back() {
-            // abstr_pi needs ExprPtr body, but result is SPtr
-            // For now, this only works if result.shift == 0
-            debug_assert!(result.shift == 0, "abstr_pis: intermediate result has shift>0, needs deeper refactor");
-            result = self.abstr_pi(local, result.ptr)
+            result = self.abstr_pi(local, result)
         }
         result
     }
 
-    pub(crate) fn abstr_pi(&mut self, binder: ExprPtr<'t>, body: ExprPtr<'t>) -> SPtr<'t> {
+    pub(crate) fn abstr_pi(&mut self, binder: ExprPtr<'t>, body: SPtr<'t>) -> SPtr<'t> {
         match self.read_expr(binder) {
             Local { binder_name, binder_style, binder_type, .. } => {
-                let body = self.abstr(body, &[binder]);
+                // abstr takes ExprPtr, so pass body.ptr. The abstr result's shift
+                // replaces body's old shift (abstr rebuilds the expression).
+                let body = self.abstr(body.ptr, &[binder]);
                 self.mk_pi(binder_name, binder_style, SPtr::unshifted(binder_type), body)
             }
             _ => unreachable!("Cannot apply pi with non-local domain type"),
         }
     }
 
-    pub(crate) fn apply_lambda(&mut self, binder: ExprPtr<'t>, body: ExprPtr<'t>) -> SPtr<'t> {
+    pub(crate) fn apply_lambda(&mut self, binder: ExprPtr<'t>, body: SPtr<'t>) -> SPtr<'t> {
         match self.read_expr(binder) {
             Local { binder_name, binder_style, binder_type, .. } => {
-                let body = self.abstr(body, &[binder]);
+                let body = self.abstr(body.ptr, &[binder]);
                 self.mk_lambda(binder_name, binder_style, SPtr::unshifted(binder_type), body)
             }
             _ => unreachable!("Cannot apply lambda with non-local domain type"),
@@ -1077,11 +1074,10 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
     /// telescope while backing out.
     ///
     /// `[a, b, c], e` ~> `(fun (a b c) => e)`
-    pub(crate) fn abstr_lambda_telescope(&mut self, mut binders: &[ExprPtr<'t>], body: ExprPtr<'t>) -> SPtr<'t> {
-        let mut result = SPtr::unshifted(body);
+    pub(crate) fn abstr_lambda_telescope(&mut self, mut binders: &[ExprPtr<'t>], body: SPtr<'t>) -> SPtr<'t> {
+        let mut result = body;
         while let [tl @ .., binder] = binders {
-            debug_assert!(result.shift == 0, "abstr_lambda_telescope: intermediate shift>0");
-            result = self.apply_lambda(*binder, result.ptr);
+            result = self.apply_lambda(*binder, result);
             binders = tl;
         }
         result
@@ -1091,11 +1087,10 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
     /// telescope while backing out.
     ///
     /// `[a, b, c], e` ~> `(Pi (a b c) => e)`
-    pub(crate) fn abstr_pi_telescope(&mut self, mut binders: &[ExprPtr<'t>], body: ExprPtr<'t>) -> SPtr<'t> {
-        let mut result = SPtr::unshifted(body);
+    pub(crate) fn abstr_pi_telescope(&mut self, mut binders: &[ExprPtr<'t>], body: SPtr<'t>) -> SPtr<'t> {
+        let mut result = body;
         while let [tl @ .., binder] = binders {
-            debug_assert!(result.shift == 0, "abstr_pi_telescope: intermediate shift>0");
-            result = self.abstr_pi(*binder, result.ptr);
+            result = self.abstr_pi(*binder, result);
             binders = tl;
         }
         result

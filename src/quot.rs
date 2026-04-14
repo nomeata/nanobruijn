@@ -56,7 +56,7 @@ macro_rules! pi_telescope {
 
         {
             let inner = pi_telescope!(in $ctx; $($tl),*);
-            $ctx.abstr_pi($ty.ptr, inner.ptr)
+            $ctx.abstr_pi($ty.ptr, inner)
         }
     }
 }
