@@ -1261,16 +1261,116 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         SPtr::new(e.ptr, e.shift + amount)
     }
 
-    /// Shift DOWN: subtract `amount` from all free variable indices.
-    /// TODO: Rewrite for SPtr refactoring. Currently stubbed.
-    pub fn push_shift_down(&mut self, _e: ExprPtr<'t>, _amount: u16) -> ExprPtr<'t> {
-        todo!("push_shift_down: needs rewrite for SPtr refactoring")
+    /// Shift down: subtract `amount` from all free variable indices in the core expression.
+    pub fn push_shift_down(&mut self, e: ExprPtr<'t>, amount: u16) -> ExprPtr<'t> {
+        self.push_shift_down_cutoff(e, amount, 0)
     }
 
-    /// Shift down free variable indices >= cutoff by `amount`.
-    /// TODO: Rewrite for SPtr refactoring. Currently stubbed.
-    pub fn push_shift_down_cutoff(&mut self, _e: ExprPtr<'t>, _amount: u16, _cutoff: u16) -> ExprPtr<'t> {
-        todo!("push_shift_down_cutoff: needs rewrite for SPtr refactoring")
+    /// Shift down with cutoff: subtract `amount` from free variable indices >= cutoff.
+    pub fn push_shift_down_cutoff(&mut self, e: ExprPtr<'t>, amount: u16, cutoff: u16) -> ExprPtr<'t> {
+        if amount == 0 { return e; }
+        let nlbv = self.num_loose_bvars(e);
+        if nlbv <= cutoff { return e; }
+        let cache_key = (e, amount, cutoff);
+        if let Some(&result) = self.expr_cache.shift_down_cache.get(&cache_key) {
+            return result;
+        }
+        let result = stacker::maybe_grow(64 * 1024, 2 * 1024 * 1024, || self.push_shift_down_inner(e, amount, cutoff));
+        self.expr_cache.shift_down_cache.insert(cache_key, result);
+        result
+    }
+
+    fn push_shift_down_inner(&mut self, e: ExprPtr<'t>, amount: u16, cutoff: u16) -> ExprPtr<'t> {
+        let nlbv = self.num_loose_bvars(e);
+        if nlbv <= cutoff { return e; }
+        match self.read_expr(e) {
+            Expr::Var { dbj_idx, .. } => {
+                if dbj_idx >= cutoff {
+                    debug_assert!(dbj_idx >= amount, "push_shift_down: Var({}) - {} underflow", dbj_idx, amount);
+                    self.mk_var(dbj_idx - amount).ptr
+                } else {
+                    e
+                }
+            }
+            Expr::App { fun, arg, .. } => {
+                let new_fun = self.push_shift_down_sptr(fun, amount, cutoff);
+                let new_arg = self.push_shift_down_sptr(arg, amount, cutoff);
+                self.mk_app(new_fun, new_arg).ptr
+            }
+            Expr::Pi { binder_name, binder_style, binder_type, body, .. } => {
+                let new_type = self.push_shift_down_sptr(binder_type, amount, cutoff);
+                let new_body = self.push_shift_down_sptr(body, amount, cutoff + 1);
+                self.mk_pi(binder_name, binder_style, new_type, new_body).ptr
+            }
+            Expr::Lambda { binder_name, binder_style, binder_type, body, .. } => {
+                let new_type = self.push_shift_down_sptr(binder_type, amount, cutoff);
+                let new_body = self.push_shift_down_sptr(body, amount, cutoff + 1);
+                self.mk_lambda(binder_name, binder_style, new_type, new_body).ptr
+            }
+            Expr::Let { binder_name, binder_type, val, body, nondep, .. } => {
+                let new_type = self.push_shift_down_sptr(binder_type, amount, cutoff);
+                let new_val = self.push_shift_down_sptr(val, amount, cutoff);
+                let new_body = self.push_shift_down_sptr(body, amount, cutoff + 1);
+                self.mk_let(binder_name, new_type, new_val, new_body, nondep).ptr
+            }
+            Expr::Proj { ty_name, idx, structure, .. } => {
+                let new_structure = self.push_shift_down_sptr(structure, amount, cutoff);
+                self.mk_proj(ty_name, idx, new_structure).ptr
+            }
+            Expr::Sort { .. } | Expr::Const { .. } | Expr::Local { .. }
+            | Expr::StringLit { .. } | Expr::NatLit { .. } => e,
+        }
+    }
+
+    /// Shift down an SPtr child: compose shift_down(amount, cutoff) with the child's SPtr shift.
+    fn push_shift_down_sptr(&mut self, child: SPtr<'t>, amount: u16, cutoff: u16) -> SPtr<'t> {
+        let child_nlbv = self.sptr_nlbv(child);
+        if child_nlbv <= cutoff { return child; }
+        // If child.shift >= cutoff and child.shift >= amount: uniform shift_down
+        if child.shift >= cutoff && child.shift >= amount {
+            return SPtr::new(child.ptr, child.shift - amount);
+        }
+        if child.shift == 0 {
+            let result = self.push_shift_down_cutoff(child.ptr, amount, cutoff);
+            return SPtr::unshifted(result);
+        }
+        // General case: view the SPtr and shift_down the viewed children
+        let viewed = self.view_sptr(child);
+        match viewed {
+            Expr::Var { dbj_idx, .. } => {
+                if dbj_idx >= cutoff {
+                    self.mk_var(dbj_idx - amount)
+                } else {
+                    self.mk_var(dbj_idx)
+                }
+            }
+            Expr::App { fun, arg, .. } => {
+                let new_fun = self.push_shift_down_sptr(fun, amount, cutoff);
+                let new_arg = self.push_shift_down_sptr(arg, amount, cutoff);
+                self.mk_app(new_fun, new_arg)
+            }
+            Expr::Pi { binder_name, binder_style, binder_type, body, .. } => {
+                let new_type = self.push_shift_down_sptr(binder_type, amount, cutoff);
+                let new_body = self.push_shift_down_sptr(body, amount, cutoff + 1);
+                self.mk_pi(binder_name, binder_style, new_type, new_body)
+            }
+            Expr::Lambda { binder_name, binder_style, binder_type, body, .. } => {
+                let new_type = self.push_shift_down_sptr(binder_type, amount, cutoff);
+                let new_body = self.push_shift_down_sptr(body, amount, cutoff + 1);
+                self.mk_lambda(binder_name, binder_style, new_type, new_body)
+            }
+            Expr::Let { binder_name, binder_type, val, body, nondep, .. } => {
+                let new_type = self.push_shift_down_sptr(binder_type, amount, cutoff);
+                let new_val = self.push_shift_down_sptr(val, amount, cutoff);
+                let new_body = self.push_shift_down_sptr(body, amount, cutoff + 1);
+                self.mk_let(binder_name, new_type, new_val, new_body, nondep)
+            }
+            Expr::Proj { ty_name, idx, structure, .. } => {
+                let new_structure = self.push_shift_down_sptr(structure, amount, cutoff);
+                self.mk_proj(ty_name, idx, new_structure)
+            }
+            _ => child, // closed
+        }
     }
 
 
