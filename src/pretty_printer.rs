@@ -531,17 +531,17 @@ impl<'x, 't, 'p> PrettyPrinter<'x, 't, 'p> {
         | Lambda { binder_name, binder_style, binder_type, body, .. } = self.ctx.read_expr(e)
         {
             let binder_type = self.ctx.inst(binder_type, binder_tys.as_slice());
-            let local = self.ctx.mk_unique(binder_name, binder_style, binder_type.ptr);
+            let local = self.ctx.mk_unique(binder_name, binder_style, binder_type.core);
             let is_pi = matches!(self.ctx.read_expr(e), Pi { .. });
             let is_anon = self.ctx.read_name(binder_name) == Name::Anon;
-            let has_var = self.ctx.has_var(body.ptr, 0);
-            let new_parsed_binder = self.mk_parsed_binder(is_pi, has_var, is_anon, local.ptr);
+            let has_var = self.ctx.has_var(body.core, 0);
+            let new_parsed_binder = self.mk_parsed_binder(is_pi, has_var, is_anon, local.core);
             binders.push(new_parsed_binder);
             binder_tys.push(local);
-            e = body.ptr;
+            e = body.core;
         }
         let instd = self.ctx.inst(SPtr::unshifted(e), binder_tys.as_slice());
-        (binders, instd.ptr)
+        (binders, instd.core)
     }
 
     /// `safe` in the sense that the name will be escaped if it doesn't follow the
@@ -614,7 +614,7 @@ impl<'x, 't, 'p> PrettyPrinter<'x, 't, 'p> {
     fn is_implicit_fun(&mut self, fun: ExprPtr<'t>) -> bool {
         self.ctx.with_tc(crate::env::EnvLimit::PpUnlimited, |tc| {
             let ty = tc.infer_then_whnf(SPtr::unshifted(fun), crate::tc::InferFlag::InferOnly);
-            match tc.ctx.read_expr(ty.ptr) {
+            match tc.ctx.read_expr(ty.core) {
                 Pi { binder_style, .. } => binder_style != BinderStyle::Default,
                 _ => false,
             }
@@ -632,9 +632,9 @@ impl<'x, 't, 'p> PrettyPrinter<'x, 't, 'p> {
     fn unfold_apps_pp(&mut self, e: ExprPtr<'t>) -> (ExprPtr<'t>, Vec<ExprPtr<'t>>) {
         match self.ctx.read_expr(e) {
             App { fun, arg, .. } => {
-                let (f, mut out) = self.unfold_apps_pp(fun.ptr);
-                if !(self.is_implicit_fun(fun.ptr) && !self.options().explicit) {
-                    out.push(arg.ptr);
+                let (f, mut out) = self.unfold_apps_pp(fun.core);
+                if !(self.is_implicit_fun(fun.core) && !self.options().explicit) {
+                    out.push(arg.core);
                 }
                 (f, out)
             }
@@ -712,7 +712,7 @@ impl<'x, 't, 'p> PrettyPrinter<'x, 't, 'p> {
     ) -> Parenable {
         let suggestion = self.ctx.mk_unique(binder_name, BinderStyle::Default, binder_type);
         let fresh_lc_name = binder_name;
-        let swapped_lc = self.ctx.swap_local_binding_name(suggestion.ptr, fresh_lc_name);
+        let swapped_lc = self.ctx.swap_local_binding_name(suggestion.core, fresh_lc_name);
         let (n, t) = match self.ctx.read_expr(swapped_lc) {
             Local { binder_name, binder_type, .. } => (binder_name, binder_type),
             _ => panic!(),
@@ -721,7 +721,7 @@ impl<'x, 't, 'p> PrettyPrinter<'x, 't, 'p> {
         let instd = self.ctx.inst(SPtr::unshifted(body), &[SPtr::unshifted(swapped_lc)]);
         let binder = self.pp_bare_binder(n, t).group();
         let val = self.pp_expr_aux(val).parens(0).group();
-        let body = self.pp_expr_aux(instd.ptr).parens(0);
+        let body = self.pp_expr_aux(instd.core).parens(0);
         DocPtr::from("let")
             .concat_w_space(binder)
             .concat_w_space(":=")
@@ -747,11 +747,11 @@ impl<'x, 't, 'p> PrettyPrinter<'x, 't, 'p> {
                     let new_inner = self.pp_expr_aux(instd);
                     self.pp_binders(binders.as_slice(), new_inner)
                 }
-                Let { binder_name, binder_type, val, body, .. } => self.pp_let(binder_name, binder_type.ptr, val.ptr, body.ptr),
+                Let { binder_name, binder_type, val, body, .. } => self.pp_let(binder_name, binder_type.core, val.core, body.core),
                 App { .. } => self.pp_app(e),
                 Proj { idx, structure, .. } => {
                     // Lean's pretty-printer for structure fields is 1-indexed
-                    self.pp_expr_aux(structure.ptr)
+                    self.pp_expr_aux(structure.core)
                         .parens(MAX_LEVEL)
                         .group()
                         .concat(DocPtr::from("."))
@@ -800,7 +800,7 @@ impl<'x, 't, 'p> PrettyPrinter<'x, 't, 'p> {
             match self.ctx.read_expr(val) {
                 Lambda { body, .. } if elem.can_factor_out() => {
                     slice_split_idx += 1;
-                    val = body.ptr;
+                    val = body.core;
                 }
                 _ => break,
             }
@@ -815,7 +815,7 @@ impl<'x, 't, 'p> PrettyPrinter<'x, 't, 'p> {
                 .concat(if is_prop && !self.options().proofs {
                     DocPtr::from("_")
                 } else {
-                    self.pp_expr_aux(instd.ptr).parens(0).group()
+                    self.pp_expr_aux(instd.core).parens(0).group()
                 })
                 .mk_nest(self.options().indent)
         };
@@ -903,12 +903,12 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         }
         match self.read_expr(e) {
             Var { dbj_idx, .. } => dbj_idx == i,
-            App { fun: a, arg: b, .. } => self.has_var(a.ptr, i) || self.has_var(b.ptr, i),
+            App { fun: a, arg: b, .. } => self.has_var(a.core, i) || self.has_var(b.core, i),
             Pi { binder_type, body, .. } | Lambda { binder_type, body, .. } =>
-                self.has_var(binder_type.ptr, i) || self.has_var(body.ptr, i + 1),
+                self.has_var(binder_type.core, i) || self.has_var(body.core, i + 1),
             Let { binder_type, val, body, .. } =>
-                self.has_var(binder_type.ptr, i) || self.has_var(val.ptr, i) || self.has_var(body.ptr, i + 1),
-            Proj { structure, .. } => self.has_var(structure.ptr, i),
+                self.has_var(binder_type.core, i) || self.has_var(val.core, i) || self.has_var(body.core, i + 1),
+            Proj { structure, .. } => self.has_var(structure.core, i),
             Sort { .. } | Const { .. } | NatLit { .. } | StringLit { .. } => false,
             Local { .. } => panic!(),
         }

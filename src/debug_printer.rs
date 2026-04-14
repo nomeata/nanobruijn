@@ -122,9 +122,9 @@ impl<'x, 't, 'p> std::fmt::Debug for DebugPrinter<'x, 't, 'p, SPtr<'t>> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let s = self.elem_to_print;
         if s.shift != 0 {
-            write!(f, "Shift({:?}, {})", self.ctx.debug_print(s.ptr), s.shift)
+            write!(f, "Shift({:?}, {})", self.ctx.debug_print(s.core), s.shift)
         } else {
-            write!(f, "{:?}", self.ctx.debug_print(s.ptr))
+            write!(f, "{:?}", self.ctx.debug_print(s.core))
         }
     }
 }

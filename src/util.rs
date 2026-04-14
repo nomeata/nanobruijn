@@ -86,7 +86,9 @@ pub type StringPtr<'a> = Ptr<&'a CowStr<'a>>;
 pub type LevelsPtr<'a> = Ptr<&'a Arc<[LevelPtr<'a>]>>;
 pub type NamePtr<'a> = Ptr<&'a Name<'a>>;
 pub type LevelPtr<'a> = Ptr<&'a Level<'a>>;
-pub type ExprPtr<'a> = Ptr<&'a Expr<'a>>;
+pub type CorePtr<'a> = Ptr<&'a Expr<'a>>;
+/// Backwards compatibility alias — use CorePtr for new code
+pub type ExprPtr<'a> = CorePtr<'a>;
 pub type BigUintPtr<'a> = Ptr<&'a BigUint>;
 
 /// Shifted pointer: a DAG pointer paired with a cutoff-0 shift amount.
@@ -96,29 +98,36 @@ pub type BigUintPtr<'a> = Ptr<&'a BigUint>;
 /// - Construction is pure value — zero DAG allocation
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SPtr<'a> {
-    pub ptr: ExprPtr<'a>,
+    pub core: CorePtr<'a>,
     pub shift: u16,
 }
 
 impl<'a> std::hash::Hash for SPtr<'a> {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        self.ptr.hash(state);
+        self.core.hash(state);
         self.shift.hash(state);
     }
 }
 
 impl<'a> SPtr<'a> {
-    /// Create an unshifted SPtr from an ExprPtr.
+    /// Create an unshifted SPtr from a CorePtr.
     #[inline(always)]
-    pub fn unshifted(ptr: ExprPtr<'a>) -> Self { Self { ptr, shift: 0 } }
+    pub fn unshifted(core: CorePtr<'a>) -> Self { Self { core, shift: 0 } }
 
     /// Create an SPtr with a given shift.
     #[inline(always)]
-    pub fn new(ptr: ExprPtr<'a>, shift: u16) -> Self { Self { ptr, shift } }
+    pub fn new(core: CorePtr<'a>, shift: u16) -> Self { Self { core, shift } }
 
-    /// Get the hash of the underlying ExprPtr (for cache lookups keyed by core ptr).
+    /// Get the hash of the underlying CorePtr (for cache lookups keyed by core ptr).
     #[inline(always)]
-    pub fn get_hash(&self) -> u64 { self.ptr.get_hash() }
+    pub fn get_hash(&self) -> u64 { self.core.get_hash() }
+
+    /// Shift this SPtr up by `amount`. Avoids adding shift to closed expressions.
+    #[inline(always)]
+    pub fn shift_up(self, amount: u16) -> Self {
+        if amount == 0 { return self; }
+        Self { core: self.core, shift: self.shift + amount }
+    }
 }
 
 pub type AppArgs<'a> = SmallVec<[SPtr<'a>; 8]>;
@@ -827,21 +836,21 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
                 format!("C({})", short)
             }
             Expr::App { fun, arg, .. } => {
-                format!("App({}+{},{}+{})", self.expr_desc(fun.ptr, max_depth - 1), fun.shift, self.expr_desc(arg.ptr, max_depth - 1), arg.shift)
+                format!("App({}+{},{}+{})", self.expr_desc(fun.core, max_depth - 1), fun.shift, self.expr_desc(arg.core, max_depth - 1), arg.shift)
             }
             Expr::Pi { binder_type, body, .. } => {
-                format!("Pi({}+{},{}+{})", self.expr_desc(binder_type.ptr, max_depth - 1), binder_type.shift, self.expr_desc(body.ptr, max_depth - 1), body.shift)
+                format!("Pi({}+{},{}+{})", self.expr_desc(binder_type.core, max_depth - 1), binder_type.shift, self.expr_desc(body.core, max_depth - 1), body.shift)
             }
             Expr::Lambda { binder_type, body, .. } => {
-                format!("Lam({}+{},{}+{})", self.expr_desc(binder_type.ptr, max_depth - 1), binder_type.shift, self.expr_desc(body.ptr, max_depth - 1), body.shift)
+                format!("Lam({}+{},{}+{})", self.expr_desc(binder_type.core, max_depth - 1), binder_type.shift, self.expr_desc(body.core, max_depth - 1), body.shift)
             }
             Expr::Let { val, body, .. } => {
-                format!("Let({}+{},{}+{})", self.expr_desc(val.ptr, max_depth - 1), val.shift, self.expr_desc(body.ptr, max_depth - 1), body.shift)
+                format!("Let({}+{},{}+{})", self.expr_desc(val.core, max_depth - 1), val.shift, self.expr_desc(body.core, max_depth - 1), body.shift)
             }
             Expr::Proj { ty_name, idx, structure, .. } => {
                 let n = self.name_to_string(ty_name);
                 let short = n.rsplit('.').next().unwrap_or(&n);
-                format!("Proj({}.{},{}+{})", short, idx, self.expr_desc(structure.ptr, max_depth - 1), structure.shift)
+                format!("Proj({}.{},{}+{})", short, idx, self.expr_desc(structure.core, max_depth - 1), structure.shift)
             }
             Expr::Local { .. } => "Local".to_string(),
             Expr::NatLit { ptr, .. } => format!("NatLit({})", self.read_bignum(ptr).map(|n| n.to_string()).unwrap_or("?".into())),
@@ -852,9 +861,9 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
     /// Compact SPtr descriptor for diagnostics.
     pub fn sptr_desc(&self, s: SPtr<'t>, max_depth: u32) -> String {
         if s.shift == 0 {
-            self.expr_desc(s.ptr, max_depth)
+            self.expr_desc(s.core, max_depth)
         } else {
-            format!("{}+{}", self.expr_desc(s.ptr, max_depth), s.shift)
+            format!("{}+{}", self.expr_desc(s.core, max_depth), s.shift)
         }
     }
 
@@ -947,7 +956,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
     /// sptr_nlbv(SPtr(ptr, s)) = if dag_nlbv[ptr] == 0 { 0 } else { dag_nlbv[ptr] + s }
     #[inline(always)]
     pub fn sptr_nlbv(&self, s: SPtr<'t>) -> u16 {
-        let core_nlbv = self.num_loose_bvars(s.ptr);
+        let core_nlbv = self.num_loose_bvars(s.core);
         if core_nlbv == 0 { 0 } else { core_nlbv + s.shift }
     }
 
@@ -1006,13 +1015,13 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
             else { fun.shift.min(arg.shift) };
         // Adjust children by subtracting min_shift (only for open children)
         // Normalize closed children's shifts to 0 (shift is irrelevant for closed expressions)
-        let adj_fun = if fun_nlbv == 0 { SPtr::unshifted(fun.ptr) } else { SPtr::new(fun.ptr, fun.shift - min_shift) };
-        let adj_arg = if arg_nlbv == 0 { SPtr::unshifted(arg.ptr) } else { SPtr::new(arg.ptr, arg.shift - min_shift) };
+        let adj_fun = if fun_nlbv == 0 { SPtr::unshifted(fun.core) } else { SPtr::new(fun.core, fun.shift - min_shift) };
+        let adj_arg = if arg_nlbv == 0 { SPtr::unshifted(arg.core) } else { SPtr::new(arg.core, arg.shift - min_shift) };
         // Compute core nlbv and has_fvars
         let adj_fun_nlbv = self.sptr_nlbv(adj_fun);
         let adj_arg_nlbv = self.sptr_nlbv(adj_arg);
         let core_nlbv = adj_fun_nlbv.max(adj_arg_nlbv);
-        let has_fvars = self.has_fvars(fun.ptr) || self.has_fvars(arg.ptr);
+        let has_fvars = self.has_fvars(fun.core) || self.has_fvars(arg.core);
         let hash = hash64!(crate::expr::APP_HASH, adj_fun, adj_arg);
         let app_expr = Expr::App { fun: adj_fun, arg: adj_arg, num_loose_bvars: core_nlbv, has_fvars, hash };
         let core = self.alloc_expr(app_expr);
@@ -1053,20 +1062,20 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         // (body_nlbv == 1 means only bvar 0, which is bound by this lambda)
         let min_shift = self.binder_min_shift(ty_nlbv, binder_type.shift, body_nlbv, body.shift);
         // Adjust children
-        let adj_ty = if ty_nlbv == 0 { SPtr::unshifted(binder_type.ptr) } else { SPtr::new(binder_type.ptr, binder_type.shift - min_shift) };
+        let adj_ty = if ty_nlbv == 0 { SPtr::unshifted(binder_type.core) } else { SPtr::new(binder_type.core, binder_type.shift - min_shift) };
         // Body adjustment: only adjust if body contributes (body_nlbv > 1).
         // When body_nlbv <= 1 (only Var(0) or closed), body is unaffected by outer shift extraction.
         let adj_body = if body_nlbv > 1 {
-            SPtr::new(body.ptr, body.shift - min_shift)
+            SPtr::new(body.core, body.shift - min_shift)
         } else if body_nlbv == 0 {
-            SPtr::unshifted(body.ptr) // closed, normalize shift to 0
+            SPtr::unshifted(body.core) // closed, normalize shift to 0
         } else {
             body // body_nlbv == 1: only Var(0), shift should be 0 already
         };
         let adj_ty_nlbv = self.sptr_nlbv(adj_ty);
         let adj_body_nlbv = self.sptr_nlbv(adj_body);
         let core_nlbv = adj_ty_nlbv.max(adj_body_nlbv.saturating_sub(1));
-        let has_fvars = self.has_fvars(binder_type.ptr) || self.has_fvars(body.ptr);
+        let has_fvars = self.has_fvars(binder_type.core) || self.has_fvars(body.core);
         let hash = hash64!(crate::expr::LAMBDA_HASH, binder_name, binder_style, adj_ty, adj_body);
         let lambda_expr = Expr::Lambda { binder_name, binder_style, binder_type: adj_ty, body: adj_body, num_loose_bvars: core_nlbv, has_fvars, hash };
         let core = self.alloc_expr(lambda_expr);
@@ -1090,18 +1099,18 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         let ty_nlbv = self.sptr_nlbv(binder_type);
         let body_nlbv = self.sptr_nlbv(body);
         let min_shift = self.binder_min_shift(ty_nlbv, binder_type.shift, body_nlbv, body.shift);
-        let adj_ty = if ty_nlbv == 0 { SPtr::unshifted(binder_type.ptr) } else { SPtr::new(binder_type.ptr, binder_type.shift - min_shift) };
+        let adj_ty = if ty_nlbv == 0 { SPtr::unshifted(binder_type.core) } else { SPtr::new(binder_type.core, binder_type.shift - min_shift) };
         let adj_body = if body_nlbv > 1 {
-            SPtr::new(body.ptr, body.shift - min_shift)
+            SPtr::new(body.core, body.shift - min_shift)
         } else if body_nlbv == 0 {
-            SPtr::unshifted(body.ptr) // closed, normalize shift to 0
+            SPtr::unshifted(body.core) // closed, normalize shift to 0
         } else {
             body // body_nlbv == 1: only Var(0), shift should be 0 already
         };
         let adj_ty_nlbv = self.sptr_nlbv(adj_ty);
         let adj_body_nlbv = self.sptr_nlbv(adj_body);
         let core_nlbv = adj_ty_nlbv.max(adj_body_nlbv.saturating_sub(1));
-        let has_fvars = self.has_fvars(binder_type.ptr) || self.has_fvars(body.ptr);
+        let has_fvars = self.has_fvars(binder_type.core) || self.has_fvars(body.core);
         let hash = hash64!(crate::expr::PI_HASH, binder_name, binder_style, adj_ty, adj_body);
         let pi_expr = Expr::Pi { binder_name, binder_style, binder_type: adj_ty, body: adj_body, num_loose_bvars: core_nlbv, has_fvars, hash };
         let core = self.alloc_expr(pi_expr);
@@ -1131,13 +1140,13 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
             min_shift = min_shift.min(body.shift.saturating_sub(1));
         }
         if min_shift == u16::MAX { min_shift = 0; }
-        let adj_ty = if ty_nlbv == 0 { SPtr::unshifted(binder_type.ptr) } else { SPtr::new(binder_type.ptr, binder_type.shift - min_shift) };
-        let adj_val = if val_nlbv == 0 { SPtr::unshifted(val.ptr) } else { SPtr::new(val.ptr, val.shift - min_shift) };
+        let adj_ty = if ty_nlbv == 0 { SPtr::unshifted(binder_type.core) } else { SPtr::new(binder_type.core, binder_type.shift - min_shift) };
+        let adj_val = if val_nlbv == 0 { SPtr::unshifted(val.core) } else { SPtr::new(val.core, val.shift - min_shift) };
         // Body: adjust only when it contributes (body_nlbv > 1)
         let adj_body = if body_nlbv > 1 {
-            SPtr::new(body.ptr, body.shift - min_shift)
+            SPtr::new(body.core, body.shift - min_shift)
         } else if body_nlbv == 0 {
-            SPtr::unshifted(body.ptr) // closed, normalize shift to 0
+            SPtr::unshifted(body.core) // closed, normalize shift to 0
         } else {
             body // body_nlbv == 1: only Var(0), shift should be 0 already
         };
@@ -1145,7 +1154,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         let adj_val_nlbv = self.sptr_nlbv(adj_val);
         let adj_body_nlbv = self.sptr_nlbv(adj_body);
         let core_nlbv = adj_ty_nlbv.max(adj_val_nlbv.max(adj_body_nlbv.saturating_sub(1)));
-        let has_fvars = self.has_fvars(binder_type.ptr) || self.has_fvars(val.ptr) || self.has_fvars(body.ptr);
+        let has_fvars = self.has_fvars(binder_type.core) || self.has_fvars(val.core) || self.has_fvars(body.core);
         let hash = hash64!(crate::expr::LET_HASH, binder_name, adj_ty, adj_val, adj_body, nondep);
         let let_expr = Expr::Let { binder_name, binder_type: adj_ty, val: adj_val, body: adj_body, num_loose_bvars: core_nlbv, has_fvars, hash, nondep };
         let core = self.alloc_expr(let_expr);
@@ -1156,9 +1165,9 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         self.trace.alloc_mk_proj += 1;
         let s_nlbv = self.sptr_nlbv(structure);
         let min_shift = if s_nlbv == 0 { 0 } else { structure.shift };
-        let adj_s = if s_nlbv == 0 { SPtr::unshifted(structure.ptr) } else { SPtr::new(structure.ptr, structure.shift - min_shift) };
+        let adj_s = if s_nlbv == 0 { SPtr::unshifted(structure.core) } else { SPtr::new(structure.core, structure.shift - min_shift) };
         let adj_s_nlbv = self.sptr_nlbv(adj_s);
-        let has_fvars = self.has_fvars(structure.ptr);
+        let has_fvars = self.has_fvars(structure.core);
         let hash = hash64!(crate::expr::PROJ_HASH, ty_name, idx, adj_s);
         let proj_expr = Expr::Proj { ty_name, idx, structure: adj_s, num_loose_bvars: adj_s_nlbv, has_fvars, hash };
         let core = self.alloc_expr(proj_expr);
@@ -1243,7 +1252,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
     /// Decrement the deBruijn level counter when closing a binder.
     pub(crate) fn replace_dbj_level(&mut self, e: SPtr<'t>) {
         debug_assert_eq!(e.shift, 0, "replace_dbj_level: expected unshifted SPtr");
-        match self.read_expr(e.ptr) {
+        match self.read_expr(e.core) {
             Expr::Local { id: FVarId::DbjLevel(level), .. } => {
                 debug_assert_eq!(level + 1, self.dbj_level_counter);
                 self.dbj_level_counter -= 1;
@@ -1269,7 +1278,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         let new_shift = e.shift.checked_add(amount).expect(&format!(
             "push_shift_up: shift overflow {}+{}", e.shift, amount));
         debug_assert!(new_shift < 10000, "push_shift_up: suspiciously large shift {}", new_shift);
-        SPtr::new(e.ptr, new_shift)
+        SPtr::new(e.core, new_shift)
     }
 
     /// Shift down: subtract `amount` from all free variable indices in the core expression.
@@ -1298,7 +1307,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
             Expr::Var { dbj_idx, .. } => {
                 if dbj_idx >= cutoff {
                     debug_assert!(dbj_idx >= amount, "push_shift_down: Var({}) - {} underflow", dbj_idx, amount);
-                    self.mk_var(dbj_idx - amount).ptr
+                    self.mk_var(dbj_idx - amount).core
                 } else {
                     e
                 }
@@ -1306,27 +1315,27 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
             Expr::App { fun, arg, .. } => {
                 let new_fun = self.push_shift_down_sptr(fun, amount, cutoff);
                 let new_arg = self.push_shift_down_sptr(arg, amount, cutoff);
-                self.mk_app(new_fun, new_arg).ptr
+                self.mk_app(new_fun, new_arg).core
             }
             Expr::Pi { binder_name, binder_style, binder_type, body, .. } => {
                 let new_type = self.push_shift_down_sptr(binder_type, amount, cutoff);
                 let new_body = self.push_shift_down_sptr(body, amount, cutoff + 1);
-                self.mk_pi(binder_name, binder_style, new_type, new_body).ptr
+                self.mk_pi(binder_name, binder_style, new_type, new_body).core
             }
             Expr::Lambda { binder_name, binder_style, binder_type, body, .. } => {
                 let new_type = self.push_shift_down_sptr(binder_type, amount, cutoff);
                 let new_body = self.push_shift_down_sptr(body, amount, cutoff + 1);
-                self.mk_lambda(binder_name, binder_style, new_type, new_body).ptr
+                self.mk_lambda(binder_name, binder_style, new_type, new_body).core
             }
             Expr::Let { binder_name, binder_type, val, body, nondep, .. } => {
                 let new_type = self.push_shift_down_sptr(binder_type, amount, cutoff);
                 let new_val = self.push_shift_down_sptr(val, amount, cutoff);
                 let new_body = self.push_shift_down_sptr(body, amount, cutoff + 1);
-                self.mk_let(binder_name, new_type, new_val, new_body, nondep).ptr
+                self.mk_let(binder_name, new_type, new_val, new_body, nondep).core
             }
             Expr::Proj { ty_name, idx, structure, .. } => {
                 let new_structure = self.push_shift_down_sptr(structure, amount, cutoff);
-                self.mk_proj(ty_name, idx, new_structure).ptr
+                self.mk_proj(ty_name, idx, new_structure).core
             }
             Expr::Sort { .. } | Expr::Const { .. } | Expr::Local { .. }
             | Expr::StringLit { .. } | Expr::NatLit { .. } => e,
@@ -1339,10 +1348,10 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         if child_nlbv <= cutoff { return child; }
         // If child.shift >= cutoff and child.shift >= amount: uniform shift_down
         if child.shift >= cutoff && child.shift >= amount {
-            return SPtr::new(child.ptr, child.shift - amount);
+            return SPtr::new(child.core, child.shift - amount);
         }
         if child.shift == 0 {
-            let result = self.push_shift_down_cutoff(child.ptr, amount, cutoff);
+            let result = self.push_shift_down_cutoff(child.core, amount, cutoff);
             return SPtr::unshifted(result);
         }
         // General case: view the SPtr and shift_down the viewed children
@@ -1391,9 +1400,9 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
     /// Children of the returned Expr are SPtr values with adjusted shifts.
     pub fn view_sptr(&mut self, s: SPtr<'t>) -> Expr<'t> {
         if s.shift == 0 {
-            return self.read_expr(s.ptr);
+            return self.read_expr(s.core);
         }
-        let expr = self.read_expr(s.ptr);
+        let expr = self.read_expr(s.core);
         let amount = s.shift;
         match expr {
             // Closed types: shift is irrelevant
@@ -1406,8 +1415,8 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
                 Expr::Var { dbj_idx: new_idx, hash }
             }
             Expr::App { fun, arg, has_fvars, .. } => {
-                let new_fun = SPtr::new(fun.ptr, fun.shift + amount);
-                let new_arg = SPtr::new(arg.ptr, arg.shift + amount);
+                let new_fun = SPtr::new(fun.core, fun.shift + amount);
+                let new_arg = SPtr::new(arg.core, arg.shift + amount);
                 let fun_nlbv = self.sptr_nlbv(new_fun);
                 let arg_nlbv = self.sptr_nlbv(new_arg);
                 let num_loose_bvars = fun_nlbv.max(arg_nlbv);
@@ -1415,14 +1424,14 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
                 Expr::App { fun: new_fun, arg: new_arg, num_loose_bvars, has_fvars, hash }
             }
             Expr::Pi { binder_name, binder_style, binder_type, body, has_fvars, .. } => {
-                let new_type = SPtr::new(binder_type.ptr, binder_type.shift + amount);
+                let new_type = SPtr::new(binder_type.core, binder_type.shift + amount);
                 // Body is under a binder (cutoff=1). Compose shift(body_sptr, amount, cutoff=1):
                 // If body.shift >= 1: all vars in body are >= 1, cutoff=1 doesn't block => add amount
-                // If body.shift == 0: need shift_expr(body.ptr, amount, 1)
+                // If body.shift == 0: need shift_expr(body.core, amount, 1)
                 let new_body = if body.shift >= 1 {
-                    SPtr::new(body.ptr, body.shift + amount)
+                    SPtr::new(body.core, body.shift + amount)
                 } else {
-                    self.shift_expr(body.ptr, amount, 1)
+                    self.shift_expr(body.core, amount, 1)
                 };
                 let ty_nlbv = self.sptr_nlbv(new_type);
                 let body_nlbv = self.sptr_nlbv(new_body);
@@ -1431,11 +1440,11 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
                 Expr::Pi { binder_name, binder_style, binder_type: new_type, body: new_body, num_loose_bvars, has_fvars, hash }
             }
             Expr::Lambda { binder_name, binder_style, binder_type, body, has_fvars, .. } => {
-                let new_type = SPtr::new(binder_type.ptr, binder_type.shift + amount);
+                let new_type = SPtr::new(binder_type.core, binder_type.shift + amount);
                 let new_body = if body.shift >= 1 {
-                    SPtr::new(body.ptr, body.shift + amount)
+                    SPtr::new(body.core, body.shift + amount)
                 } else {
-                    self.shift_expr(body.ptr, amount, 1)
+                    self.shift_expr(body.core, amount, 1)
                 };
                 let ty_nlbv = self.sptr_nlbv(new_type);
                 let body_nlbv = self.sptr_nlbv(new_body);
@@ -1444,12 +1453,12 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
                 Expr::Lambda { binder_name, binder_style, binder_type: new_type, body: new_body, num_loose_bvars, has_fvars, hash }
             }
             Expr::Let { binder_name, binder_type, val, body, nondep, has_fvars, .. } => {
-                let new_type = SPtr::new(binder_type.ptr, binder_type.shift + amount);
-                let new_val = SPtr::new(val.ptr, val.shift + amount);
+                let new_type = SPtr::new(binder_type.core, binder_type.shift + amount);
+                let new_val = SPtr::new(val.core, val.shift + amount);
                 let new_body = if body.shift >= 1 {
-                    SPtr::new(body.ptr, body.shift + amount)
+                    SPtr::new(body.core, body.shift + amount)
                 } else {
-                    self.shift_expr(body.ptr, amount, 1)
+                    self.shift_expr(body.core, amount, 1)
                 };
                 let ty_nlbv = self.sptr_nlbv(new_type);
                 let val_nlbv = self.sptr_nlbv(new_val);
@@ -1459,7 +1468,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
                 Expr::Let { binder_name, binder_type: new_type, val: new_val, body: new_body, num_loose_bvars, has_fvars, hash, nondep }
             }
             Expr::Proj { ty_name, idx, structure, has_fvars, .. } => {
-                let new_s = SPtr::new(structure.ptr, structure.shift + amount);
+                let new_s = SPtr::new(structure.core, structure.shift + amount);
                 let s_nlbv = self.sptr_nlbv(new_s);
                 let hash = hash64!(crate::expr::PROJ_HASH, ty_name, idx, new_s);
                 Expr::Proj { ty_name, idx, structure: new_s, num_loose_bvars: s_nlbv, has_fvars, hash }

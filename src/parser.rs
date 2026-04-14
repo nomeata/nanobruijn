@@ -655,8 +655,8 @@ impl<'a, R: BufRead> Parser<'a, R> {
                 let arg_sptr = self.get_expr_sptr(arg);
                 // Effective nlbv for an SPtr child:
                 // if core nlbv == 0 then 0, else core_nlbv + shift
-                let fun_core_nlbv = self.num_loose_bvars(fun_sptr.ptr);
-                let arg_core_nlbv = self.num_loose_bvars(arg_sptr.ptr);
+                let fun_core_nlbv = self.num_loose_bvars(fun_sptr.core);
+                let arg_core_nlbv = self.num_loose_bvars(arg_sptr.core);
                 let fun_eff_nlbv = if fun_core_nlbv == 0 { 0 } else { fun_core_nlbv + fun_sptr.shift };
                 let arg_eff_nlbv = if arg_core_nlbv == 0 { 0 } else { arg_core_nlbv + arg_sptr.shift };
                 // Compute min_shift from open children for OSNF
@@ -666,12 +666,12 @@ impl<'a, R: BufRead> Parser<'a, R> {
                     else { fun_sptr.shift.min(arg_sptr.shift) };
                 if min_shift > 0 { self.osnf_count += 1; }
                 // Build core children with min_shift subtracted (only for open children)
-                let core_fun = if fun_eff_nlbv == 0 { fun_sptr } else { SPtr::new(fun_sptr.ptr, fun_sptr.shift - min_shift) };
-                let core_arg = if arg_eff_nlbv == 0 { arg_sptr } else { SPtr::new(arg_sptr.ptr, arg_sptr.shift - min_shift) };
+                let core_fun = if fun_eff_nlbv == 0 { fun_sptr } else { SPtr::new(fun_sptr.core, fun_sptr.shift - min_shift) };
+                let core_arg = if arg_eff_nlbv == 0 { arg_sptr } else { SPtr::new(arg_sptr.core, arg_sptr.shift - min_shift) };
                 let core_fun_nlbv = if fun_core_nlbv == 0 { 0 } else { fun_core_nlbv + core_fun.shift };
                 let core_arg_nlbv = if arg_core_nlbv == 0 { 0 } else { arg_core_nlbv + core_arg.shift };
                 let core_nlbv = core_fun_nlbv.max(core_arg_nlbv);
-                let locals = self.has_fvars_ptr(fun_sptr.ptr) || self.has_fvars_ptr(arg_sptr.ptr);
+                let locals = self.has_fvars_ptr(fun_sptr.core) || self.has_fvars_ptr(arg_sptr.core);
                 let hash = hash64!(crate::expr::APP_HASH, core_fun, core_arg);
                 let (core_idx, _) = self.insert_expr(Expr::App {
                     fun: core_fun, arg: core_arg, num_loose_bvars: core_nlbv,
@@ -688,8 +688,8 @@ impl<'a, R: BufRead> Parser<'a, R> {
                 let binder_name = self.get_name_ptr(binder_name);
                 let ty_sptr = self.get_expr_sptr(binder_type);
                 let body_sptr = self.get_expr_sptr(body);
-                let ty_core_nlbv = self.num_loose_bvars(ty_sptr.ptr);
-                let body_core_nlbv = self.num_loose_bvars(body_sptr.ptr);
+                let ty_core_nlbv = self.num_loose_bvars(ty_sptr.core);
+                let body_core_nlbv = self.num_loose_bvars(body_sptr.core);
                 let ty_eff_nlbv = if ty_core_nlbv == 0 { 0 } else { ty_core_nlbv + ty_sptr.shift };
                 let body_eff_nlbv = if body_core_nlbv == 0 { 0 } else { body_core_nlbv + body_sptr.shift };
                 // For binder body: outer contribution is body_eff_nlbv.saturating_sub(1)
@@ -710,12 +710,12 @@ impl<'a, R: BufRead> Parser<'a, R> {
                 };
                 if min_shift > 0 { self.osnf_count += 1; }
                 // Build core children: only adjust shifts for open children that contributed
-                let core_ty = if ty_eff_nlbv == 0 { ty_sptr } else { SPtr::new(ty_sptr.ptr, ty_sptr.shift - min_shift) };
-                let core_body = if body_eff_nlbv > 1 { SPtr::new(body_sptr.ptr, body_sptr.shift - min_shift) } else { body_sptr };
+                let core_ty = if ty_eff_nlbv == 0 { ty_sptr } else { SPtr::new(ty_sptr.core, ty_sptr.shift - min_shift) };
+                let core_body = if body_eff_nlbv > 1 { SPtr::new(body_sptr.core, body_sptr.shift - min_shift) } else { body_sptr };
                 let core_ty_nlbv = if ty_core_nlbv == 0 { 0 } else { ty_core_nlbv + core_ty.shift };
                 let core_body_nlbv = if body_core_nlbv == 0 { 0 } else { body_core_nlbv + core_body.shift };
                 let core_nlbv = core_ty_nlbv.max(core_body_nlbv.saturating_sub(1));
-                let locals = self.has_fvars_ptr(ty_sptr.ptr) || self.has_fvars_ptr(body_sptr.ptr);
+                let locals = self.has_fvars_ptr(ty_sptr.core) || self.has_fvars_ptr(body_sptr.core);
                 let hash = hash64!(crate::expr::LAMBDA_HASH, binder_name, binder_info, core_ty, core_body);
                 let (core_idx, _) = self.insert_expr(Expr::Lambda {
                     binder_name, binder_style: binder_info, binder_type: core_ty, body: core_body,
@@ -727,8 +727,8 @@ impl<'a, R: BufRead> Parser<'a, R> {
                 let binder_name = self.get_name_ptr(binder_name);
                 let ty_sptr = self.get_expr_sptr(binder_type);
                 let body_sptr = self.get_expr_sptr(body);
-                let ty_core_nlbv = self.num_loose_bvars(ty_sptr.ptr);
-                let body_core_nlbv = self.num_loose_bvars(body_sptr.ptr);
+                let ty_core_nlbv = self.num_loose_bvars(ty_sptr.core);
+                let body_core_nlbv = self.num_loose_bvars(body_sptr.core);
                 let ty_eff_nlbv = if ty_core_nlbv == 0 { 0 } else { ty_core_nlbv + ty_sptr.shift };
                 let body_eff_nlbv = if body_core_nlbv == 0 { 0 } else { body_core_nlbv + body_sptr.shift };
                 let body_outer_shift = if body_eff_nlbv <= 1 { None }
@@ -740,12 +740,12 @@ impl<'a, R: BufRead> Parser<'a, R> {
                     (true, Some(bs)) => ty_sptr.shift.min(bs),
                 };
                 if min_shift > 0 { self.osnf_count += 1; }
-                let core_ty = if ty_eff_nlbv == 0 { ty_sptr } else { SPtr::new(ty_sptr.ptr, ty_sptr.shift - min_shift) };
-                let core_body = if body_eff_nlbv > 1 { SPtr::new(body_sptr.ptr, body_sptr.shift - min_shift) } else { body_sptr };
+                let core_ty = if ty_eff_nlbv == 0 { ty_sptr } else { SPtr::new(ty_sptr.core, ty_sptr.shift - min_shift) };
+                let core_body = if body_eff_nlbv > 1 { SPtr::new(body_sptr.core, body_sptr.shift - min_shift) } else { body_sptr };
                 let core_ty_nlbv = if ty_core_nlbv == 0 { 0 } else { ty_core_nlbv + core_ty.shift };
                 let core_body_nlbv = if body_core_nlbv == 0 { 0 } else { body_core_nlbv + core_body.shift };
                 let core_nlbv = core_ty_nlbv.max(core_body_nlbv.saturating_sub(1));
-                let locals = self.has_fvars_ptr(ty_sptr.ptr) || self.has_fvars_ptr(body_sptr.ptr);
+                let locals = self.has_fvars_ptr(ty_sptr.core) || self.has_fvars_ptr(body_sptr.core);
                 let hash = hash64!(crate::expr::PI_HASH, binder_name, binder_info, core_ty, core_body);
                 let (core_idx, _) = self.insert_expr(Expr::Pi {
                     binder_name, binder_style: binder_info, binder_type: core_ty, body: core_body,
@@ -758,9 +758,9 @@ impl<'a, R: BufRead> Parser<'a, R> {
                 let ty_sptr = self.get_expr_sptr(ty);
                 let val_sptr = self.get_expr_sptr(value);
                 let body_sptr = self.get_expr_sptr(body);
-                let ty_core_nlbv = self.num_loose_bvars(ty_sptr.ptr);
-                let val_core_nlbv = self.num_loose_bvars(val_sptr.ptr);
-                let body_core_nlbv = self.num_loose_bvars(body_sptr.ptr);
+                let ty_core_nlbv = self.num_loose_bvars(ty_sptr.core);
+                let val_core_nlbv = self.num_loose_bvars(val_sptr.core);
+                let body_core_nlbv = self.num_loose_bvars(body_sptr.core);
                 let ty_eff_nlbv = if ty_core_nlbv == 0 { 0 } else { ty_core_nlbv + ty_sptr.shift };
                 let val_eff_nlbv = if val_core_nlbv == 0 { 0 } else { val_core_nlbv + val_sptr.shift };
                 let body_eff_nlbv = if body_core_nlbv == 0 { 0 } else { body_core_nlbv + body_sptr.shift };
@@ -774,14 +774,14 @@ impl<'a, R: BufRead> Parser<'a, R> {
                 if let Some(bs) = body_outer_shift { min_shift = min_shift.min(bs); }
                 if min_shift == u16::MAX { min_shift = 0; }
                 if min_shift > 0 { self.osnf_count += 1; }
-                let core_ty = if ty_eff_nlbv == 0 { ty_sptr } else { SPtr::new(ty_sptr.ptr, ty_sptr.shift - min_shift) };
-                let core_val = if val_eff_nlbv == 0 { val_sptr } else { SPtr::new(val_sptr.ptr, val_sptr.shift - min_shift) };
-                let core_body = if body_eff_nlbv > 1 { SPtr::new(body_sptr.ptr, body_sptr.shift - min_shift) } else { body_sptr };
+                let core_ty = if ty_eff_nlbv == 0 { ty_sptr } else { SPtr::new(ty_sptr.core, ty_sptr.shift - min_shift) };
+                let core_val = if val_eff_nlbv == 0 { val_sptr } else { SPtr::new(val_sptr.core, val_sptr.shift - min_shift) };
+                let core_body = if body_eff_nlbv > 1 { SPtr::new(body_sptr.core, body_sptr.shift - min_shift) } else { body_sptr };
                 let core_ty_nlbv = if ty_core_nlbv == 0 { 0 } else { ty_core_nlbv + core_ty.shift };
                 let core_val_nlbv = if val_core_nlbv == 0 { 0 } else { val_core_nlbv + core_val.shift };
                 let core_body_nlbv = if body_core_nlbv == 0 { 0 } else { body_core_nlbv + core_body.shift };
                 let core_nlbv = core_ty_nlbv.max(core_val_nlbv.max(core_body_nlbv.saturating_sub(1)));
-                let locals = self.has_fvars_ptr(ty_sptr.ptr) || self.has_fvars_ptr(val_sptr.ptr) || self.has_fvars_ptr(body_sptr.ptr);
+                let locals = self.has_fvars_ptr(ty_sptr.core) || self.has_fvars_ptr(val_sptr.core) || self.has_fvars_ptr(body_sptr.core);
                 let hash = hash64!(crate::expr::LET_HASH, binder_name, core_ty, core_val, core_body, nondep);
                 let (core_idx, _) = self.insert_expr(Expr::Let {
                     binder_name,
@@ -798,13 +798,13 @@ impl<'a, R: BufRead> Parser<'a, R> {
             ExprProj {type_name, idx, structure: struct_} => {
                 let ty_name = self.get_name_ptr(type_name);
                 let struct_sptr = self.get_expr_sptr(struct_);
-                let struct_core_nlbv = self.num_loose_bvars(struct_sptr.ptr);
+                let struct_core_nlbv = self.num_loose_bvars(struct_sptr.core);
                 let struct_eff_nlbv = if struct_core_nlbv == 0 { 0 } else { struct_core_nlbv + struct_sptr.shift };
                 let min_shift = if struct_eff_nlbv == 0 { 0 } else { struct_sptr.shift };
                 if min_shift > 0 { self.osnf_count += 1; }
-                let core_struct = SPtr::new(struct_sptr.ptr, struct_sptr.shift - min_shift);
+                let core_struct = SPtr::new(struct_sptr.core, struct_sptr.shift - min_shift);
                 let core_struct_nlbv = if struct_core_nlbv == 0 { 0 } else { struct_core_nlbv + core_struct.shift };
-                let locals = self.has_fvars_ptr(struct_sptr.ptr);
+                let locals = self.has_fvars_ptr(struct_sptr.core);
                 let hash = hash64!(crate::expr::PROJ_HASH, ty_name, idx, core_struct);
                 let (core_idx, _) = self.insert_expr(Expr::Proj {
                     ty_name,

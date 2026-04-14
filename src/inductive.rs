@@ -309,7 +309,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                     self.get_local_params(adjusted_ctor.ty, u16::try_from(st.local_params.len()).unwrap());
                 let replaced_ctor_wo_params = self.replace_all_nested(ctor_type_instd, st, &ctor_local_params);
                 let replaced_ctor_w_params =
-                    self.ctx.abstr_pis(ctor_local_params.iter().copied(), replaced_ctor_wo_params).ptr;
+                    self.ctx.abstr_pis(ctor_local_params.iter().copied(), replaced_ctor_wo_params).core;
                 assert!(!self.ctx.read_expr(replaced_ctor_w_params).has_fvars());
                 // Push the constructor with the params put back, free variables abstracted,
                 // and ococurrences of nested inductives replaced with specialized types.
@@ -329,7 +329,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         st.nested_to_unspecialized_ty_nofvars = {
             let mut out = crate::util::new_fx_index_map();
             for (n, e) in st.nested_to_unspecialized_ty_wfvars.iter() {
-                let e = self.ctx.abstr(*e, st.local_params.as_slice()).ptr;
+                let e = self.ctx.abstr(*e, st.local_params.as_slice()).core;
                 out.insert(*n, e);
             }
             out
@@ -345,10 +345,10 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         for _ in 0..num_params {
             match self.ctx.view_sptr(cursor) {
                 Pi { binder_name, binder_style, binder_type, body, .. } => {
-                    let local_ = self.ctx.mk_unique(binder_name, binder_style, binder_type.ptr);
+                    let local_ = self.ctx.mk_unique(binder_name, binder_style, binder_type.core);
                     cursor = self.ctx.inst(body, &[local_]);
                     cursor = self.whnf(cursor);
-                    param_locals.push(local_.ptr);
+                    param_locals.push(local_.core);
                 }
                 _ => panic!("exhausted telescope early"),
             }
@@ -378,17 +378,17 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                 ind_ty_cursor = self.ctx.inst(body, &[SPtr::unshifted(st.local_params[i])]);
                 ind_ty_cursor = self.whnf(ind_ty_cursor);
             } else {
-                let local_ = self.ctx.mk_unique(binder_name, binder_style, binder_type.ptr);
+                let local_ = self.ctx.mk_unique(binder_name, binder_style, binder_type.core);
                 ind_ty_cursor = self.ctx.inst(body, &[local_]);
                 ind_ty_cursor = self.whnf(ind_ty_cursor);
-                indices_locals.push(local_.ptr)
+                indices_locals.push(local_.core)
             }
             i += 1;
         }
         let block_codom = self.ensure_sort(ind_ty_cursor);
         let is_nonzero = self.ctx.is_nonzero(block_codom);
         let is_zero = self.ctx.is_zero(block_codom);
-        let ind_const = self.ctx.mk_const(ind_name, uparams).ptr;
+        let ind_const = self.ctx.mk_const(ind_name, uparams).core;
 
         st.local_indices.push(indices_locals);
         st.block_codom = Some(block_codom);
@@ -408,17 +408,17 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                 ind_ty_cursor = self.ctx.inst(body, &[SPtr::unshifted(st.local_params[i])]);
                 ind_ty_cursor = self.whnf(ind_ty_cursor);
             } else {
-                let local_ = self.ctx.mk_unique(binder_name, binder_style, binder_type.ptr);
+                let local_ = self.ctx.mk_unique(binder_name, binder_style, binder_type.core);
                 ind_ty_cursor = self.ctx.inst(body, &[local_]);
                 ind_ty_cursor = self.whnf(ind_ty_cursor);
-                indices_locals.push(local_.ptr)
+                indices_locals.push(local_.core)
             }
             i += 1;
         }
         let codom_level = self.ensure_sort(ind_ty_cursor);
         assert!(self.ctx.eq_antisymm(codom_level, st.block_codom.unwrap()));
         st.local_indices.push(indices_locals);
-        st.ind_consts.push(self.ctx.mk_const(ind.name, st.uparams).ptr);
+        st.ind_consts.push(self.ctx.mk_const(ind.name, st.uparams).core);
     }
 
     /// This starts by receiving the "full" `InductiveType` specification from the export
@@ -457,7 +457,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             // For num_loose_bvars, if shift>0 but nlbv(ptr)==0, the shifted version also has 0 loose bvars.
             // If nlbv(ptr)!=0, the shifted version also has loose bvars.
             // For find_const, const names are unaffected by shift.
-            let this_param = args[i].ptr;
+            let this_param = args[i].core;
             if self.ctx.num_loose_bvars(this_param) != 0 {
                 loose_bvars = true;
             }
@@ -543,7 +543,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         // Reapply the portion of the unfolded applications that is the parameters.
         let i_as = self.ctx.foldl_apps(f, args.iter().copied().take(nested_container_ty.num_params as usize));
         // Application of the type to the swapped out fvar params
-        let i_params = self.ctx.replace_params(i_as.ptr, st.local_params.as_slice(), outgoing_param_locals).ptr;
+        let i_params = self.ctx.replace_params(i_as.core, st.local_params.as_slice(), outgoing_param_locals).core;
 
         // E.g. `_nested.List_1` |-> `List (Sexpr #(A : Sort(u + 1)))`
         if let Some((aux_i_name, _)) =
@@ -581,9 +581,9 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                     let instd =
                         self.ctx.inst_forall_params(base, nested_container_ty.num_params as usize, args.as_slice());
                     let out = self.ctx.abstr_pis(outgoing_param_locals.iter().copied(), instd);
-                    out.ptr
+                    out.core
                 };
-                let jsprime = self.ctx.replace_params(js.ptr, st.local_params.as_slice(), outgoing_param_locals).ptr;
+                let jsprime = self.ctx.replace_params(js.core, st.local_params.as_slice(), outgoing_param_locals).core;
                 st.nested_to_unspecialized_ty_wfvars.insert(aux_nested_container_name, jsprime);
                 if nested_container_name == i_name {
                     let f = self.ctx.mk_const(aux_nested_container_name, st.uparams);
@@ -604,7 +604,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                         nested_container_ty.num_params as usize,
                         args.as_slice(),
                     );
-                    let auxj_ctor_type = self.ctx.abstr_pis(outgoing_param_locals.iter().copied(), auxj_ctor_type).ptr;
+                    let auxj_ctor_type = self.ctx.abstr_pis(outgoing_param_locals.iter().copied(), auxj_ctor_type).core;
                     auxj_ctors.push(CtorHeader { name: auxj_ctor_name, ty: auxj_ctor_type })
                 }
                 st.all_inductives_incl_specialized.push(IndTyHeader {
@@ -679,12 +679,12 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         loop {
             cursor = self.whnf(cursor);
             match self.ctx.view_sptr(cursor) {
-                _any if !self.has_ind_occ(cursor.ptr, st.ind_consts.as_ref()) => return,
+                _any if !self.has_ind_occ(cursor.core, st.ind_consts.as_ref()) => return,
                 Pi { binder_name, binder_style, binder_type, body, .. } => {
-                    if self.has_ind_occ(binder_type.ptr, st.ind_consts.as_ref()) {
+                    if self.has_ind_occ(binder_type.core, st.ind_consts.as_ref()) {
                         panic!("non-positive occurrence");
                     }
-                    let local = self.ctx.mk_unique(binder_name, binder_style, binder_type.ptr);
+                    let local = self.ctx.mk_unique(binder_name, binder_style, binder_type.core);
                     cursor = self.ctx.inst(body, &[local]);
                 }
                 _ => {
@@ -706,7 +706,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
     ) -> bool {
         // The arguments applied to the constructor are the params + indices.
         let (base_const, ctor_apps) = self.ctx.unfold_apps(ind_ty_app);
-        let (ind_name, appd_levels) = match self.ctx.read_expr(base_const.ptr) {
+        let (ind_name, appd_levels) = match self.ctx.read_expr(base_const.core) {
             Const { name, levels, .. } if name == parent_ind_name => (name, levels),
             _ => return false,
         };
@@ -741,11 +741,11 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         // Require that no args in an index position have an instance of an inductive
         // currently being declared.
         for index_app in &ctor_apps[st.local_params.len()..] {
-            if self.has_ind_occ(index_app.ptr, &st.ind_consts) {
+            if self.has_ind_occ(index_app.core, &st.ind_consts) {
                 return false
             }
         }
-        let ctor_apps_ptrs: SmallVec<[ExprPtr; 8]> = ctor_apps.iter().map(|s| s.ptr).collect();
+        let ctor_apps_ptrs: SmallVec<[ExprPtr; 8]> = ctor_apps.iter().map(|s| s.core).collect();
         ctor_app_params_ok(ctor_apps_ptrs.as_slice(), st.local_params.as_slice())
     }
 
@@ -827,7 +827,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
 
             // Assert that there are no non-positive occurrences in the constructor.
             self.check_positivity1(st, binder_type);
-            let local = self.ctx.mk_unique(binder_name, binder_style, binder_type.ptr);
+            let local = self.ctx.mk_unique(binder_name, binder_style, binder_type.core);
             ctor_type_cursor = self.ctx.inst(body, &[local]);
         }
         // The end of the constructor has to be of the form `parentIndConst params* indices*`
@@ -861,18 +861,18 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         loop {
             match self.ctx.view_sptr(ctor_type_cursor) {
                 Pi { binder_name, binder_style, binder_type, body, .. } if rem_params != 0 => {
-                    let local = self.ctx.mk_unique(binder_name, binder_style, binder_type.ptr);
+                    let local = self.ctx.mk_unique(binder_name, binder_style, binder_type.core);
                     ctor_type_cursor = self.ctx.inst(body, &[local]);
                     rem_params -= 1;
                 }
                 Pi { binder_name, binder_style, binder_type, body, .. } => {
-                    let local = self.ctx.mk_unique(binder_name, binder_style, binder_type.ptr);
+                    let local = self.ctx.mk_unique(binder_name, binder_style, binder_type.core);
                     ctor_type_cursor = self.ctx.inst(body, &[local]);
                     let binder_type_level = self.ensure_infers_as_sort(binder_type);
                     // If the binder type is NOT in sort 0, add it to the list
                     // of constructor args that need to be checked
                     if !self.ctx.is_zero(binder_type_level) {
-                        non_prop_ctor_telescope_elems.push(local.ptr);
+                        non_prop_ctor_telescope_elems.push(local.core);
                     }
                 }
                 _ => break,
@@ -887,7 +887,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         // if the list of non-prop constructor args is NOT a subset of
         // the exprs being applied to the inductive (which is params + indices)
         // then we can say that this type only eliminates into Prop/Sort 0
-        non_prop_ctor_telescope_elems.iter().all(|arg| ind_ty_params_and_indices.iter().any(|s| s.ptr == *arg))
+        non_prop_ctor_telescope_elems.iter().all(|arg| ind_ty_params_and_indices.iter().any(|s| s.core == *arg))
     }
 
     fn large_elim_test(&mut self, st: &InductiveCheckState<'t>) -> bool {
@@ -973,7 +973,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             ty = self.ctx.foldl_apps(ty, st.local_indices[idx].iter().copied().map(SPtr::unshifted));
             let t = self.ctx.str1("t");
             // ty is an application of closed consts/locals, so shift is 0; mk_unique always returns shift=0
-            st.majors.push(self.ctx.mk_unique(t, BinderStyle::Default, ty.ptr).ptr);
+            st.majors.push(self.ctx.mk_unique(t, BinderStyle::Default, ty.core).core);
         }
     }
 
@@ -990,7 +990,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         };
 
         // mk_unique always returns shift=0
-        self.ctx.mk_unique(motive_name, BinderStyle::Implicit, motive_type.ptr).ptr
+        self.ctx.mk_unique(motive_name, BinderStyle::Implicit, motive_type.core).core
     }
 
     fn mk_motives(&mut self, st: &mut InductiveCheckState<'t>) {
@@ -1005,7 +1005,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
     fn is_rec_argument(&mut self, st: &InductiveCheckState<'t>, ctor_btype_cursor: SPtr<'t>) -> Option<usize> {
         let cursor = self.whnf(ctor_btype_cursor);
         if let Pi { binder_name, binder_style, binder_type, body, .. } = self.ctx.view_sptr(cursor) {
-            let local = self.ctx.mk_unique(binder_name, binder_style, binder_type.ptr);
+            let local = self.ctx.mk_unique(binder_name, binder_style, binder_type.core);
             let next = self.ctx.inst(body, &[local]);
             self.is_rec_argument(st, next)
         } else {
@@ -1017,10 +1017,10 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         let mut xs = Vec::new();
         let mut cursor = rec_arg_cursor;
         while let Pi { binder_name, binder_style, binder_type, body, .. } = self.ctx.view_sptr(cursor) {
-            let local = self.ctx.mk_unique(binder_name, binder_style, binder_type.ptr);
+            let local = self.ctx.mk_unique(binder_name, binder_style, binder_type.core);
             cursor = self.ctx.inst(body, &[local]);
             cursor = self.whnf(cursor);
-            xs.push(local.ptr)
+            xs.push(local.core)
         }
         (cursor, xs)
     }
@@ -1044,11 +1044,11 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             }
         }
         while let Pi { binder_name, binder_style, binder_type, body, .. } = self.ctx.view_sptr(ctor_type_cursor) {
-            let local = self.ctx.mk_unique(binder_name, binder_style, binder_type.ptr);
+            let local = self.ctx.mk_unique(binder_name, binder_style, binder_type.core);
             ctor_type_cursor = self.ctx.inst(body, &[local]);
-            all_args.push(local.ptr);
+            all_args.push(local.core);
             if self.is_rec_argument(st, binder_type).is_some() {
-                rec_args.push(local.ptr);
+                rec_args.push(local.core);
             }
         }
         (ctor_type_cursor, all_args, rec_args)
@@ -1072,12 +1072,12 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                 let u_app = self.ctx.foldl_apps(SPtr::unshifted(rec_arg), xs.iter().copied().map(SPtr::unshifted));
                 self.ctx.mk_app(lhs, u_app)
             };
-            let v_i_ty = self.ctx.abstr_pis(xs.iter().copied(), motive_base).ptr;
+            let v_i_ty = self.ctx.abstr_pis(xs.iter().copied(), motive_base).core;
             let v_name = self.ctx.str1("v");
             // rec_arg often has a hygienic name
             let v_name = self.ctx.append_index_after(v_name, ctor_idx as u64);
             let v_name = self.ctx.append_index_after(v_name, i as u64);
-            let v_i = self.ctx.mk_unique(v_name, BinderStyle::Default, v_i_ty).ptr;
+            let v_i = self.ctx.mk_unique(v_name, BinderStyle::Default, v_i_ty).core;
             out.push(v_i);
         }
         out
@@ -1110,7 +1110,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                     self.ctx.append_index_after(minor_name, ctor_idx as u64)
                 }
             };
-            let minor = self.ctx.mk_unique(minor_name, BinderStyle::Default, minor_type.ptr).ptr;
+            let minor = self.ctx.mk_unique(minor_name, BinderStyle::Default, minor_type.core).core;
             out.push(minor);
         }
         out
@@ -1145,7 +1145,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             let app = self.ctx.foldl_apps(app, applied_indices.iter().copied().rev());
             let app_rhs = self.ctx.foldl_apps(SPtr::unshifted(rec_ctor_arg), xs.iter().copied().map(SPtr::unshifted));
             let app = self.ctx.mk_app(app, app_rhs);
-            let v_hd = self.ctx.abstr_lambda_telescope(xs.as_slice(), app).ptr;
+            let v_hd = self.ctx.abstr_lambda_telescope(xs.as_slice(), app).core;
             out.push(v_hd);
         }
         out
@@ -1165,7 +1165,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         let comp_rhs = self.ctx.abstr_lambda_telescope(all_ctor_args.as_slice(), comp_rhs);
         let comp_rhs = self.ctx.abstr_lambda_telescope(flat_mapped_minors, comp_rhs);
         let comp_rhs = self.ctx.abstr_lambda_telescope(st.motives.as_slice(), comp_rhs);
-        let comp_rhs = self.ctx.abstr_lambda_telescope(st.local_params.as_slice(), comp_rhs).ptr;
+        let comp_rhs = self.ctx.abstr_lambda_telescope(st.local_params.as_slice(), comp_rhs).core;
         let num_fields = self.ctx.pi_telescope_size(SPtr::unshifted(ctor.ty)) as usize - st.local_params.len();
         RecRule {
             ctor_name: ctor.name,
@@ -1282,7 +1282,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         let rec_ty = self.ctx.abstr_pi_telescope(local_indices, rec_ty);
         let rec_ty = self.ctx.abstr_pi_telescope(flat_mapped_minors, rec_ty);
         let rec_ty = self.ctx.abstr_pi_telescope(st.motives.as_slice(), rec_ty);
-        let rec_ty = self.ctx.abstr_pi_telescope(st.local_params.as_slice(), rec_ty).ptr;
+        let rec_ty = self.ctx.abstr_pi_telescope(st.local_params.as_slice(), rec_ty).core;
 
         let recursor = RecursorData {
             info: DeclarInfo {
@@ -1393,7 +1393,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         // Now get just `Const(Array, [])`
         let unspecialized_f = self.ctx.unfold_apps_fun(SPtr::unshifted(unspecialized_ty));
         // Get just the name for `Array`
-        let (unspecialized_ty_name, ..) = self.ctx.try_const_info(unspecialized_f.ptr).unwrap();
+        let (unspecialized_ty_name, ..) = self.ctx.try_const_info(unspecialized_f.core).unwrap();
         // Replace ctor_name[specialized_name |-> unspecialized_name]
         // e.g. `_nested.Array_1.mk |-> Array.mk`
         self.ctx.replace_pfx(ctor_name, base_ind_name, unspecialized_ty_name)
@@ -1544,18 +1544,18 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                 // Also match on Lambda for restoring recursor rules.
                 Pi { binder_name, binder_style, binder_type, body, .. }
                 | Lambda { binder_name, binder_style, binder_type, body, .. } => {
-                    let local = self.ctx.mk_unique(binder_name, binder_style, binder_type.ptr);
+                    let local = self.ctx.mk_unique(binder_name, binder_style, binder_type.core);
                     cursor = self.ctx.inst(body, &[local]);
-                    locals.push(local.ptr);
+                    locals.push(local.core);
                 }
                 _ => panic!(),
             }
         }
         let replaced = self.restore_replace(cursor, locals.as_slice(), st, nested_rec_name_to_rec_name);
         let out = if is_pi {
-            self.ctx.abstr_pi_telescope(locals.as_slice(), replaced).ptr
+            self.ctx.abstr_pi_telescope(locals.as_slice(), replaced).core
         } else {
-            self.ctx.abstr_lambda_telescope(locals.as_slice(), replaced).ptr
+            self.ctx.abstr_lambda_telescope(locals.as_slice(), replaced).core
         };
         out
     }

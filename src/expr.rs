@@ -153,9 +153,9 @@ pub enum BinderStyle {
 impl<'t, 'p: 't> TcCtx<'t, 'p> {
     pub(crate) fn inst_forall_params(&mut self, mut e: SPtr<'t>, n: usize, all_args: &[SPtr<'t>]) -> SPtr<'t> {
         for _ in 0..n {
-            match self.read_expr(e.ptr) {
+            match self.read_expr(e.core) {
                 Pi { body, .. } => {
-                    e = SPtr::new(body.ptr, body.shift + e.shift);
+                    e = SPtr::new(body.core, body.shift + e.shift);
                 }
                 _ => panic!()
             }
@@ -177,7 +177,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
             return e;
         }
         self.expr_cache.inst_substs_id = self.expr_cache.inst_substs_id.wrapping_add(1);
-        self.inst_aux(e.ptr, substs, 0, false, e.shift as i16, 0)
+        self.inst_aux(e.core, substs, 0, false, e.shift as i16, 0)
     }
 
     /// Like `inst`, but also shifts down Var indices beyond the substitution range.
@@ -191,10 +191,10 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         // With SPtr, the shift can be adjusted arithmetically.
         let n_substs = substs.len() as u16;
         if e.shift >= n_substs {
-            return SPtr::new(e.ptr, e.shift - n_substs);
+            return SPtr::new(e.core, e.shift - n_substs);
         }
         self.expr_cache.inst_substs_id = self.expr_cache.inst_substs_id.wrapping_add(1);
-        self.inst_aux(e.ptr, substs, 0, true, e.shift as i16, 0)
+        self.inst_aux(e.core, substs, 0, true, e.shift as i16, 0)
     }
 
     /// Combined shift+instantiation in one pass.
@@ -211,7 +211,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
     fn inst_aux_quick_sptr(&mut self, child: SPtr<'t>, substs: &[SPtr<'t>], offset: u16, shift_down: bool, sh_amt: i16, sh_cut: u16) -> SPtr<'t> {
         if child.shift == 0 {
             // No child shift to compose
-            return self.inst_aux_quick(child.ptr, substs, offset, shift_down, sh_amt, sh_cut);
+            return self.inst_aux_quick(child.core, substs, offset, shift_down, sh_amt, sh_cut);
         }
         if sh_cut == 0 || child.shift >= sh_cut {
             // Clean composition: child.shift >= sh_cut means all child vars are past the cutoff.
@@ -219,7 +219,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
             // or (sh_amt + child.shift, 0) for child.shift >= sh_cut.
             let new_sh_amt = sh_amt + child.shift as i16;
             let new_sh_cut = if sh_cut == 0 { 0 } else { 0 }; // both cases: cutoff becomes 0
-            return self.inst_aux_quick(child.ptr, substs, offset, shift_down, new_sh_amt, new_sh_cut);
+            return self.inst_aux_quick(child.core, substs, offset, shift_down, new_sh_amt, new_sh_cut);
         }
         // Mismatch: 0 < child.shift < sh_cut. Can't compose into a single (sh_amt, sh_cut).
         // Materialize the child's view, then process each child of the viewed expression.
@@ -230,7 +230,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         // The viewed expression is a temporary Expr, not in the DAG. We need to process its children.
         match viewed {
             Sort { .. } | Const { .. } | Local { .. } | StringLit { .. } | NatLit { .. } => {
-                SPtr::unshifted(child.ptr) // closed, shift irrelevant
+                SPtr::unshifted(child.core) // closed, shift irrelevant
             }
             Var { dbj_idx, .. } => {
                 // The viewed var already has the correct index (child.shift applied)
@@ -243,7 +243,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
                     let rel_idx = shifted_idx - offset;
                     if rel_idx < n_substs {
                         let val = substs[substs.len() - 1 - rel_idx as usize];
-                        SPtr::new(val.ptr, val.shift + offset)
+                        SPtr::new(val.core, val.shift + offset)
                     } else if shift_down {
                         self.mk_var(shifted_idx - n_substs)
                     } else {
@@ -316,7 +316,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
                     if shift_down {
                         let shifted = if sh_cut == 0 { self.mk_shift(e, sh_amt as u16) } else { self.shift_expr(e, sh_amt as u16, sh_cut) };
                         // TODO: push_shift_down_cutoff needs to take/return SPtr
-                        let r = self.push_shift_down_cutoff(shifted.ptr, n_substs, offset);
+                        let r = self.push_shift_down_cutoff(shifted.core, n_substs, offset);
                         return SPtr::new(r, shifted.shift);
                     } else {
                         if sh_cut == 0 { return self.mk_shift(e, sh_amt as u16); }
@@ -416,7 +416,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
                     if rel_idx < n_substs {
                         let val = substs[substs.len() - 1 - rel_idx as usize];
                         // Shift the substitution value up by offset
-                        SPtr::new(val.ptr, val.shift + offset)
+                        SPtr::new(val.core, val.shift + offset)
                     } else if shift_down {
                         self.mk_var(shifted_idx - n_substs)
                     } else {
@@ -523,16 +523,16 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
     /// Helper: shift an SPtr child. The child's own shift composes with the operation.
     /// Returns an SPtr (as the mk_* functions now expect SPtr children).
     pub(crate) fn shift_expr_aux_sptr(&mut self, child: SPtr<'t>, amount: u16, cutoff: u16) -> SPtr<'t> {
-        // If the child has a shift, vars in child.ptr at index >= 0 become >= child.shift.
-        // If child.shift >= cutoff, the cutoff is irrelevant for child.ptr's vars —
+        // If the child has a shift, vars in child.core at index >= 0 become >= child.shift.
+        // If child.shift >= cutoff, the cutoff is irrelevant for child.core's vars —
         // just add amount to the child's shift.
         if child.shift >= cutoff {
-            return SPtr::new(child.ptr, child.shift + amount);
+            return SPtr::new(child.core, child.shift + amount);
         }
-        // Otherwise, we need to traverse child.ptr with adjusted cutoff.
+        // Otherwise, we need to traverse child.core with adjusted cutoff.
         let new_cutoff = cutoff - child.shift;
-        let result = self.shift_expr_aux(child.ptr, amount, new_cutoff);
-        SPtr::new(result.ptr, result.shift + child.shift)
+        let result = self.shift_expr_aux(child.core, amount, new_cutoff);
+        SPtr::new(result.core, result.shift + child.shift)
     }
 
     /// From `e[x_1..x_n/v_1..v_n]`, abstract and re-inst, creating `e[y_1..y_n/v_1..v_n]`.
@@ -600,23 +600,23 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
 
     /// Helper for abstr_aux: process an SPtr child.
     /// Locals have nlbv=0 so they can't appear under a shift.
-    /// We recurse on child.ptr and re-wrap with child.shift.
+    /// We recurse on child.core and re-wrap with child.shift.
     /// Abstract locals in an SPtr child. Adjusts offset to account for child's shift.
     fn abstr_aux_sptr(&mut self, child: SPtr<'t>, locals: &[ExprPtr<'t>], offset: u16) -> SPtr<'t> {
         if child.shift == 0 {
-            return self.abstr_aux(child.ptr, locals, offset);
+            return self.abstr_aux(child.core, locals, offset);
         }
         // child.shift > 0: the core is at a lower depth.
         // Adjust offset down to compensate, then reapply child.shift to result.
         if offset >= child.shift {
-            let result = self.abstr_aux(child.ptr, locals, offset - child.shift);
-            SPtr::new(result.ptr, result.shift + child.shift)
+            let result = self.abstr_aux(child.core, locals, offset - child.shift);
+            SPtr::new(result.core, result.shift + child.shift)
         } else {
             // offset < child.shift: materialize via view_sptr and recurse
             let viewed = self.view_sptr(child);
             match viewed {
                 Local { .. } => {
-                    locals.iter().rev().position(|x| *x == child.ptr)
+                    locals.iter().rev().position(|x| *x == child.core)
                         .map(|pos| self.mk_var(u16::try_from(pos).unwrap() + offset))
                         .unwrap_or(child)
                 }
@@ -714,12 +714,12 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
     /// Helper for abstr_aux_levels: process an SPtr child.
     fn abstr_aux_levels_sptr(&mut self, child: SPtr<'t>, start_pos: u16, num_open_binders: u16) -> SPtr<'t> {
         if child.shift == 0 {
-            return self.abstr_aux_levels(child.ptr, start_pos, num_open_binders);
+            return self.abstr_aux_levels(child.core, start_pos, num_open_binders);
         }
         // Adjust num_open_binders by child.shift (same logic as abstr_aux_sptr)
         if num_open_binders >= child.shift {
-            let result = self.abstr_aux_levels(child.ptr, start_pos, num_open_binders - child.shift);
-            SPtr::new(result.ptr, result.shift + child.shift)
+            let result = self.abstr_aux_levels(child.core, start_pos, num_open_binders - child.shift);
+            SPtr::new(result.core, result.shift + child.shift)
         } else {
             // Fallback: materialize and recurse
             let viewed = self.view_sptr(child);
@@ -776,7 +776,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         }
         // Level substitution commutes with variable shifting (they operate on
         // independent parts: levels vs. bvar indices). For SPtr children,
-        // we recurse on child.ptr and preserve child.shift.
+        // we recurse on child.core and preserve child.shift.
         let r = match self.read_expr(e) {
             Var { .. } | NatLit { .. } | StringLit { .. } => SPtr::unshifted(e),
             Sort { level, .. } => {
@@ -819,10 +819,10 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
     }
 
     /// Helper for subst_aux: level substitution commutes with shifting,
-    /// so recurse on child.ptr and preserve child.shift.
+    /// so recurse on child.core and preserve child.shift.
     fn subst_aux_sptr(&mut self, child: SPtr<'t>, ks: LevelsPtr<'t>, vs: LevelsPtr<'t>) -> SPtr<'t> {
-        let result = self.subst_aux(child.ptr, ks, vs);
-        SPtr::new(result.ptr, result.shift + child.shift)
+        let result = self.subst_aux(child.core, ks, vs);
+        SPtr::new(result.core, result.shift + child.shift)
     }
 
     pub fn subst_expr_levels(&mut self, e: ExprPtr<'t>, ks: LevelsPtr<'t>, vs: LevelsPtr<'t>) -> SPtr<'t> {
@@ -847,7 +847,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
     pub fn num_args(&self, e: ExprPtr<'t>) -> usize {
         let (mut cursor, mut num_args) = (e, 0);
         while let App { fun, .. } = self.read_expr(cursor) {
-            cursor = fun.ptr;
+            cursor = fun.core;
             num_args += 1;
         }
         num_args
@@ -856,10 +856,10 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
     /// From `f a_0 .. a_N`, return `f` as SPtr.
     pub fn unfold_apps_fun(&self, mut e: SPtr<'t>) -> SPtr<'t> {
         loop {
-            match self.read_expr(e.ptr) {
+            match self.read_expr(e.core) {
                 App { fun, .. } => {
                     let new_shift = fun.shift + e.shift;
-                    e = SPtr::new(fun.ptr, new_shift);
+                    e = SPtr::new(fun.core, new_shift);
                 }
                 _ => break,
             }
@@ -872,10 +872,10 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
     pub fn unfold_apps(&self, mut e: SPtr<'t>) -> (SPtr<'t>, AppArgs<'t>) {
         let mut args = AppArgs::new();
         loop {
-            match self.read_expr(e.ptr) {
+            match self.read_expr(e.core) {
                 App { fun, arg, .. } => {
-                    args.push(SPtr::new(arg.ptr, arg.shift + e.shift));
-                    e = SPtr::new(fun.ptr, fun.shift + e.shift);
+                    args.push(SPtr::new(arg.core, arg.shift + e.shift));
+                    e = SPtr::new(fun.core, fun.shift + e.shift);
                 }
                 _ => break,
             }
@@ -890,7 +890,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         e: SPtr<'t>,
     ) -> Option<(SPtr<'t>, NamePtr<'t>, LevelsPtr<'t>, AppArgs<'t>)> {
         let (f, args) = self.unfold_apps(e);
-        match self.read_expr(f.ptr) {
+        match self.read_expr(f.core) {
             Const { name, levels, .. } => Some((f, name, levels, args)),
             _ => None,
         }
@@ -907,10 +907,10 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
     pub(crate) fn unfold_apps_stack(&self, mut e: SPtr<'t>) -> (SPtr<'t>, AppArgs<'t>) {
         let mut args = AppArgs::new();
         loop {
-            match self.read_expr(e.ptr) {
+            match self.read_expr(e.core) {
                 App { fun, arg, .. } => {
-                    args.push(SPtr::new(arg.ptr, arg.shift + e.shift));
-                    e = SPtr::new(fun.ptr, fun.shift + e.shift);
+                    args.push(SPtr::new(arg.core, arg.shift + e.shift));
+                    e = SPtr::new(fun.core, fun.shift + e.shift);
                 }
                 _ => break,
             }
@@ -938,9 +938,9 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
     pub(crate) fn abstr_pi(&mut self, binder: ExprPtr<'t>, body: SPtr<'t>) -> SPtr<'t> {
         match self.read_expr(binder) {
             Local { binder_name, binder_style, binder_type, .. } => {
-                // abstr takes ExprPtr, so pass body.ptr. The abstr result's shift
+                // abstr takes ExprPtr, so pass body.core. The abstr result's shift
                 // replaces body's old shift (abstr rebuilds the expression).
-                let body = self.abstr(body.ptr, &[binder]);
+                let body = self.abstr(body.core, &[binder]);
                 self.mk_pi(binder_name, binder_style, SPtr::unshifted(binder_type), body)
             }
             _ => unreachable!("Cannot apply pi with non-local domain type"),
@@ -950,7 +950,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
     pub(crate) fn apply_lambda(&mut self, binder: ExprPtr<'t>, body: SPtr<'t>) -> SPtr<'t> {
         match self.read_expr(binder) {
             Local { binder_name, binder_style, binder_type, .. } => {
-                let body = self.abstr(body.ptr, &[binder]);
+                let body = self.abstr(body.core, &[binder]);
                 self.mk_lambda(binder_name, binder_style, SPtr::unshifted(binder_type), body)
             }
             _ => unreachable!("Cannot apply lambda with non-local domain type"),
@@ -959,20 +959,20 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
     
     pub(crate) fn is_nat_zero(&mut self, e: SPtr<'t>) -> bool {
         // NatLit and Const are closed (nlbv=0), so shift is irrelevant
-        match self.read_expr(e.ptr) {
-            Const { .. } => self.c_nat_zero().map(|z| z == e.ptr).unwrap_or(false),
+        match self.read_expr(e.core) {
+            Const { .. } => self.c_nat_zero().map(|z| z == e.core).unwrap_or(false),
             NatLit { ptr, .. } => self.read_bignum(ptr).map(|n| n.is_zero()).unwrap_or(false),
             _ => false,
         }
     }
 
     pub(crate) fn pred_of_nat_succ(&mut self, e: SPtr<'t>) -> Option<SPtr<'t>> {
-        match self.read_expr(e.ptr) {
+        match self.read_expr(e.core) {
             App { fun, arg, .. } => {
                 // fun is SPtr; Nat.succ is a Const (closed), so fun.shift doesn't matter
                 let succ = self.c_nat_succ()?;
-                if fun.ptr == succ {
-                    Some(SPtr::new(arg.ptr, arg.shift + e.shift))
+                if fun.core == succ {
+                    Some(SPtr::new(arg.core, arg.shift + e.shift))
                 } else {
                     None
                 }
@@ -1010,7 +1010,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
     pub(crate) fn is_app_of_const(&self, e: ExprPtr<'t>, name: NamePtr<'t>, arity: usize) -> bool {
         let mut cur = e;
         for _ in 0..arity {
-            if let App { fun, .. } = self.read_expr(cur) { cur = fun.ptr; } else { return false; }
+            if let App { fun, .. } = self.read_expr(cur) { cur = fun.core; } else { return false; }
         }
         if let Const { name: n, .. } = self.read_expr(cur) { n == name } else { false }
     }
@@ -1064,10 +1064,10 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
     /// If `e` is a NatLit, or `Const Nat.zero []`, return the appropriate Bignum.
     pub(crate) fn get_bignum_from_expr(&mut self, e: SPtr<'t>) -> Option<BigUint> {
         // NatLit and Const are closed, shift irrelevant
-        match self.read_expr(e.ptr) {
+        match self.read_expr(e.core) {
             NatLit { ptr, .. } => self.read_bignum(ptr).cloned(),
             Const { .. } => {
-                if Some(e.ptr) == self.c_nat_zero() {
+                if Some(e.core) == self.c_nat_zero() {
                     Some(BigUint::zero())
                 } else {
                     None
@@ -1078,12 +1078,12 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
     }
 
     pub(crate) fn get_bignum_succ_from_expr(&mut self, e: SPtr<'t>) -> Option<SPtr<'t>> {
-        match self.read_expr(e.ptr) {
+        match self.read_expr(e.core) {
             NatLit { ptr, .. } => {
                 self.mk_nat_lit_quick(self.read_bignum(ptr)? + 1usize)
             }
             Const { .. } => {
-                if Some(e.ptr) == self.c_nat_zero() {
+                if Some(e.core) == self.c_nat_zero() {
                     self.mk_nat_lit_quick(BigUint::zero() + 1usize)
                 } else {
                     None
@@ -1114,17 +1114,17 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         Some(self.mk_const(n, levels))
     }
 
-    /// c_nat_zero and c_nat_succ return ExprPtr for easy comparison with .ptr fields
+    /// c_nat_zero and c_nat_succ return ExprPtr for easy comparison with .core fields
     pub(crate) fn c_nat_zero(&mut self) -> Option<ExprPtr<'t>> {
         let n = self.export_file.name_cache.nat_zero?;
         let levels = self.alloc_levels_slice(&[]);
-        Some(self.mk_const(n, levels).ptr)
+        Some(self.mk_const(n, levels).core)
     }
 
     pub(crate) fn c_nat_succ(&mut self) -> Option<ExprPtr<'t>> {
         let n = self.export_file.name_cache.nat_succ?;
         let levels = self.alloc_levels_slice(&[]);
-        Some(self.mk_const(n, levels).ptr)
+        Some(self.mk_const(n, levels).core)
     }
 
     /// Make `Const("Nat", [])`
@@ -1183,15 +1183,15 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
             let r = match self.read_expr(e) {
                 Var { .. } | Sort { .. } | NatLit { .. } | StringLit { .. } => false,
                 Const { name, .. } => pred(name),
-                App { fun, arg, .. } => self.find_const_aux(fun.ptr, pred, cache) || self.find_const_aux(arg.ptr, pred, cache),
+                App { fun, arg, .. } => self.find_const_aux(fun.core, pred, cache) || self.find_const_aux(arg.core, pred, cache),
                 Pi { binder_type, body, .. } | Lambda { binder_type, body, .. } =>
-                    self.find_const_aux(binder_type.ptr, pred, cache) || self.find_const_aux(body.ptr, pred, cache),
+                    self.find_const_aux(binder_type.core, pred, cache) || self.find_const_aux(body.core, pred, cache),
                 Let { binder_type, val, body, .. } =>
-                    self.find_const_aux(binder_type.ptr, pred, cache)
-                        || self.find_const_aux(val.ptr, pred, cache)
-                        || self.find_const_aux(body.ptr, pred, cache),
+                    self.find_const_aux(binder_type.core, pred, cache)
+                        || self.find_const_aux(val.core, pred, cache)
+                        || self.find_const_aux(body.core, pred, cache),
                 Local { binder_type, .. } => self.find_const_aux(binder_type, pred, cache),
-                Proj { structure, .. } => self.find_const_aux(structure.ptr, pred, cache),
+                Proj { structure, .. } => self.find_const_aux(structure.core, pred, cache),
             };
             cache.insert(e, r);
             r
@@ -1202,10 +1202,10 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
     pub(crate) fn pi_telescope_size(&self, mut e: SPtr<'t>) -> u16 {
         let mut size = 0u16;
         loop {
-            match self.read_expr(e.ptr) {
+            match self.read_expr(e.core) {
                 Pi { body, .. } => {
                     size += 1;
-                    e = SPtr::new(body.ptr, body.shift + e.shift);
+                    e = SPtr::new(body.core, body.shift + e.shift);
                 }
                 _ => break,
             }
@@ -1218,15 +1218,15 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
 
     pub fn get_nth_pi_binder(&self, mut e: SPtr<'t>, n: usize) -> Option<SPtr<'t>> {
         for _ in 0..n {
-            match self.read_expr(e.ptr) {
+            match self.read_expr(e.core) {
                 Pi { body, .. } => {
-                    e = SPtr::new(body.ptr, body.shift + e.shift);
+                    e = SPtr::new(body.core, body.shift + e.shift);
                 }
                 _ => return None
             }
         }
-        match self.read_expr(e.ptr) {
-            Pi { binder_type, .. } => Some(SPtr::new(binder_type.ptr, binder_type.shift + e.shift)),
+        match self.read_expr(e.core) {
+            Pi { binder_type, .. } => Some(SPtr::new(binder_type.core, binder_type.shift + e.shift)),
             _ => None
         }
     }
@@ -1235,7 +1235,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
     /// by finding the correct binder in the recursor's type.
     pub fn get_major_induct(&self, rec: &crate::env::RecursorData<'t>) -> Option<NamePtr<'t>> {
         let binder = self.get_nth_pi_binder(SPtr::unshifted(rec.info.ty), rec.major_idx());
-        match binder.map(|x| { let f = self.unfold_apps_fun(x); self.read_expr(f.ptr) }) {
+        match binder.map(|x| { let f = self.unfold_apps_fun(x); self.read_expr(f.core) }) {
             Some(Const { name, .. }) => Some(name),
             _ => None
         }

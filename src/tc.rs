@@ -283,15 +283,14 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
     /// shifted to be valid at the current depth. O(1) via SPtr.
     fn lookup_var(&mut self, dbj_idx: u16) -> SPtr<'t> {
         let ty = self.tc_cache.local_type(dbj_idx);
-        // ty is an SPtr at the binder's depth; shift by dbj_idx+1 to bring to current depth
-        SPtr::new(ty.ptr, ty.shift + dbj_idx + 1)
+        ty.shift_up(dbj_idx + 1)
     }
 
     /// Look up the value of a let-bound Var(k), shifted to be valid at current depth.
     /// Returns None for lambda/pi binders. O(1) via SPtr.
     fn lookup_var_value(&mut self, dbj_idx: u16) -> Option<SPtr<'t>> {
         let val = self.tc_cache.local_value(dbj_idx)?;
-        Some(SPtr::new(val.ptr, val.shift + dbj_idx + 1))
+        Some(val.shift_up(dbj_idx + 1))
     }
 
     /// Push a lambda/pi binder onto the local context.
@@ -356,7 +355,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
 
     /// Retrieve the recursor rule corresponding to the constructor used in the major premise.
     fn get_rec_rule(&self, rec_rules: &[RecRule<'t>], major_const: SPtr<'t>) -> Option<RecRule<'t>> {
-        if let Const { name: major_ctor_name, .. } = self.ctx.read_expr(major_const.ptr) {
+        if let Const { name: major_ctor_name, .. } = self.ctx.read_expr(major_const.core) {
             for r @ RecRule { ctor_name, .. } in rec_rules.iter().copied() {
                 if ctor_name == major_ctor_name {
                     return Some(r)
@@ -399,7 +398,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
     }
 
     pub(crate) fn ensure_sort(&mut self, e: SPtr<'t>) -> LevelPtr<'t> {
-        if let Sort { level, .. } = self.ctx.read_expr(e.ptr) {
+        if let Sort { level, .. } = self.ctx.read_expr(e.core) {
             return level
         }
         let whnfd = self.whnf(e);
@@ -426,7 +425,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         match self.ctx.view_sptr(whnfd) {
             Sort { level, .. } => level,
             _ => {
-                panic!("infer_sort_of: expected Sort, got {:?} from e={:?}, infer={:?}, depth={}", self.ctx.expr_desc(whnfd.ptr, 5), self.ctx.expr_desc(e.ptr, 5), self.ctx.expr_desc(ty.ptr, 5), self.depth());
+                panic!("infer_sort_of: expected Sort, got {:?} from e={:?}, infer={:?}, depth={}", self.ctx.expr_desc(whnfd.core, 5), self.ctx.expr_desc(e.core, 5), self.ctx.expr_desc(ty.core, 5), self.depth());
             }
         }
     }
@@ -459,8 +458,8 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
     }
 
     fn try_string_lit_expansion_aux(&mut self, x: SPtr<'t>, y: SPtr<'t>) -> Option<bool> {
-        if let (StringLit { ptr, .. }, App { fun, .. }) = (self.ctx.read_expr(x.ptr), self.ctx.view_sptr(y)) {
-            if let Some((name, _levels)) = self.ctx.try_const_info(fun.ptr) {
+        if let (StringLit { ptr, .. }, App { fun, .. }) = (self.ctx.read_expr(x.core), self.ctx.view_sptr(y)) {
+            if let Some((name, _levels)) = self.ctx.try_const_info(fun.core) {
                 if name == self.ctx.export_file.name_cache.string_of_list? {
                     // levels should be empty
                     let lhs = self.str_lit_to_ctor_reducing(ptr)?;
@@ -529,7 +528,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             return None
         }
         let (f, args) = self.ctx.unfold_apps(e);
-        let out = match (self.ctx.read_expr(f.ptr), args.as_slice()) {
+        let out = match (self.ctx.read_expr(f.core), args.as_slice()) {
             (Const { name, .. }, [arg]) if Some(name) == self.ctx.export_file.name_cache.nat_succ => {
                 let v_expr = self.whnf(*arg);
                 self.ctx.get_bignum_succ_from_expr(v_expr)
@@ -640,7 +639,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             }
             other => panic!("Ran out of constructor telescope getting field: ty_name={:?}, struct_ty_name={:?}, idx={}, num_params={}, struct_ty={:?}, ctor_ty_whnf={:?}, variant={}",
                 self.ctx.debug_print(_ty_name), self.ctx.debug_print(struct_ty_name),
-                idx, num_params, self.ctx.expr_desc(structure_ty.ptr, 5), self.ctx.expr_desc(reduced.ptr, 5),
+                idx, num_params, self.ctx.expr_desc(structure_ty.core, 5), self.ctx.expr_desc(reduced.core, 5),
                 match other { Sort {..} => "Sort", Const {..} => "Const", App {..} => "App", Lambda {..} => "Lambda", _ => "other" })
         }
     }
@@ -660,49 +659,49 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             // For closed expressions, shift is irrelevant. For open ones, clamp to depth.
             if (e.shift as usize) > depth {
                 // Expression shifted beyond current depth — treat as if at depth 0
-                if self.ctx.num_loose_bvars(e.ptr) == 0 {
+                if self.ctx.num_loose_bvars(e.core) == 0 {
                     // Closed: just infer unshifted
-                    let r = self.infer(SPtr::unshifted(e.ptr), flag);
-                    return SPtr::new(r.ptr, r.shift + e.shift);
+                    let r = self.infer(SPtr::unshifted(e.core), flag);
+                    return SPtr::new(r.core, r.shift + e.shift);
                 }
                 // Open with shift > depth: shouldn't happen in well-typed programs.
                 // Fall through to peel with clamped depth.
             }
             let inner_depth = depth.saturating_sub(e.shift as usize);
-            let inner_bucket = if self.ctx.num_loose_bvars(e.ptr) == 0 { 0 } else { inner_depth };
-            if let Some(inner_cached) = self.tc_cache.infer_cache_get(inner_bucket, &e.ptr, true) {
+            let inner_bucket = if self.ctx.num_loose_bvars(e.core) == 0 { 0 } else { inner_depth };
+            if let Some(inner_cached) = self.tc_cache.infer_cache_get(inner_bucket, &e.core, true) {
                 self.ctx.trace.infer_cache_hits += 1;
-                return SPtr::new(inner_cached.ptr, inner_cached.shift + e.shift);
+                return SPtr::new(inner_cached.core, inner_cached.shift + e.shift);
             }
             if !is_check {
-                if let Some(inner_cached) = self.tc_cache.infer_cache_get(inner_bucket, &e.ptr, false) {
+                if let Some(inner_cached) = self.tc_cache.infer_cache_get(inner_bucket, &e.core, false) {
                     self.ctx.trace.infer_cache_hits += 1;
-                    return SPtr::new(inner_cached.ptr, inner_cached.shift + e.shift);
+                    return SPtr::new(inner_cached.core, inner_cached.shift + e.shift);
                 }
             }
             // Peel: shrink context to depth d-k, infer inner, restore, shift result.
             self.ctx.trace.infer_shift_peel += 1;
             self.ctx.trace.shift_peel_frames_total += e.shift as u64;
             let saved = self.tc_cache.split_off(inner_depth);
-            let inner_type = self.infer(SPtr::unshifted(e.ptr), flag);
+            let inner_type = self.infer(SPtr::unshifted(e.core), flag);
             self.tc_cache.extend(saved);
-            return SPtr::new(inner_type.ptr, inner_type.shift + e.shift);
+            return SPtr::new(inner_type.core, inner_type.shift + e.shift);
         }
         // e.shift == 0 here. Pointer-based infer cache: bucket 0 for closed, bucket depth for open.
         let depth = self.depth() as u16;
-        let bucket_idx = if self.ctx.num_loose_bvars(e.ptr) == 0 {
+        let bucket_idx = if self.ctx.num_loose_bvars(e.core) == 0 {
             0
         } else {
             depth as usize
         };
         let is_check = flag == InferFlag::Check;
         // Check cache subsumes no-check: try check first, then no-check.
-        if let Some(cached_result) = self.tc_cache.infer_cache_get(bucket_idx, &e.ptr, true) {
+        if let Some(cached_result) = self.tc_cache.infer_cache_get(bucket_idx, &e.core, true) {
             self.ctx.trace.infer_cache_hits += 1;
             return cached_result;
         }
         if !is_check {
-            if let Some(cached_result) = self.tc_cache.infer_cache_get(bucket_idx, &e.ptr, false) {
+            if let Some(cached_result) = self.tc_cache.infer_cache_get(bucket_idx, &e.core, false) {
                 self.ctx.trace.infer_cache_hits += 1;
                 return cached_result;
             }
@@ -728,7 +727,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                 self.ctx.string_type().unwrap()
             }
         };
-        self.tc_cache.infer_cache_insert(bucket_idx, e.ptr, r, is_check);
+        self.tc_cache.infer_cache_insert(bucket_idx, e.core, r, is_check);
         r
     }
 
@@ -755,7 +754,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                         let arg_type = self.infer(arg, flag);
                         let binder_type_instd = self.ctx.inst_beta(binder_type, ctx.as_slice());
                         let outer_scope_eager_setting = self.ctx.eager_mode;
-                        if self.ctx.is_eager_reduce_app(arg.ptr) {
+                        if self.ctx.is_eager_reduce_app(arg.core) {
                             self.ctx.eager_mode = true;
                         }
                         // `arg_type` and `binder_type` get swapped here to accommodate the
@@ -876,7 +875,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
     pub(crate) fn strong_reduce(&mut self, e: SPtr<'t>, reduce_types: bool, reduce_proofs: bool) -> SPtr<'t> {
         if (!reduce_types) || (!reduce_proofs) {
             let ty = self.infer(e, InferOnly);
-            if !reduce_types && matches!(self.ctx.read_expr(ty.ptr), Sort {..}) {
+            if !reduce_types && matches!(self.ctx.read_expr(ty.core), Sort {..}) {
                 return e
             }
             if !reduce_proofs && self.is_proposition(ty).0 {
@@ -884,7 +883,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             }
         }
         let e = self.whnf(e);
-        if let Some(cached) = self.tc_cache.strong_cache.get(&(e.ptr, reduce_types, reduce_proofs)).copied() {
+        if let Some(cached) = self.tc_cache.strong_cache.get(&(e.core, reduce_types, reduce_proofs)).copied() {
             return SPtr::unshifted(cached)
         }
 
@@ -921,7 +920,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             }
             _ => e
         };
-        self.tc_cache.strong_cache.insert((e.ptr, reduce_types, reduce_proofs), out.ptr);
+        self.tc_cache.strong_cache.insert((e.core, reduce_types, reduce_proofs), out.core);
         out
     }
 
@@ -933,7 +932,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
     }
 
     fn whnf_inner(&mut self, e: SPtr<'t>) -> SPtr<'t> {
-        if matches!(self.ctx.read_expr(e.ptr), NatLit { .. } | StringLit { .. }) {
+        if matches!(self.ctx.read_expr(e.core), NatLit { .. } | StringLit { .. }) {
             return e
         }
         // whnf is shift-equivariant: whnf(SPtr(ptr, k)) = push_shift_up(whnf(SPtr(ptr, 0)), k)
@@ -942,31 +941,31 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             let inner_depth = depth.saturating_sub(e.shift as usize);
             // Fast path: check if inner's whnf result is already cached at the lower depth.
             if depth > 0 && (e.shift as usize) <= depth {
-                let inner_bucket = if self.ctx.num_loose_bvars(e.ptr) == 0 { 0 } else { inner_depth };
-                if let Some(inner_cached) = self.tc_cache.whnf_cache_get(inner_bucket, &e.ptr) {
+                let inner_bucket = if self.ctx.num_loose_bvars(e.core) == 0 { 0 } else { inner_depth };
+                if let Some(inner_cached) = self.tc_cache.whnf_cache_get(inner_bucket, &e.core) {
                     self.ctx.trace.whnf_cache_hits += 1;
-                    return SPtr::new(inner_cached.ptr, inner_cached.shift + e.shift);
+                    return SPtr::new(inner_cached.core, inner_cached.shift + e.shift);
                 }
             }
             if inner_depth == 0 {
-                let r = self.whnf(SPtr::unshifted(e.ptr));
-                return SPtr::new(r.ptr, r.shift + e.shift);
+                let r = self.whnf(SPtr::unshifted(e.core));
+                return SPtr::new(r.core, r.shift + e.shift);
             }
             self.ctx.trace.whnf_shift_peel += 1;
             self.ctx.trace.shift_peel_frames_total += e.shift as u64;
             let saved = self.tc_cache.split_off(inner_depth);
-            let r = self.whnf(SPtr::unshifted(e.ptr));
+            let r = self.whnf(SPtr::unshifted(e.core));
             self.tc_cache.extend(saved);
-            return SPtr::new(r.ptr, r.shift + e.shift);
+            return SPtr::new(r.core, r.shift + e.shift);
         }
         // e.shift == 0. Pointer-based whnf cache: bucket 0 for closed, bucket depth for open.
         let depth = self.depth() as u16;
-        let whnf_bucket_idx = if self.ctx.num_loose_bvars(e.ptr) == 0 {
+        let whnf_bucket_idx = if self.ctx.num_loose_bvars(e.core) == 0 {
             0
         } else {
             depth as usize
         };
-        if let Some(result) = self.tc_cache.whnf_cache_get(whnf_bucket_idx, &e.ptr) {
+        if let Some(result) = self.tc_cache.whnf_cache_get(whnf_bucket_idx, &e.core) {
             self.ctx.trace.whnf_cache_hits += 1;
             return result;
         }
@@ -976,7 +975,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             // and compose. This prevents unbounded shift accumulation in the loop.
             if cursor.shift > 0 {
                 let r = self.whnf(cursor);
-                self.tc_cache.whnf_cache_insert(whnf_bucket_idx, e.ptr, r);
+                self.tc_cache.whnf_cache_insert(whnf_bucket_idx, e.core, r);
                 return r;
             }
             let whnfd = self.whnf_no_unfolding(cursor);
@@ -985,7 +984,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             } else if let Some(next_term) = self.unfold_def(whnfd) {
                 cursor = next_term;
             } else {
-                self.tc_cache.whnf_cache_insert(whnf_bucket_idx, e.ptr, whnfd);
+                self.tc_cache.whnf_cache_insert(whnf_bucket_idx, e.core, whnfd);
                 return whnfd
             }
         }
@@ -1007,20 +1006,20 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             let inner_depth = depth.saturating_sub(e.shift as usize);
             // Fast path: check if inner's wnu result is already cached at the lower depth.
             if depth > 0 && (e.shift as usize) <= depth {
-                let inner_bucket = if self.ctx.num_loose_bvars(e.ptr) == 0 { 0 } else { inner_depth };
-                if let Some(inner_cached) = self.tc_cache.wnu_cache_get(inner_bucket, &e.ptr) {
+                let inner_bucket = if self.ctx.num_loose_bvars(e.core) == 0 { 0 } else { inner_depth };
+                if let Some(inner_cached) = self.tc_cache.wnu_cache_get(inner_bucket, &e.core) {
                     self.ctx.trace.wnu_cache_hits += 1;
-                    return SPtr::new(inner_cached.ptr, inner_cached.shift + e.shift);
+                    return SPtr::new(inner_cached.core, inner_cached.shift + e.shift);
                 }
             }
             self.ctx.trace.wnu_shift_peel += 1;
             self.ctx.trace.shift_peel_frames_total += e.shift as u64;
             if inner_depth == 0 {
-                let r = self.whnf_no_unfolding_aux(SPtr::unshifted(e.ptr), cheap_proj);
+                let r = self.whnf_no_unfolding_aux(SPtr::unshifted(e.core), cheap_proj);
                 return self.ctx.push_shift_up(r, e.shift);
             }
             let saved = self.tc_cache.split_off(inner_depth);
-            let r = self.whnf_no_unfolding_aux(SPtr::unshifted(e.ptr), cheap_proj);
+            let r = self.whnf_no_unfolding_aux(SPtr::unshifted(e.core), cheap_proj);
             self.tc_cache.extend(saved);
             return self.ctx.push_shift_up(r, e.shift);
         }
@@ -1037,7 +1036,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                 cur_depth as usize
             };
             if cur.shift == 0 {
-                if let Some(cached) = self.tc_cache.wnu_cache_get(wnu_bucket_idx, &cur.ptr) {
+                if let Some(cached) = self.tc_cache.wnu_cache_get(wnu_bucket_idx, &cur.core) {
                     self.ctx.trace.wnu_cache_hits += 1;
                     break cached;
                 }
@@ -1141,12 +1140,12 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             let store_depth = self.depth() as u16;
             for entry in cache_entries {
                 if entry.shift > 0 { continue; }
-                let entry_bucket_idx = if self.ctx.num_loose_bvars(entry.ptr) == 0 {
+                let entry_bucket_idx = if self.ctx.num_loose_bvars(entry.core) == 0 {
                     0
                 } else {
                     store_depth as usize
                 };
-                self.tc_cache.wnu_cache_insert(entry_bucket_idx, entry.ptr, result);
+                self.tc_cache.wnu_cache_insert(entry_bucket_idx, entry.core, result);
             }
         }
         result
@@ -1156,7 +1155,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         if self.ctx.is_nat_zero(x) && self.ctx.is_nat_zero(y) {
             return Some(true)
         }
-        if let (NatLit { .. }, NatLit { .. }) = (self.ctx.read_expr(x.ptr), self.ctx.read_expr(y.ptr)) {
+        if let (NatLit { .. }, NatLit { .. }) = (self.ctx.read_expr(x.core), self.ctx.read_expr(y.core)) {
             assert!(self.ctx.export_file.config.nat_extension);
             return Some(x == y)
         }
@@ -1222,7 +1221,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
     }
     fn def_eq_const(&mut self, x: SPtr<'t>, y: SPtr<'t>) -> bool {
         // Const is closed, so read_expr on ptr works fine
-        match (self.ctx.read_expr(x.ptr), self.ctx.read_expr(y.ptr)) {
+        match (self.ctx.read_expr(x.core), self.ctx.read_expr(y.core)) {
             (Const { name: x_name, levels: x_levels, .. }, Const { name: y_name, levels: y_levels, .. }) =>
                 x_name == y_name && self.ctx.eq_antisymm_many(x_levels, y_levels),
             _ => false,
@@ -1261,7 +1260,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
     fn cheap_eq(&mut self, x: SPtr<'t>, y: SPtr<'t>) -> bool {
         x == y
             || self.eq_cache_contains(x, y)
-            || self.tc_cache.eq_cache_uf.check_uf_eq(x.ptr, y.ptr)
+            || self.tc_cache.eq_cache_uf.check_uf_eq(x.core, y.core)
             || self.defeq_open_lookup(true, x, y)
     }
 
@@ -1297,12 +1296,12 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
     pub fn assert_def_eq(&mut self, u: SPtr<'t>, v: SPtr<'t>) {
         if !self.def_eq(u, v) {
             eprintln!("  assert_def_eq FAILED:");
-            eprintln!("    u = {} (ptr={:?}@{} shift={})", self.ctx.expr_desc(u.ptr, 15), u.ptr.dag_marker(), u.ptr.idx(), u.shift);
-            eprintln!("    v = {} (ptr={:?}@{} shift={})", self.ctx.expr_desc(v.ptr, 15), v.ptr.dag_marker(), v.ptr.idx(), v.shift);
+            eprintln!("    u = {} (ptr={:?}@{} shift={})", self.ctx.expr_desc(u.core, 15), u.core.dag_marker(), u.core.idx(), u.shift);
+            eprintln!("    v = {} (ptr={:?}@{} shift={})", self.ctx.expr_desc(v.core, 15), v.core.dag_marker(), v.core.idx(), v.shift);
             let u_whnf = self.whnf(u);
             let v_whnf = self.whnf(v);
-            eprintln!("    u_whnf = {} (shift={})", self.ctx.expr_desc(u_whnf.ptr, 15), u_whnf.shift);
-            eprintln!("    v_whnf = {} (shift={})", self.ctx.expr_desc(v_whnf.ptr, 15), v_whnf.shift);
+            eprintln!("    u_whnf = {} (shift={})", self.ctx.expr_desc(u_whnf.core, 15), u_whnf.shift);
+            eprintln!("    v_whnf = {} (shift={})", self.ctx.expr_desc(v_whnf.core, 15), v_whnf.shift);
             self.find_diff(u, v, 0);
             panic!("assert_def_eq failed");
         }
@@ -1331,7 +1330,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             }
             _ => {
                 eprintln!("{}LEAF DIFF at depth {}: {} vs {}", prefix, depth,
-                    self.ctx.expr_desc(u.ptr, 5), self.ctx.expr_desc(v.ptr, 5));
+                    self.ctx.expr_desc(u.core, 5), self.ctx.expr_desc(v.core, 5));
             }
         }
     }
@@ -1355,7 +1354,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                 // Cache the result for future lookups
                 self.eq_cache_insert(x, y);
                 self.defeq_open_store_pos(x, y);
-                self.tc_cache.eq_cache_uf.union(x.ptr, y.ptr);
+                self.tc_cache.eq_cache_uf.union(x.core, y.core);
                 return true;
             }
         }
@@ -1398,8 +1397,8 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                 self.eq_cache_insert(x, y);
                 self.eq_cache_insert(x_n, y_n);
                 self.defeq_open_store_pos(x, y);
-                self.tc_cache.eq_cache_uf.union(x.ptr, y.ptr);
-                self.tc_cache.eq_cache_uf.union(x_n.ptr, y_n.ptr);
+                self.tc_cache.eq_cache_uf.union(x.core, y.core);
+                self.tc_cache.eq_cache_uf.union(x_n.core, y_n.core);
                 return true;
             }
         }
@@ -1433,11 +1432,11 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         if result {
             self.eq_cache_insert(x, y);
             self.defeq_open_store_pos(x, y);
-            self.tc_cache.eq_cache_uf.union(x.ptr, y.ptr);
+            self.tc_cache.eq_cache_uf.union(x.core, y.core);
             // Also union shift-stripped versions so UF works across shift levels.
             // Sound because SPtr(a,k) = SPtr(b,k) iff a = b.
             if x.shift == y.shift && x.shift > 0 {
-                self.tc_cache.eq_cache_uf.union(x.ptr, y.ptr);
+                self.tc_cache.eq_cache_uf.union(x.core, y.core);
             }
         }
         result
@@ -1462,7 +1461,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         }
         let major_ty = self.infer_then_whnf(major, InferOnly);
         let f = self.ctx.unfold_apps_fun(major_ty);
-        match (self.ctx.read_expr(f.ptr), self.ctx.get_major_induct(rec)) {
+        match (self.ctx.read_expr(f.core), self.ctx.get_major_induct(rec)) {
             (Const { name, .. }, Some(n)) if name == n => {
                 let new_ctor_app = self.mk_nullary_ctor(major_ty, rec.num_params as usize)?;
                 // This sometimes has free variables.
@@ -1479,7 +1478,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
 
     fn is_ctor_app(&mut self, e: SPtr<'t>) -> Option<NamePtr<'t>> {
         let f = self.ctx.unfold_apps_fun(e);
-        if let Const { name, .. } = self.ctx.read_expr(f.ptr) {
+        if let Const { name, .. } = self.ctx.read_expr(f.core) {
             if let Some(Declar::Constructor { .. }) = self.env.get_declar(&name) {
                 return Some(name)
             }
@@ -1493,7 +1492,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         } else {
             let e_type = self.infer_then_whnf(e, InferOnly);
             let e_type_f = self.ctx.unfold_apps_fun(e_type);
-            match self.ctx.read_expr(e_type_f.ptr) {
+            match self.ctx.read_expr(e_type_f.core) {
                 Const { name, .. } if name == ind_name => {
                     let e_sort = self.infer_then_whnf(e_type, InferOnly);
                     // If it's a prop, return the original `e`
@@ -1558,7 +1557,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         };
         {
             let (qmk_const, qmk_args) = self.ctx.unfold_apps(qmk);
-            match self.ctx.read_expr(qmk_const.ptr) {
+            match self.ctx.read_expr(qmk_const.core) {
                 Const { name, .. } if name == self.ctx.export_file.name_cache.quot_mk? && qmk_args.len() == 3 => (),
                 _ => return None,
             };
@@ -1574,7 +1573,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
     // We only need the name and reducibility from this.
     fn get_applied_def(&mut self, e: SPtr<'t>) -> Option<(NamePtr<'t>, ReducibilityHint)> {
         let f = self.ctx.unfold_apps_fun(e);
-        if let Const { name, .. } = self.ctx.read_expr(f.ptr) {
+        if let Const { name, .. } = self.ctx.read_expr(f.core) {
             if let Some(Declar::Definition { info, hint, .. }) = self.env.get_declar(&name) {
                 return Some((info.name, *hint))
             } else if let Some(Declar::Theorem { info, .. }) = self.env.get_declar(&name) {
@@ -1595,7 +1594,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
     /// do any further reduction.
     fn unfold_def(&mut self, e: SPtr<'t>) -> Option<SPtr<'t>> {
         let (fun, args) = self.ctx.unfold_apps(e);
-        let (name, levels) = self.ctx.try_const_info(fun.ptr)?;
+        let (name, levels) = self.ctx.try_const_info(fun.core)?;
         let (def_uparams, def_value) = self.env.get_declar_val(&name)?;
         if self.ctx.read_levels(levels).len() == self.ctx.read_levels(def_uparams).len() {
             let def_val = self.ctx.subst_expr_levels(def_value, def_uparams, levels);
@@ -1607,7 +1606,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
 
     fn def_eq_sort(&mut self, x: SPtr<'t>, y: SPtr<'t>) -> Option<bool> {
         // Sort is closed, shift irrelevant
-        match (self.ctx.read_expr(x.ptr), self.ctx.read_expr(y.ptr)) {
+        match (self.ctx.read_expr(x.core), self.ctx.read_expr(y.core)) {
             (Sort { level: l, .. }, Sort { level: r, .. }) => Some(self.ctx.eq_antisymm(l, r)),
             _ => None,
         }
@@ -1623,7 +1622,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         }
         // Transitive pointer-based UnionFind: if A=B and B=C were proven,
         // finds A=C in O(alpha(n)) without needing a direct cache entry.
-        if x.shift == y.shift && self.tc_cache.eq_cache_uf.check_uf_eq(x.ptr, y.ptr) {
+        if x.shift == y.shift && self.tc_cache.eq_cache_uf.check_uf_eq(x.core, y.core) {
             self.ctx.trace.eq_cache_uf_hits += 1;
             return Some(true)
         }
@@ -1641,7 +1640,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
     }
 
     fn failure_cache_contains(&mut self, x: SPtr<'t>, y: SPtr<'t>) -> bool {
-        let (key, _swapped) = self.defeq_canon_key(x.ptr, y.ptr);
+        let (key, _swapped) = self.defeq_canon_key(x.core, y.core);
         if self.tc_cache.failure_cache.contains(&key) {
             return true;
         }
@@ -1652,7 +1651,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
     }
 
     fn failure_cache_insert(&mut self, x: SPtr<'t>, y: SPtr<'t>) {
-        let (key, _swapped) = self.defeq_canon_key(x.ptr, y.ptr);
+        let (key, _swapped) = self.defeq_canon_key(x.core, y.core);
         self.tc_cache.failure_cache.insert(key);
         self.defeq_open_store_neg(x, y);
     }
@@ -1679,7 +1678,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
 
     /// Pointer-based eq_cache lookup for closed expressions.
     fn eq_cache_contains(&mut self, x: SPtr<'t>, y: SPtr<'t>) -> bool {
-        let (key, _swapped) = self.defeq_canon_key(x.ptr, y.ptr);
+        let (key, _swapped) = self.defeq_canon_key(x.core, y.core);
         if self.tc_cache.eq_cache.contains(&key) {
             self.ctx.trace.eq_cache_hits += 1;
             return true;
@@ -1689,7 +1688,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
 
     /// Pointer-based eq_cache insert for closed expressions.
     fn eq_cache_insert(&mut self, x: SPtr<'t>, y: SPtr<'t>) {
-        let (key, _swapped) = self.defeq_canon_key(x.ptr, y.ptr);
+        let (key, _swapped) = self.defeq_canon_key(x.core, y.core);
         self.tc_cache.eq_cache.insert(key);
     }
 
@@ -1710,7 +1709,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         y: SPtr<'t>,
     ) -> bool {
         let Some(bucket_idx) = self.defeq_bucket_idx(x, y) else { return false };
-        let (key, _swapped) = self.defeq_canon_key(x.ptr, y.ptr);
+        let (key, _swapped) = self.defeq_canon_key(x.core, y.core);
         let Some(&(_stored_a, _stored_b, _stored_depth)) = self.tc_cache.defeq_open_get(is_pos, bucket_idx, &key) else { return false };
         if is_pos { self.ctx.trace.defeq_open_pos_hits += 1; } else { self.ctx.trace.defeq_open_neg_hits += 1; }
         true
@@ -1736,8 +1735,8 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         let y_lb = if y_nlbv > 0 { y.shift } else { u16::MAX };
         let min_lb = x_lb.min(y_lb);
         let bucket_idx = (depth - 1 - min_lb) as usize;
-        let (key, swapped) = self.defeq_canon_key(x.ptr, y.ptr);
-        let (sx, sy) = if swapped { (y.ptr, x.ptr) } else { (x.ptr, y.ptr) };
+        let (key, swapped) = self.defeq_canon_key(x.core, y.core);
+        let (sx, sy) = if swapped { (y.core, x.core) } else { (x.core, y.core) };
         if self.tc_cache.defeq_open_get(is_pos, bucket_idx, &key).map_or(true, |&(_, _, sd)| depth < sd) {
             self.tc_cache.defeq_open_insert(is_pos, bucket_idx, key, (sx, sy, depth));
         }
@@ -1769,7 +1768,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             (App { .. }, App { .. }) if (x_defname == y_defname) => {
                 let (l_fun, l_args) = self.ctx.unfold_apps(x);
                 let (r_fun, r_args) = self.ctx.unfold_apps(y);
-                match (self.ctx.read_expr(l_fun.ptr), self.ctx.read_expr(r_fun.ptr)) {
+                match (self.ctx.read_expr(l_fun.core), self.ctx.read_expr(r_fun.core)) {
                     (Const { levels: l_levels, .. }, Const { levels: r_levels, .. })
                         if l_args.len() == r_args.len()
                             && !self.failure_cache_contains(x, y)
