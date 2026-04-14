@@ -934,7 +934,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                 let inner_bucket = if self.ctx.num_loose_bvars(e.ptr) == 0 { 0 } else { inner_depth };
                 if let Some(inner_cached) = self.tc_cache.whnf_cache_get(inner_bucket, &e.ptr) {
                     self.ctx.trace.whnf_cache_hits += 1;
-                    return SPtr::new(inner_cached, e.shift);
+                    return SPtr::new(inner_cached.ptr, inner_cached.shift + e.shift);
                 }
             }
             if depth == 0 {
@@ -958,7 +958,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         };
         if let Some(result) = self.tc_cache.whnf_cache_get(whnf_bucket_idx, &e.ptr) {
             self.ctx.trace.whnf_cache_hits += 1;
-            return SPtr::unshifted(result);
+            return result;
         }
         let mut cursor = e;
         loop {
@@ -968,7 +968,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             } else if let Some(next_term) = self.unfold_def(whnfd) {
                 cursor = next_term;
             } else {
-                self.tc_cache.whnf_cache_insert(whnf_bucket_idx, e.ptr, whnfd.ptr);
+                self.tc_cache.whnf_cache_insert(whnf_bucket_idx, e.ptr, whnfd);
                 return whnfd
             }
         }
@@ -993,7 +993,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                 let inner_bucket = if self.ctx.num_loose_bvars(e.ptr) == 0 { 0 } else { inner_depth };
                 if let Some(inner_cached) = self.tc_cache.wnu_cache_get(inner_bucket, &e.ptr) {
                     self.ctx.trace.wnu_cache_hits += 1;
-                    return self.ctx.push_shift_up(SPtr::unshifted(inner_cached), e.shift);
+                    return SPtr::new(inner_cached.ptr, inner_cached.shift + e.shift);
                 }
             }
             self.ctx.trace.wnu_shift_peel += 1;
@@ -1023,7 +1023,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             if cur.shift == 0 {
                 if let Some(cached) = self.tc_cache.wnu_cache_get(wnu_bucket_idx, &cur.ptr) {
                     self.ctx.trace.wnu_cache_hits += 1;
-                    break SPtr::unshifted(cached);
+                    break cached;
                 }
             }
             let (e_fun, args) = self.ctx.unfold_apps(cur);
@@ -1129,7 +1129,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                 } else {
                     store_depth as usize
                 };
-                self.tc_cache.wnu_cache_insert(entry_bucket_idx, entry.ptr, result.ptr);
+                self.tc_cache.wnu_cache_insert(entry_bucket_idx, entry.ptr, result);
             }
         }
         result

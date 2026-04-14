@@ -165,9 +165,9 @@ pub(crate) struct DepthFrame<'t> {
     /// Types are SPtrs valid at the depth where the binder was entered.
     pub(crate) local: (SPtr<'t>, Option<SPtr<'t>>),
     /// Per-depth whnf cache: ExprPtr → result.
-    pub(crate) whnf_cache: LazyMap<ExprPtr<'t>, ExprPtr<'t>>,
+    pub(crate) whnf_cache: LazyMap<ExprPtr<'t>, SPtr<'t>>,
     /// Per-depth whnf_no_unfolding cache.
-    pub(crate) whnf_no_unfolding_cache: LazyMap<ExprPtr<'t>, ExprPtr<'t>>,
+    pub(crate) whnf_no_unfolding_cache: LazyMap<ExprPtr<'t>, SPtr<'t>>,
     /// Per-depth infer cache (check mode): ExprPtr → result.
     pub(crate) infer_cache_check: LazyMap<ExprPtr<'t>, SPtr<'t>>,
     /// Per-depth infer cache (no-check mode): ExprPtr → result.
@@ -960,16 +960,15 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
     /// is body_shift - 1 (body_shift accounts for cutoff=0, minus 1 for the binder).
     /// body_nlbv <= 1 means body only has Var(0) (bound by this binder), no contribution.
     fn binder_min_shift(&self, ty_nlbv: u16, ty_shift: u16, body_nlbv: u16, body_shift: u16) -> u16 {
+        // Body's outer contribution: body.shift.saturating_sub(1)
+        // (body.shift == 0 means body has free vars at outer index 0, so contribution = 0)
         if ty_nlbv == 0 && body_nlbv <= 1 { 0 }
         else if ty_nlbv == 0 {
-            // Only body contributes; effective body fvar_lb = body_shift - 1
-            debug_assert!(body_shift >= 1, "body_nlbv > 1 but body_shift == 0");
-            body_shift - 1
+            body_shift.saturating_sub(1)
         }
         else if body_nlbv <= 1 { ty_shift }
         else {
-            debug_assert!(body_shift >= 1, "body_nlbv > 1 but body_shift == 0");
-            ty_shift.min(body_shift - 1)
+            ty_shift.min(body_shift.saturating_sub(1))
         }
     }
 
@@ -1123,8 +1122,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         if ty_nlbv > 0 { min_shift = min_shift.min(binder_type.shift); }
         if val_nlbv > 0 { min_shift = min_shift.min(val.shift); }
         if body_nlbv > 1 {
-            debug_assert!(body.shift >= 1, "mk_let: body_nlbv > 1 but body.shift == 0");
-            min_shift = min_shift.min(body.shift - 1);
+            min_shift = min_shift.min(body.shift.saturating_sub(1));
         }
         if min_shift == u16::MAX { min_shift = 0; }
         let adj_ty = if ty_nlbv == 0 { binder_type } else { SPtr::new(binder_type.ptr, binder_type.shift - min_shift) };
@@ -1570,9 +1568,9 @@ pub struct NameCache<'p> {
 pub(crate) struct TcCache<'t> {
     // === Base buckets (bucket 0): closed expressions, never evicted ===
     /// WHNF cache for closed expressions: ExprPtr → result.
-    pub(crate) whnf_cache_base: FxHashMap<ExprPtr<'t>, ExprPtr<'t>>,
+    pub(crate) whnf_cache_base: FxHashMap<ExprPtr<'t>, SPtr<'t>>,
     /// whnf_no_unfolding cache for closed expressions.
-    pub(crate) wnu_cache_base: FxHashMap<ExprPtr<'t>, ExprPtr<'t>>,
+    pub(crate) wnu_cache_base: FxHashMap<ExprPtr<'t>, SPtr<'t>>,
     /// Infer cache (check mode) for closed expressions: ExprPtr → result.
     pub(crate) infer_cache_check_base: FxHashMap<ExprPtr<'t>, SPtr<'t>>,
     /// Infer cache (no-check mode) for closed expressions: ExprPtr → result.
@@ -1674,22 +1672,22 @@ impl<'t> TcCache<'t> {
     // For whnf/infer/wnu caches: bucket 0 = base, bucket k>0 = frames[k-1].
     // For defeq caches: bucket k = frames[k] (no base bucket).
 
-    pub(crate) fn whnf_cache_get(&self, bucket_idx: usize, key: &ExprPtr<'t>) -> Option<ExprPtr<'t>> {
+    pub(crate) fn whnf_cache_get(&self, bucket_idx: usize, key: &ExprPtr<'t>) -> Option<SPtr<'t>> {
         if bucket_idx == 0 { self.whnf_cache_base.get(key).copied() }
         else { self.frames.get(bucket_idx - 1)?.whnf_cache.get(key).copied() }
     }
 
-    pub(crate) fn whnf_cache_insert(&mut self, bucket_idx: usize, key: ExprPtr<'t>, val: ExprPtr<'t>) {
+    pub(crate) fn whnf_cache_insert(&mut self, bucket_idx: usize, key: ExprPtr<'t>, val: SPtr<'t>) {
         if bucket_idx == 0 { self.whnf_cache_base.insert(key, val); }
         else if let Some(f) = self.frames.get_mut(bucket_idx - 1) { f.whnf_cache.insert(key, val); }
     }
 
-    pub(crate) fn wnu_cache_get(&self, bucket_idx: usize, key: &ExprPtr<'t>) -> Option<ExprPtr<'t>> {
+    pub(crate) fn wnu_cache_get(&self, bucket_idx: usize, key: &ExprPtr<'t>) -> Option<SPtr<'t>> {
         if bucket_idx == 0 { self.wnu_cache_base.get(key).copied() }
         else { self.frames.get(bucket_idx - 1)?.whnf_no_unfolding_cache.get(key).copied() }
     }
 
-    pub(crate) fn wnu_cache_insert(&mut self, bucket_idx: usize, key: ExprPtr<'t>, val: ExprPtr<'t>) {
+    pub(crate) fn wnu_cache_insert(&mut self, bucket_idx: usize, key: ExprPtr<'t>, val: SPtr<'t>) {
         if bucket_idx == 0 { self.wnu_cache_base.insert(key, val); }
         else if let Some(f) = self.frames.get_mut(bucket_idx - 1) { f.whnf_no_unfolding_cache.insert(key, val); }
     }
