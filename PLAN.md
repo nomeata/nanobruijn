@@ -495,6 +495,12 @@ cascading cache misses → repeated whnf/infer → more expression creation → 
   - Fewer entries in the DAGs
   - Caches only cache core expressions anyway
 
+- **Optimize view_expr usage**: Don't use view_expr when only checking closed constructors
+  (Sort, Const, NatLit) — these can never be Shift-wrapped, so read_expr suffices.
+  Use `is_app_of_const(e, name, arity)` pattern (peel Shift+App via read_expr without
+  pushing shifts) instead of view_expr chains for simple head-const checks.
+  Cache unfold_apps results for heavy declarations (lazily allocated, like mk_app DM cache).
+
 - **fvar_lb removal**: If all expressions are in OSNF, then fvar_lb is derivable:
   - Var(k) → fvar_lb = k
   - Shift(n, core) → fvar_lb = n (core has fvar_lb = 0)
