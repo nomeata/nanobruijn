@@ -656,8 +656,19 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         if e.shift > 0 {
             let depth = self.depth();
             let is_check = flag == InferFlag::Check;
-            // Fast path: check if inner's result is already cached at the lower depth.
-            let inner_depth = depth - e.shift as usize;
+            // If shift > depth, the expression is from a shallower context.
+            // For closed expressions, shift is irrelevant. For open ones, clamp to depth.
+            if (e.shift as usize) > depth {
+                // Expression shifted beyond current depth — treat as if at depth 0
+                if self.ctx.num_loose_bvars(e.ptr) == 0 {
+                    // Closed: just infer unshifted
+                    let r = self.infer(SPtr::unshifted(e.ptr), flag);
+                    return SPtr::new(r.ptr, r.shift + e.shift);
+                }
+                // Open with shift > depth: shouldn't happen in well-typed programs.
+                // Fall through to peel with clamped depth.
+            }
+            let inner_depth = depth.saturating_sub(e.shift as usize);
             let inner_bucket = if self.ctx.num_loose_bvars(e.ptr) == 0 { 0 } else { inner_depth };
             if let Some(inner_cached) = self.tc_cache.infer_cache_get(inner_bucket, &e.ptr, true) {
                 self.ctx.trace.infer_cache_hits += 1;
@@ -928,23 +939,22 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         // whnf is shift-equivariant: whnf(SPtr(ptr, k)) = push_shift_up(whnf(SPtr(ptr, 0)), k)
         if e.shift > 0 {
             let depth = self.depth();
+            let inner_depth = depth.saturating_sub(e.shift as usize);
             // Fast path: check if inner's whnf result is already cached at the lower depth.
-            if depth > 0 {
-                let inner_depth = depth - e.shift as usize;
+            if depth > 0 && (e.shift as usize) <= depth {
                 let inner_bucket = if self.ctx.num_loose_bvars(e.ptr) == 0 { 0 } else { inner_depth };
                 if let Some(inner_cached) = self.tc_cache.whnf_cache_get(inner_bucket, &e.ptr) {
                     self.ctx.trace.whnf_cache_hits += 1;
                     return SPtr::new(inner_cached.ptr, inner_cached.shift + e.shift);
                 }
             }
-            if depth == 0 {
+            if inner_depth == 0 {
                 let r = self.whnf(SPtr::unshifted(e.ptr));
                 return SPtr::new(r.ptr, r.shift + e.shift);
             }
-            let new_depth = depth - e.shift as usize;
             self.ctx.trace.whnf_shift_peel += 1;
             self.ctx.trace.shift_peel_frames_total += e.shift as u64;
-            let saved = self.tc_cache.split_off(new_depth);
+            let saved = self.tc_cache.split_off(inner_depth);
             let r = self.whnf(SPtr::unshifted(e.ptr));
             self.tc_cache.extend(saved);
             return SPtr::new(r.ptr, r.shift + e.shift);
@@ -987,9 +997,9 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         // whnf_no_unfolding is shift-equivariant: peel SPtr shifts.
         if e.shift > 0 {
             let depth = self.depth();
+            let inner_depth = depth.saturating_sub(e.shift as usize);
             // Fast path: check if inner's wnu result is already cached at the lower depth.
-            if depth > 0 {
-                let inner_depth = depth - e.shift as usize;
+            if depth > 0 && (e.shift as usize) <= depth {
                 let inner_bucket = if self.ctx.num_loose_bvars(e.ptr) == 0 { 0 } else { inner_depth };
                 if let Some(inner_cached) = self.tc_cache.wnu_cache_get(inner_bucket, &e.ptr) {
                     self.ctx.trace.wnu_cache_hits += 1;
@@ -998,12 +1008,11 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             }
             self.ctx.trace.wnu_shift_peel += 1;
             self.ctx.trace.shift_peel_frames_total += e.shift as u64;
-            if depth == 0 {
+            if inner_depth == 0 {
                 let r = self.whnf_no_unfolding_aux(SPtr::unshifted(e.ptr), cheap_proj);
                 return self.ctx.push_shift_up(r, e.shift);
             }
-            let new_depth = depth - e.shift as usize;
-            let saved = self.tc_cache.split_off(new_depth);
+            let saved = self.tc_cache.split_off(inner_depth);
             let r = self.whnf_no_unfolding_aux(SPtr::unshifted(e.ptr), cheap_proj);
             self.tc_cache.extend(saved);
             return self.ctx.push_shift_up(r, e.shift);
