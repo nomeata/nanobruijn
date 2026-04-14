@@ -926,6 +926,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
     /// mk_var(k) returns SPtr(var0_ptr, k).
     pub fn mk_var(&mut self, dbj_idx: u16) -> SPtr<'t> {
         self.trace.alloc_mk_var += 1;
+        debug_assert!(dbj_idx < 10000, "mk_var: suspiciously large index {}", dbj_idx);
         let ptr = self.var0_ptr();
         SPtr::new(ptr, dbj_idx)
     }
@@ -1258,7 +1259,10 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
 
     /// Shift an SPtr up by `amount`. Pure value construction.
     pub fn push_shift_up(&self, e: SPtr<'t>, amount: u16) -> SPtr<'t> {
-        SPtr::new(e.ptr, e.shift + amount)
+        let new_shift = e.shift.checked_add(amount).expect(&format!(
+            "push_shift_up: shift overflow {}+{}", e.shift, amount));
+        debug_assert!(new_shift < 10000, "push_shift_up: suspiciously large shift {}", new_shift);
+        SPtr::new(e.ptr, new_shift)
     }
 
     /// Shift down: subtract `amount` from all free variable indices in the core expression.

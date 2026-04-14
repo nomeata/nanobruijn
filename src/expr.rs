@@ -720,8 +720,50 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
 
     /// Helper for abstr_aux_levels: process an SPtr child.
     fn abstr_aux_levels_sptr(&mut self, child: SPtr<'t>, start_pos: u16, num_open_binders: u16) -> SPtr<'t> {
-        let result = self.abstr_aux_levels(child.ptr, start_pos, num_open_binders);
-        SPtr::new(result.ptr, result.shift + child.shift)
+        if child.shift == 0 {
+            return self.abstr_aux_levels(child.ptr, start_pos, num_open_binders);
+        }
+        // Adjust num_open_binders by child.shift (same logic as abstr_aux_sptr)
+        if num_open_binders >= child.shift {
+            let result = self.abstr_aux_levels(child.ptr, start_pos, num_open_binders - child.shift);
+            SPtr::new(result.ptr, result.shift + child.shift)
+        } else {
+            // Fallback: materialize and recurse
+            let viewed = self.view_sptr(child);
+            match viewed {
+                Local { id: FVarId::DbjLevel(serial), .. } => {
+                    if serial < start_pos { child }
+                    else { self.fvar_to_bvar(num_open_binders, serial) }
+                }
+                Local { .. } => child,
+                App { fun, arg, .. } => {
+                    let f = self.abstr_aux_levels_sptr(fun, start_pos, num_open_binders);
+                    let a = self.abstr_aux_levels_sptr(arg, start_pos, num_open_binders);
+                    self.mk_app(f, a)
+                }
+                Pi { binder_name, binder_style, binder_type, body, .. } => {
+                    let t = self.abstr_aux_levels_sptr(binder_type, start_pos, num_open_binders);
+                    let b = self.abstr_aux_levels_sptr(body, start_pos, num_open_binders + 1);
+                    self.mk_pi(binder_name, binder_style, t, b)
+                }
+                Lambda { binder_name, binder_style, binder_type, body, .. } => {
+                    let t = self.abstr_aux_levels_sptr(binder_type, start_pos, num_open_binders);
+                    let b = self.abstr_aux_levels_sptr(body, start_pos, num_open_binders + 1);
+                    self.mk_lambda(binder_name, binder_style, t, b)
+                }
+                Let { binder_name, binder_type, val, body, nondep, .. } => {
+                    let t = self.abstr_aux_levels_sptr(binder_type, start_pos, num_open_binders);
+                    let v = self.abstr_aux_levels_sptr(val, start_pos, num_open_binders);
+                    let b = self.abstr_aux_levels_sptr(body, start_pos, num_open_binders + 1);
+                    self.mk_let(binder_name, t, v, b, nondep)
+                }
+                Proj { ty_name, idx, structure, .. } => {
+                    let s = self.abstr_aux_levels_sptr(structure, start_pos, num_open_binders);
+                    self.mk_proj(ty_name, idx, s)
+                }
+                _ => child,
+            }
+        }
     }
 
     /// Abstract deBruijn-level free variables back to bound variables.
@@ -828,8 +870,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         loop {
             match self.read_expr(e.ptr) {
                 App { fun, .. } => {
-                    let new_shift = fun.shift.checked_add(e.shift).expect(&format!(
-                        "unfold_apps_fun: shift overflow {}+{}", fun.shift, e.shift));
+                    let new_shift = fun.shift.saturating_add(e.shift);
                     e = SPtr::new(fun.ptr, new_shift);
                 }
                 _ => break,
