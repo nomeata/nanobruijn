@@ -206,13 +206,77 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
     }
 
     /// Inlined fast path for inst_aux on SPtr children.
-    /// Composes the child's shift into sh_amt before delegating to inst_aux.
+    /// Composes the child's SPtr shift (cutoff=0) with the pending (sh_amt, sh_cut).
     #[inline(always)]
     fn inst_aux_quick_sptr(&mut self, child: SPtr<'t>, substs: &[SPtr<'t>], offset: u16, shift_down: bool, sh_amt: i16, sh_cut: u16) -> SPtr<'t> {
-        // Compose child's shift with pending shift: new_sh_amt = sh_amt + child.shift
-        // (child.shift is always a non-negative shift on top of child.ptr)
-        let new_sh_amt = sh_amt + child.shift as i16;
-        self.inst_aux_quick(child.ptr, substs, offset, shift_down, new_sh_amt, sh_cut)
+        if child.shift == 0 {
+            // No child shift to compose
+            return self.inst_aux_quick(child.ptr, substs, offset, shift_down, sh_amt, sh_cut);
+        }
+        if sh_cut == 0 || child.shift >= sh_cut {
+            // Clean composition: child.shift >= sh_cut means all child vars are past the cutoff.
+            // Compose into: (sh_amt + child.shift, sh_cut) for sh_cut==0,
+            // or (sh_amt + child.shift, 0) for child.shift >= sh_cut.
+            let new_sh_amt = sh_amt + child.shift as i16;
+            let new_sh_cut = if sh_cut == 0 { 0 } else { 0 }; // both cases: cutoff becomes 0
+            return self.inst_aux_quick(child.ptr, substs, offset, shift_down, new_sh_amt, new_sh_cut);
+        }
+        // Mismatch: 0 < child.shift < sh_cut. Can't compose into a single (sh_amt, sh_cut).
+        // Materialize the child's view, then process each child of the viewed expression.
+        // For now, use a simpler approach: view the SPtr and recurse.
+        let viewed = self.view_sptr(child);
+        // Process the viewed expression (which has adjusted SPtr children)
+        // We need to process it as if it were at the current (sh_amt, sh_cut) level.
+        // The viewed expression is a temporary Expr, not in the DAG. We need to process its children.
+        match viewed {
+            Sort { .. } | Const { .. } | Local { .. } | StringLit { .. } | NatLit { .. } => {
+                SPtr::unshifted(child.ptr) // closed, shift irrelevant
+            }
+            Var { dbj_idx, .. } => {
+                // The viewed var already has the correct index (child.shift applied)
+                // Now apply pending (sh_amt, sh_cut)
+                let shifted_idx = if sh_amt != 0 && dbj_idx >= sh_cut { (dbj_idx as i16 + sh_amt) as u16 } else { dbj_idx };
+                let n_substs = substs.len() as u16;
+                if shifted_idx < offset {
+                    self.mk_var(shifted_idx)
+                } else {
+                    let rel_idx = shifted_idx - offset;
+                    if rel_idx < n_substs {
+                        let val = substs[substs.len() - 1 - rel_idx as usize];
+                        SPtr::new(val.ptr, val.shift + offset)
+                    } else if shift_down {
+                        self.mk_var(shifted_idx - n_substs)
+                    } else {
+                        self.mk_var(shifted_idx)
+                    }
+                }
+            }
+            App { fun, arg, .. } => {
+                let new_fun = self.inst_aux_quick_sptr(fun, substs, offset, shift_down, sh_amt, sh_cut);
+                let new_arg = self.inst_aux_quick_sptr(arg, substs, offset, shift_down, sh_amt, sh_cut);
+                self.mk_app(new_fun, new_arg)
+            }
+            Pi { binder_name, binder_style, binder_type, body, .. } => {
+                let new_type = self.inst_aux_quick_sptr(binder_type, substs, offset, shift_down, sh_amt, sh_cut);
+                let new_body = self.inst_aux_quick_sptr(body, substs, offset + 1, shift_down, sh_amt, sh_cut + 1);
+                self.mk_pi(binder_name, binder_style, new_type, new_body)
+            }
+            Lambda { binder_name, binder_style, binder_type, body, .. } => {
+                let new_type = self.inst_aux_quick_sptr(binder_type, substs, offset, shift_down, sh_amt, sh_cut);
+                let new_body = self.inst_aux_quick_sptr(body, substs, offset + 1, shift_down, sh_amt, sh_cut + 1);
+                self.mk_lambda(binder_name, binder_style, new_type, new_body)
+            }
+            Let { binder_name, binder_type, val, body, nondep, .. } => {
+                let new_type = self.inst_aux_quick_sptr(binder_type, substs, offset, shift_down, sh_amt, sh_cut);
+                let new_val = self.inst_aux_quick_sptr(val, substs, offset, shift_down, sh_amt, sh_cut);
+                let new_body = self.inst_aux_quick_sptr(body, substs, offset + 1, shift_down, sh_amt, sh_cut + 1);
+                self.mk_let(binder_name, new_type, new_val, new_body, nondep)
+            }
+            Proj { ty_name, idx, structure, .. } => {
+                let new_structure = self.inst_aux_quick_sptr(structure, substs, offset, shift_down, sh_amt, sh_cut);
+                self.mk_proj(ty_name, idx, new_structure)
+            }
+        }
     }
 
     /// Inlined fast path for inst_aux on children: avoids function call + stacker overhead
