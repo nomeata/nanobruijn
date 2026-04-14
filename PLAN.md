@@ -518,3 +518,28 @@ cascading cache misses → repeated whnf/infer → more expression creation → 
 - [Kernel implementation analysis](https://gist.github.com/nomeata/b0d8da6857cd2fd4c4a22c03ca404164)
 - [Type Checking in Lean 4](https://ammkrn.github.io/type_checking_in_lean4/title_page.html)
 - [Lean Type Theory](https://github.com/digama0/lean-type-theory)
+
+## SPtr Refactor Status (2026-04-14)
+
+**Branch**: `joachim/sptr-refactor`
+
+**Completed**:
+- SPtr type: `(ExprPtr, u16)` — shift-in-pointer
+- Expr enum: Shift variant removed, fvar_lb removed, children changed to SPtr
+- Only Var(0) in DAG; de Bruijn index carried in SPtr.shift
+- mk_app/mk_pi/mk_lambda/mk_let/mk_proj extract min_shift for OSNF
+- view_sptr replaces view_expr
+- unfold_apps returns (SPtr, SmallVec<[SPtr; 8]>)
+- All caches (whnf, wnu, infer) store SPtr values
+- Local context stores SPtr types
+- Parser builds SPtr children, only Var(0) in DAG
+- All files compile with 0 errors
+
+**Test status**: 73/126 tutorial tests pass
+
+**Known issues**:
+- inst_beta/inst_aux shift composition under nested binders is incorrect
+  for some cases (53 test failures, mostly inductive types)
+- The `inst_aux_quick_sptr` function's mismatch case (0 < child.shift < sh_cut)
+  falls back to view_sptr materialization, which may produce wrong results
+- push_shift_down is stubbed with todo\!() — needs proper SPtr implementation
