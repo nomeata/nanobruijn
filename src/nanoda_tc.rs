@@ -9,8 +9,8 @@ use crate::union_find::UnionFind;
 use crate::unique_hasher::UniqueHasher;
 use crate::util::{
     nat_div, nat_mod, nat_sub, nat_gcd, nat_land, nat_lor,
-    nat_xor, nat_shr, nat_shl, new_fx_hash_set, ExportFile, ExprPtr, FxHashSet,
-    LevelPtr, LevelsPtr, NamePtr, TcCtx, StringPtr
+    nat_xor, nat_shr, nat_shl, new_fx_hash_set, ExprPtr, FxHashSet,
+    LevelPtr, LevelsPtr, NamePtr, SPtr, TcCtx, StringPtr
 };
 use std::collections::HashMap;
 use std::hash::BuildHasherDefault;
@@ -29,7 +29,7 @@ use InferFlag::*;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum DeltaResult<'a> {
     FoundEqResult(bool),
-    Exhausted(ExprPtr<'a>, ExprPtr<'a>),
+    Exhausted(SPtr<'a>, SPtr<'a>),
 }
 
 /// An enum for type safety and convenience; used during nat literal reduction, and also for testing.
@@ -68,13 +68,13 @@ type UniqueHashMap<K, V> = HashMap<K, V, BuildHasherDefault<UniqueHasher>>;
 fn new_unique_hash_map<K, V>() -> UniqueHashMap<K, V> { UniqueHashMap::with_hasher(Default::default()) }
 
 pub(crate) struct NanodaTcCache<'t> {
-    pub(crate) infer_cache_check: UniqueHashMap<ExprPtr<'t>, ExprPtr<'t>>,
-    pub(crate) infer_cache_no_check: UniqueHashMap<ExprPtr<'t>, ExprPtr<'t>>,
-    pub(crate) whnf_cache: UniqueHashMap<ExprPtr<'t>, ExprPtr<'t>>,
-    pub(crate) whnf_no_unfolding_cache: UniqueHashMap<ExprPtr<'t>, ExprPtr<'t>>,
+    pub(crate) infer_cache_check: UniqueHashMap<ExprPtr<'t>, SPtr<'t>>,
+    pub(crate) infer_cache_no_check: UniqueHashMap<ExprPtr<'t>, SPtr<'t>>,
+    pub(crate) whnf_cache: UniqueHashMap<ExprPtr<'t>, SPtr<'t>>,
+    pub(crate) whnf_no_unfolding_cache: UniqueHashMap<ExprPtr<'t>, SPtr<'t>>,
     pub(crate) eq_cache: UnionFind<ExprPtr<'t>>,
     pub(crate) failure_cache: FxHashSet<(ExprPtr<'t>, ExprPtr<'t>)>,
-    pub(crate) strong_cache: UniqueHashMap<(ExprPtr<'t>, bool, bool), ExprPtr<'t>>,
+    pub(crate) strong_cache: UniqueHashMap<(ExprPtr<'t>, bool, bool), SPtr<'t>>,
 }
 
 impl<'t> NanodaTcCache<'t> {
@@ -138,7 +138,7 @@ impl<'x, 't: 'x, 'p: 't> NanodaTypeChecker<'x, 't, 'p> {
         let info = d.info();
         assert!(self.ctx.no_dupes_all_params(info.uparams));
         assert!(!self.ctx.has_fvars(info.ty));
-        let inferred_type = self.infer(info.ty, Check);
+        let inferred_type = self.infer(SPtr::unshifted(info.ty), Check);
         let sort = self.ensure_sort(inferred_type);
 
         // This is sort of a "soft" check in terms of soundness, but for theorems, ensure 
@@ -156,7 +156,7 @@ impl<'x, 't: 'x, 'p: 't> NanodaTypeChecker<'x, 't, 'p> {
 
     /// Infer a `Const` by retrieving its type from the environment, then substituting
     /// the universe parameters for the ones in the declaration we're checking.
-    fn infer_const(&mut self, c_name: NamePtr<'t>, c_uparams: LevelsPtr<'t>, flag: InferFlag) -> ExprPtr<'t> {
+    fn infer_const(&mut self, c_name: NamePtr<'t>, c_uparams: LevelsPtr<'t>, flag: InferFlag) -> SPtr<'t> {
         if let Some(declar_info) = self.env.get_declar(&c_name).map(|x| x.info()).cloned() {
             if let (Check, Some(this_declar_info)) = (flag, self.declar_info) {
                 for c_uparam in self.ctx.read_levels(c_uparams).iter().copied() {
@@ -170,8 +170,8 @@ impl<'x, 't: 'x, 'p: 't> NanodaTypeChecker<'x, 't, 'p> {
     }
 
     /// Retrieve the recursor rule corresponding to the constructor used in the major premise.
-    fn get_rec_rule(&self, rec_rules: &[RecRule<'t>], major_const: ExprPtr<'t>) -> Option<RecRule<'t>> {
-        if let Const { name: major_ctor_name, .. } = self.ctx.read_expr(major_const) {
+    fn get_rec_rule(&self, rec_rules: &[RecRule<'t>], major_const: SPtr<'t>) -> Option<RecRule<'t>> {
+        if let Const { name: major_ctor_name, .. } = self.ctx.read_expr(major_const.ptr) {
             for r @ RecRule { ctor_name, .. } in rec_rules.iter().copied() {
                 if ctor_name == major_ctor_name {
                     return Some(r)
@@ -182,7 +182,7 @@ impl<'x, 't: 'x, 'p: 't> NanodaTypeChecker<'x, 't, 'p> {
     }
 
     /// Expand `(x : Prod A B)` into `Prod.mk (Prod.fst x) (Prod.snd x)`
-    fn expand_eta_struct_aux(&mut self, e_type: ExprPtr<'t>, e: ExprPtr<'t>) -> Option<ExprPtr<'t>> {
+    fn expand_eta_struct_aux(&mut self, e_type: SPtr<'t>, e: SPtr<'t>) -> Option<SPtr<'t>> {
         // `c_name = Point`
         let (_f, c_name, c_levels, args) = self.ctx.unfold_const_apps(e_type)?;
         // `Point` declaration
@@ -208,46 +208,46 @@ impl<'x, 't: 'x, 'p: 't> NanodaTypeChecker<'x, 't, 'p> {
         Some(out)
     }
 
-    pub(crate) fn ensure_infers_as_sort(&mut self, e: ExprPtr<'t>) -> LevelPtr<'t> {
+    pub(crate) fn ensure_infers_as_sort(&mut self, e: SPtr<'t>) -> LevelPtr<'t> {
         let infd = self.infer(e, Check);
         self.ensure_sort(infd)
     }
 
-    pub(crate) fn ensure_sort(&mut self, e: ExprPtr<'t>) -> LevelPtr<'t> {
-        if let Sort { level, .. } = self.ctx.read_expr(e) {
+    pub(crate) fn ensure_sort(&mut self, e: SPtr<'t>) -> LevelPtr<'t> {
+        if let Sort { level, .. } = self.ctx.read_expr(e.ptr) {
             return level
         }
         let whnfd = self.whnf(e);
-        match self.ctx.read_expr(whnfd) {
+        match self.ctx.read_expr(whnfd.ptr) {
             Sort { level, .. } => level,
             _ => panic!("ensur_sort could not produce a sort"),
         }
     }
 
-    fn ensure_pi(&mut self, e: ExprPtr<'t>) -> ExprPtr<'t> {
-        if let Pi { .. } = self.ctx.view_expr(e) {
+    fn ensure_pi(&mut self, e: SPtr<'t>) -> SPtr<'t> {
+        if let Pi { .. } = self.ctx.read_expr(e.ptr) {
             return e
         }
         let whnfd = self.whnf(e);
-        match self.ctx.view_expr(whnfd) {
+        match self.ctx.read_expr(whnfd.ptr) {
             Pi { .. } => whnfd,
             _ => panic!("ensure_pi could not produce a pi"),
         }
     }
 
-    pub(crate) fn infer_sort_of(&mut self, e: ExprPtr<'t>, flag: InferFlag) -> LevelPtr<'t> {
+    pub(crate) fn infer_sort_of(&mut self, e: SPtr<'t>, flag: InferFlag) -> LevelPtr<'t> {
         let whnfd = self.infer_then_whnf(e, flag);
-        match self.ctx.read_expr(whnfd) {
+        match self.ctx.read_expr(whnfd.ptr) {
             Sort { level, .. } => level,
             _ => panic!("infer_sort_of could not infer a sort"),
         }
     }
 
-    fn try_eta_struct(&mut self, x: ExprPtr<'t>, y: ExprPtr<'t>) -> bool {
+    fn try_eta_struct(&mut self, x: SPtr<'t>, y: SPtr<'t>) -> bool {
         matches!(self.try_eta_struct_aux(x, y), Some(true)) || matches!(self.try_eta_struct_aux(y, x), Some(true))
     }
 
-    fn try_eta_struct_aux(&mut self, x: ExprPtr<'t>, y: ExprPtr<'t>) -> Option<bool> {
+    fn try_eta_struct_aux(&mut self, x: SPtr<'t>, y: SPtr<'t>) -> Option<bool> {
         let (_, name, _, args) = self.ctx.unfold_const_apps(y)?;
         let ConstructorData { inductive_name, num_params, num_fields, .. } = self.env.get_constructor(&name)?;
         if args.len() == (*num_params + *num_fields) as usize && self.env.can_be_struct(inductive_name) {
@@ -266,13 +266,13 @@ impl<'x, 't: 'x, 'p: 't> NanodaTypeChecker<'x, 't, 'p> {
         None
     }
 
-    fn str_lit_to_ctor_reducing(&mut self, x: StringPtr<'t>) -> Option<ExprPtr<'t>> {
+    fn str_lit_to_ctor_reducing(&mut self, x: StringPtr<'t>) -> Option<SPtr<'t>> {
         self.ctx.str_lit_to_constructor(x).map(|x| self.whnf(x))
     }
 
-    fn try_string_lit_expansion_aux(&mut self, x: ExprPtr<'t>, y: ExprPtr<'t>) -> Option<bool> {
-        if let (StringLit { ptr, .. }, App { fun, .. }) = self.ctx.read_expr_pair(x, y) {
-            if let Some((name, _levels)) = self.ctx.try_const_info(fun) {
+    fn try_string_lit_expansion_aux(&mut self, x: SPtr<'t>, y: SPtr<'t>) -> Option<bool> {
+        if let (StringLit { ptr, .. }, App { fun, .. }) = (self.ctx.read_expr(x.ptr), self.ctx.view_sptr(y)) {
+            if let Some((name, _levels)) = self.ctx.try_const_info(fun.ptr) {
                 if name == self.ctx.export_file.name_cache.string_of_list? {
                     // levels should be empty
                     let lhs = self.str_lit_to_ctor_reducing(ptr)?;
@@ -283,7 +283,7 @@ impl<'x, 't: 'x, 'p: 't> NanodaTypeChecker<'x, 't, 'p> {
         None
     }
 
-    fn try_string_lit_expansion(&mut self, x: ExprPtr<'t>, y: ExprPtr<'t>) -> bool {
+    fn try_string_lit_expansion(&mut self, x: SPtr<'t>, y: SPtr<'t>) -> bool {
         if !self.ctx.export_file.config.string_extension {
             return false
         }
@@ -292,7 +292,7 @@ impl<'x, 't: 'x, 'p: 't> NanodaTypeChecker<'x, 't, 'p> {
     }
 
     // For structures that carry no additional information, elements with the same type are def_eq.
-    fn def_eq_unit(&mut self, x: ExprPtr<'t>, y: ExprPtr<'t>) -> Option<bool> {
+    fn def_eq_unit(&mut self, x: SPtr<'t>, y: SPtr<'t>) -> Option<bool> {
         let x_ty = self.infer_then_whnf(x, InferOnly);
         let (_, name, _levels, _) = self.ctx.unfold_const_apps(x_ty)?;
         let InductiveData { num_indices, all_ctor_names, .. } = self.env.get_inductive(&name)?;
@@ -308,7 +308,7 @@ impl<'x, 't: 'x, 'p: 't> NanodaTypeChecker<'x, 't, 'p> {
         Some(self.def_eq(x_ty, y_type))
     }
 
-    fn do_nat_bin(&mut self, x: ExprPtr<'t>, y: ExprPtr<'t>, op: NatBinOp) -> Option<ExprPtr<'t>> {
+    fn do_nat_bin(&mut self, x: SPtr<'t>, y: SPtr<'t>, op: NatBinOp) -> Option<SPtr<'t>> {
         use NatBinOp::*;
         let (x, y) = (self.whnf(x), self.whnf(y));
         let (arg1, arg2) = (self.ctx.get_bignum_from_expr(x)?, self.ctx.get_bignum_from_expr(y)?);
@@ -329,19 +329,19 @@ impl<'x, 't: 'x, 'p: 't> NanodaTypeChecker<'x, 't, 'p> {
             Ble => self.ctx.bool_to_expr(arg1 <= arg2),
         }
     }
-    
+
     /// Try to reduce an expression `e` which is an application of `Nat.succ`,
     /// or an application of a supported binary operation. `e` must have no free
     /// variables.
-    pub(crate) fn try_reduce_nat(&mut self, e: ExprPtr<'t>) -> Option<ExprPtr<'t>> {
+    pub(crate) fn try_reduce_nat(&mut self, e: SPtr<'t>) -> Option<SPtr<'t>> {
         if !self.ctx.export_file.config.nat_extension {
             return None
         }
-        if self.ctx.has_fvars(e) {
+        if self.ctx.has_fvars(e.ptr) {
             return None
         }
-        let (f, args, _) = self.ctx.unfold_apps(e);
-        let out = match (self.ctx.read_expr(f), args.as_slice()) {
+        let (f, args) = self.ctx.unfold_apps(e);
+        let out = match (self.ctx.read_expr(f.ptr), args.as_slice()) {
             (Const { name, .. }, [arg]) if Some(name) == self.ctx.export_file.name_cache.nat_succ => {
                 let v_expr = self.whnf(*arg);
                 self.ctx.get_bignum_succ_from_expr(v_expr)
@@ -385,9 +385,9 @@ impl<'x, 't: 'x, 'p: 't> NanodaTypeChecker<'x, 't, 'p> {
         out
     }
 
-    fn reduce_proj(&mut self, idx: usize, structure: ExprPtr<'t>, cheap: bool) -> Option<ExprPtr<'t>> {
+    fn reduce_proj(&mut self, idx: usize, structure: SPtr<'t>, cheap: bool) -> Option<SPtr<'t>> {
         let mut structure = if cheap { self.whnf_no_unfolding_cheap_proj(structure) } else { self.whnf(structure) };
-        if let StringLit { ptr, .. } = self.ctx.read_expr(structure) {
+        if let StringLit { ptr, .. } = self.ctx.read_expr(structure.ptr) {
             if let Some(s) = self.str_lit_to_ctor_reducing(ptr) {
                 structure = s;
             }
@@ -398,13 +398,13 @@ impl<'x, 't: 'x, 'p: 't> NanodaTypeChecker<'x, 't, 'p> {
         Some(args.get(i).copied().unwrap())
     }
 
-    pub(crate) fn infer_then_whnf(&mut self, e: ExprPtr<'t>, flag: InferFlag) -> ExprPtr<'t> {
+    pub(crate) fn infer_then_whnf(&mut self, e: SPtr<'t>, flag: InferFlag) -> SPtr<'t> {
         let ty = self.infer(e, flag);
         self.whnf(ty)
     }
 
     #[allow(non_snake_case)]
-    fn infer_proj(&mut self, _ty_name: NamePtr<'t>, idx: usize, structure: ExprPtr<'t>) -> ExprPtr<'t> {
+    fn infer_proj(&mut self, _ty_name: NamePtr<'t>, idx: usize, structure: SPtr<'t>) -> SPtr<'t> {
         let (structure_ty_is_prop, structure_ty) = {
             let (is_proof, t) = self.is_proof(structure);
             (is_proof, self.whnf(t))
@@ -418,7 +418,7 @@ impl<'x, 't: 'x, 'p: 't> NanodaTypeChecker<'x, 't, 'p> {
         let mut ctor_ty = self.ctx.subst_declar_info_levels(*ctor_info, struct_ty_levels);
         for i in 0..(*num_params) {
             ctor_ty = self.whnf(ctor_ty);
-            match self.ctx.view_expr(ctor_ty) {
+            match self.ctx.view_sptr(ctor_ty) {
                 Pi { body, .. } => {
                     ctor_ty = self.ctx.inst(body, &[struct_ty_args[i as usize]]);
                 }
@@ -427,9 +427,9 @@ impl<'x, 't: 'x, 'p: 't> NanodaTypeChecker<'x, 't, 'p> {
         }
         for i in 0..idx {
             ctor_ty = self.whnf(ctor_ty);
-            match self.ctx.view_expr(ctor_ty) {
+            match self.ctx.view_sptr(ctor_ty) {
                 Pi { binder_type, body, .. } => {
-                    if self.ctx.num_loose_bvars(body) != 0 {
+                    if self.ctx.sptr_nlbv(body) != 0 {
                       if structure_ty_is_prop && !self.is_proposition(binder_type).0 {
                           panic!("infer_proj prop")
                       }
@@ -443,7 +443,7 @@ impl<'x, 't: 'x, 'p: 't> NanodaTypeChecker<'x, 't, 'p> {
             }
         }
         let reduced = self.whnf(ctor_ty);
-        match self.ctx.read_expr(reduced) {
+        match self.ctx.view_sptr(reduced) {
             Pi { binder_type, .. } => {
                 if structure_ty_is_prop && !self.is_proposition(binder_type).0 {
                     panic!("infer_proj prop")
@@ -454,20 +454,20 @@ impl<'x, 't: 'x, 'p: 't> NanodaTypeChecker<'x, 't, 'p> {
         }
     }
 
-    pub(crate) fn infer(&mut self, e: ExprPtr<'t>, flag: InferFlag) -> ExprPtr<'t> {
+    pub(crate) fn infer(&mut self, e: SPtr<'t>, flag: InferFlag) -> SPtr<'t> {
         self.ctx.trace.infer_calls += 1;
-        if let Some(cached) = self.tc_cache.infer_cache_check.get(&e).copied() {
+        if let Some(cached) = self.tc_cache.infer_cache_check.get(&e.ptr).copied() {
             self.ctx.trace.infer_cache_hits += 1;
             return cached
         }
         if flag == InferFlag::InferOnly {
-            if let Some(cached) = self.tc_cache.infer_cache_no_check.get(&e).copied() {
+            if let Some(cached) = self.tc_cache.infer_cache_no_check.get(&e.ptr).copied() {
                 self.ctx.trace.infer_cache_hits += 1;
                 return cached
             }
         }
-        let r = match self.ctx.read_expr(e) {
-            Local { binder_type, .. } => binder_type,
+        let r = match self.ctx.view_sptr(e) {
+            Local { binder_type, .. } => SPtr::unshifted(binder_type),
             Var { .. } => panic!("no loose bvars allowed in infer"),
             Sort { level, .. } => self.infer_sort(level, flag),
             App { .. } => self.infer_app(e, flag),
@@ -484,20 +484,19 @@ impl<'x, 't: 'x, 'p: 't> NanodaTypeChecker<'x, 't, 'p> {
                 assert!(self.ctx.export_file.config.string_extension);
                 self.ctx.string_type().unwrap()
             }
-            Shift { .. } => panic!("nanoda TC should not encounter Shift nodes"),
         };
         match flag {
             InferFlag::InferOnly => {
-                self.tc_cache.infer_cache_no_check.insert(e, r);
+                self.tc_cache.infer_cache_no_check.insert(e.ptr, r);
             }
             InferFlag::Check => {
-                self.tc_cache.infer_cache_check.insert(e, r);
+                self.tc_cache.infer_cache_check.insert(e.ptr, r);
             }
         }
         r
     }
 
-    fn infer_sort(&mut self, l: LevelPtr<'t>, flag: InferFlag) -> ExprPtr<'t> {
+    fn infer_sort(&mut self, l: LevelPtr<'t>, flag: InferFlag) -> SPtr<'t> {
         if let (Check, Some(declar_info)) = (flag, self.declar_info) {
             assert!(self.ctx.all_uparams_defined(l, declar_info.uparams))
         }
@@ -505,22 +504,22 @@ impl<'x, 't: 'x, 'p: 't> NanodaTypeChecker<'x, 't, 'p> {
         self.ctx.mk_sort(out)
     }
 
-    fn infer_app(&mut self, e: ExprPtr<'t>, flag: InferFlag) -> ExprPtr<'t> {
+    fn infer_app(&mut self, e: SPtr<'t>, flag: InferFlag) -> SPtr<'t> {
         let (mut fun, mut args) = self.ctx.unfold_apps_stack(e);
-        let mut ctx = Vec::new();
+        let mut ctx: Vec<SPtr<'t>> = Vec::new();
         fun = self.infer(fun, flag);
         while !args.is_empty() {
-            match self.ctx.view_expr(fun) {
+            match self.ctx.view_sptr(fun) {
                 Pi { binder_type, body, .. } => {
                     let arg = args.pop().unwrap();
                     if flag == Check {
                         let arg_type = self.infer(arg, flag);
                         let binder_type = self.ctx.inst(binder_type, ctx.as_slice());
                         let outer_scope_eager_setting = self.ctx.eager_mode;
-                        if self.ctx.is_eager_reduce_app(arg) {
+                        if self.ctx.is_eager_reduce_app(arg.ptr) {
                             self.ctx.eager_mode = true;
                         }
-                        // `arg_type` and `binder_type` get swapped here to accommodate the 
+                        // `arg_type` and `binder_type` get swapped here to accommodate the
                         // eager reduction branch in `def_eq` being focused on reducing the lhs.
                         self.assert_def_eq(binder_type, arg_type);
                         // replace the outer scope's setting before next iteration
@@ -532,7 +531,7 @@ impl<'x, 't: 'x, 'p: 't> NanodaTypeChecker<'x, 't, 'p> {
                 _ => {
                     let as_pi = self.ctx.inst(fun, ctx.as_slice());
                     let as_pi = self.ensure_pi(as_pi);
-                    match self.ctx.view_expr(as_pi) {
+                    match self.ctx.view_sptr(as_pi) {
                         Pi { .. } => {
                             // Only clear what we just instantiated.
                             ctx.clear();
@@ -570,25 +569,25 @@ impl<'x, 't: 'x, 'p: 't> NanodaTypeChecker<'x, 't, 'p> {
     //    }
     //}
 
-    fn infer_lambda(&mut self, mut e: ExprPtr<'t>, flag: InferFlag) -> ExprPtr<'t> {
-        let mut locals = Vec::new();
+    fn infer_lambda(&mut self, mut e: SPtr<'t>, flag: InferFlag) -> SPtr<'t> {
+        let mut locals: Vec<SPtr<'t>> = Vec::new();
         let start_pos = self.ctx.dbj_level_counter;
-        while let Lambda { binder_name, binder_style, binder_type, body, .. } = self.ctx.view_expr(e) {
+        while let Lambda { binder_name, binder_style, binder_type, body, .. } = self.ctx.view_sptr(e) {
             let binder_type = self.ctx.inst(binder_type, locals.as_slice());
             if let Check = flag {
                 self.infer_sort_of(binder_type, flag);
             }
 
-            let local = self.ctx.mk_dbj_level(binder_name, binder_style, binder_type);
+            let local = self.ctx.mk_dbj_level(binder_name, binder_style, binder_type.ptr);
             locals.push(local);
             e = body;
         }
 
         let instd = self.ctx.inst(e, locals.as_slice());
         let infd = self.infer(instd, flag);
-        let mut abstrd = self.ctx.abstr_levels(infd, start_pos);
+        let mut abstrd = self.ctx.abstr_levels(infd.ptr, start_pos);
         while let Some(local) = locals.pop() {
-            match self.ctx.read_expr(local) {
+            match self.ctx.read_expr(local.ptr) {
                 Local { binder_name, binder_style, binder_type, .. } => {
                     self.ctx.replace_dbj_level(local);
                     let t = self.ctx.abstr_levels(binder_type, start_pos);
@@ -600,15 +599,15 @@ impl<'x, 't: 'x, 'p: 't> NanodaTypeChecker<'x, 't, 'p> {
         abstrd
     }
 
-    fn infer_pi(&mut self, mut e: ExprPtr<'t>, flag: InferFlag) -> ExprPtr<'t> {
+    fn infer_pi(&mut self, mut e: SPtr<'t>, flag: InferFlag) -> SPtr<'t> {
         let mut universes = Vec::new();
-        let mut locals = Vec::new();
+        let mut locals: Vec<SPtr<'t>> = Vec::new();
         let c0 = self.ctx.dbj_level_counter;
-        while let Pi { binder_name, binder_style, binder_type, body, .. } = self.ctx.view_expr(e) {
+        while let Pi { binder_name, binder_style, binder_type, body, .. } = self.ctx.view_sptr(e) {
             let binder_type = self.ctx.inst(binder_type, locals.as_slice());
             let dom_univ = self.infer_sort_of(binder_type, flag);
             universes.push(dom_univ);
-            locals.push(self.ctx.mk_dbj_level(binder_name, binder_style, binder_type));
+            locals.push(self.ctx.mk_dbj_level(binder_name, binder_style, binder_type.ptr));
             e = body;
         }
         let instd = self.ctx.inst(e, locals.as_slice());
@@ -623,11 +622,11 @@ impl<'x, 't: 'x, 'p: 't> NanodaTypeChecker<'x, 't, 'p> {
 
     fn infer_let(
         &mut self,
-        binder_type: ExprPtr<'t>,
-        val: ExprPtr<'t>,
-        body: ExprPtr<'t>,
+        binder_type: SPtr<'t>,
+        val: SPtr<'t>,
+        body: SPtr<'t>,
         flag: InferFlag,
-    ) -> ExprPtr<'t> {
+    ) -> SPtr<'t> {
         if flag == Check {
             // The binder type has to be a type
             self.infer_sort_of(binder_type, flag);
@@ -641,10 +640,10 @@ impl<'x, 't: 'x, 'p: 't> NanodaTypeChecker<'x, 't, 'p> {
     
     // Not well tested, used for introspection/debugging.
     #[allow(dead_code)]
-    pub(crate) fn strong_reduce(&mut self, e: ExprPtr<'t>, reduce_types: bool, reduce_proofs: bool) -> ExprPtr<'t> {
+    pub(crate) fn strong_reduce(&mut self, e: SPtr<'t>, reduce_types: bool, reduce_proofs: bool) -> SPtr<'t> {
         if (!reduce_types) || (!reduce_proofs) {
             let ty = self.infer(e, InferOnly);
-            if !reduce_types && matches!(self.ctx.read_expr(ty), Sort {..}) {
+            if !reduce_types && matches!(self.ctx.read_expr(ty.ptr), Sort {..}) {
                 return e
             }
             if !reduce_proofs && self.is_proposition(ty).0 {
@@ -652,11 +651,11 @@ impl<'x, 't: 'x, 'p: 't> NanodaTypeChecker<'x, 't, 'p> {
             }
         }
         let e = self.whnf(e);
-        if let Some(cached) = self.tc_cache.strong_cache.get(&(e, reduce_types, reduce_proofs)).copied() {
+        if let Some(cached) = self.tc_cache.strong_cache.get(&(e.ptr, reduce_types, reduce_proofs)).copied() {
             return cached
         }
 
-        let out = match self.ctx.view_expr(e) {
+        let out = match self.ctx.view_sptr(e) {
             Expr::App {fun, arg, ..} => {
                 let f = self.strong_reduce(fun, reduce_types, reduce_proofs);
                 let arg = self.strong_reduce(arg, reduce_types, reduce_proofs);
@@ -664,11 +663,11 @@ impl<'x, 't: 'x, 'p: 't> NanodaTypeChecker<'x, 't, 'p> {
             }
             Expr::Lambda {binder_name, binder_style, binder_type, body, ..} => {
                 let start_pos = self.ctx.dbj_level_counter;
-                let local = self.ctx.mk_dbj_level(binder_name, binder_style, binder_type);
+                let local = self.ctx.mk_dbj_level(binder_name, binder_style, binder_type.ptr);
                 let instd = self.ctx.inst(body, &[local]);
                 let body = self.strong_reduce(instd, reduce_types, reduce_proofs);
-                let abstrd = self.ctx.abstr_levels(body, start_pos);
-                match self.ctx.read_expr(local) {
+                let abstrd = self.ctx.abstr_levels(body.ptr, start_pos);
+                match self.ctx.read_expr(local.ptr) {
                     Local {binder_name, binder_style, binder_type, ..} => {
                         self.ctx.replace_dbj_level(local);
                         let t = self.ctx.abstr_levels(binder_type, start_pos);
@@ -679,11 +678,11 @@ impl<'x, 't: 'x, 'p: 't> NanodaTypeChecker<'x, 't, 'p> {
             }
             Expr::Pi {binder_name, binder_style, binder_type, body, ..} => {
                 let start_pos = self.ctx.dbj_level_counter;
-                let local = self.ctx.mk_dbj_level(binder_name, binder_style, binder_type);
+                let local = self.ctx.mk_dbj_level(binder_name, binder_style, binder_type.ptr);
                 let instd = self.ctx.inst(body, &[local]);
                 let body = self.strong_reduce(instd, reduce_types, reduce_proofs);
-                let abstrd = self.ctx.abstr_levels(body, start_pos);
-                match self.ctx.read_expr(local) {
+                let abstrd = self.ctx.abstr_levels(body.ptr, start_pos);
+                match self.ctx.read_expr(local.ptr) {
                     Local {binder_name, binder_style, binder_type, ..} => {
                         self.ctx.replace_dbj_level(local);
                         let t = self.ctx.abstr_levels(binder_type, start_pos);
@@ -701,20 +700,20 @@ impl<'x, 't: 'x, 'p: 't> NanodaTypeChecker<'x, 't, 'p> {
                 } else {
                     x
                 }
-                
+
             }
             _ => e
         };
-        self.tc_cache.strong_cache.insert((e, reduce_types, reduce_proofs), out);
+        self.tc_cache.strong_cache.insert((e.ptr, reduce_types, reduce_proofs), out);
         out
     }
 
-    pub fn whnf(&mut self, e: ExprPtr<'t>) -> ExprPtr<'t> {
+    pub fn whnf(&mut self, e: SPtr<'t>) -> SPtr<'t> {
         self.ctx.trace.whnf_calls += 1;
-        if matches!(self.ctx.read_expr(e), NatLit { .. } | StringLit { .. }) {
+        if matches!(self.ctx.read_expr(e.ptr), NatLit { .. } | StringLit { .. }) {
             return e
         }
-        if let Some(cached) = self.tc_cache.whnf_cache.get(&e).copied() {
+        if let Some(cached) = self.tc_cache.whnf_cache.get(&e.ptr).copied() {
             self.ctx.trace.whnf_cache_hits += 1;
             return cached
         }
@@ -726,22 +725,22 @@ impl<'x, 't: 'x, 'p: 't> NanodaTypeChecker<'x, 't, 'p> {
             } else if let Some(next_term) = self.unfold_def(whnfd) {
                 cursor = next_term;
             } else {
-                self.tc_cache.whnf_cache.insert(e, whnfd);
+                self.tc_cache.whnf_cache.insert(e.ptr, whnfd);
                 return whnfd
             }
         }
     }
 
-    fn whnf_no_unfolding_cheap_proj(&mut self, e: ExprPtr<'t>) -> ExprPtr<'t> { self.whnf_no_unfolding_aux(e, true) }
+    fn whnf_no_unfolding_cheap_proj(&mut self, e: SPtr<'t>) -> SPtr<'t> { self.whnf_no_unfolding_aux(e, true) }
 
-    pub fn whnf_no_unfolding(&mut self, e: ExprPtr<'t>) -> ExprPtr<'t> { self.whnf_no_unfolding_aux(e, false) }
+    pub fn whnf_no_unfolding(&mut self, e: SPtr<'t>) -> SPtr<'t> { self.whnf_no_unfolding_aux(e, false) }
 
-    fn whnf_no_unfolding_aux(&mut self, e: ExprPtr<'t>, cheap_proj: bool) -> ExprPtr<'t> {
-        if let Some(cached) = self.tc_cache.whnf_no_unfolding_cache.get(&e).copied() {
+    fn whnf_no_unfolding_aux(&mut self, e: SPtr<'t>, cheap_proj: bool) -> SPtr<'t> {
+        if let Some(cached) = self.tc_cache.whnf_no_unfolding_cache.get(&e.ptr).copied() {
             return cached
         }
-        let (e_fun, args, _) = self.ctx.unfold_apps(e);
-        let (should_cache, eprime) = match self.ctx.view_expr(e_fun) {
+        let (e_fun, args) = self.ctx.unfold_apps(e);
+        let (should_cache, eprime) = match self.ctx.view_sptr(e_fun) {
             Proj { idx, structure, .. } =>
                 if let Some(e) = self.reduce_proj(idx as usize, structure, cheap_proj) {
                     let e = self.ctx.foldl_apps(e, args.into_iter());
@@ -757,7 +756,7 @@ impl<'x, 't: 'x, 'p: 't> NanodaTypeChecker<'x, 't, 'p> {
             }
             Lambda { .. } if !args.is_empty() => {
                 let (mut e, mut n_args) = (e_fun, 0usize);
-                while let (Lambda { body, .. }, [_arg, _rest @ ..]) = (self.ctx.view_expr(e), &args[n_args..]) {
+                while let (Lambda { body, .. }, [_arg, _rest @ ..]) = (self.ctx.view_sptr(e), &args[n_args..]) {
                     n_args += 1;
                     e = body;
                 }
@@ -789,19 +788,18 @@ impl<'x, 't: 'x, 'p: 't> NanodaTypeChecker<'x, 't, 'p> {
             }
             App { .. } => panic!(),
             Local { .. } | NatLit { .. } | StringLit { .. } => (false, self.ctx.foldl_apps(e_fun, args.into_iter())),
-            Shift { .. } => panic!("nanoda TC should not encounter Shift nodes"),
         };
         if should_cache && !cheap_proj {
-            self.tc_cache.whnf_no_unfolding_cache.insert(e, eprime);
+            self.tc_cache.whnf_no_unfolding_cache.insert(e.ptr, eprime);
         }
         eprime
     }
 
-    fn def_eq_nat(&mut self, x: ExprPtr<'t>, y: ExprPtr<'t>) -> Option<bool> {
+    fn def_eq_nat(&mut self, x: SPtr<'t>, y: SPtr<'t>) -> Option<bool> {
         if self.ctx.is_nat_zero(x) && self.ctx.is_nat_zero(y) {
             return Some(true)
         }
-        if let (NatLit { .. }, NatLit { .. }) = (self.ctx.read_expr(x), self.ctx.read_expr(y)) {
+        if let (NatLit { .. }, NatLit { .. }) = (self.ctx.read_expr(x.ptr), self.ctx.read_expr(y.ptr)) {
             assert!(self.ctx.export_file.config.nat_extension);
             return Some(x == y)
         }
@@ -812,8 +810,8 @@ impl<'x, 't: 'x, 'p: 't> NanodaTypeChecker<'x, 't, 'p> {
         }
     }
 
-    fn def_eq_binder_multi(&mut self, x: ExprPtr<'t>, y: ExprPtr<'t>) -> Option<bool> {
-        if matches!(self.ctx.view_expr_pair(x, y), (Pi { .. }, Pi { .. }) | (Lambda { .. }, Lambda { .. })) {
+    fn def_eq_binder_multi(&mut self, x: SPtr<'t>, y: SPtr<'t>) -> Option<bool> {
+        if matches!(self.ctx.view_sptr_pair(x, y), (Pi { .. }, Pi { .. }) | (Lambda { .. }, Lambda { .. })) {
             self.def_eq_binder_aux(x, y)
         } else {
             None
@@ -821,8 +819,8 @@ impl<'x, 't: 'x, 'p: 't> NanodaTypeChecker<'x, 't, 'p> {
     }
 
     #[allow(unused_parens)]
-    fn def_eq_binder_aux(&mut self, mut x: ExprPtr<'t>, mut y: ExprPtr<'t>) -> Option<bool> {
-        let mut locals = Vec::new();
+    fn def_eq_binder_aux(&mut self, mut x: SPtr<'t>, mut y: SPtr<'t>) -> Option<bool> {
+        let mut locals: Vec<SPtr<'t>> = Vec::new();
         while let (
             Pi { binder_name, binder_style, binder_type: t1, body: body1, .. },
             Pi { binder_type: t2, body: body2, .. },
@@ -830,12 +828,12 @@ impl<'x, 't: 'x, 'p: 't> NanodaTypeChecker<'x, 't, 'p> {
         | (
             Lambda { binder_name, binder_style, binder_type: t1, body: body1, .. },
             Lambda { binder_type: t2, body: body2, .. },
-        ) = self.ctx.view_expr_pair(x, y)
+        ) = self.ctx.view_sptr_pair(x, y)
         {
             let t1 = self.ctx.inst(t1, locals.as_slice());
             let t2 = self.ctx.inst(t2, locals.as_slice());
             if self.def_eq(t1, t2) {
-                locals.push(self.ctx.mk_dbj_level(binder_name, binder_style, t1));
+                locals.push(self.ctx.mk_dbj_level(binder_name, binder_style, t1.ptr));
                 x = body1;
                 y = body2;
             } else {
@@ -851,36 +849,36 @@ impl<'x, 't: 'x, 'p: 't> NanodaTypeChecker<'x, 't, 'p> {
         Some(r)
     }
 
-    fn def_eq_proj(&mut self, x: ExprPtr<'t>, y: ExprPtr<'t>) -> bool {
-        match self.ctx.view_expr_pair(x, y) {
+    fn def_eq_proj(&mut self, x: SPtr<'t>, y: SPtr<'t>) -> bool {
+        match self.ctx.view_sptr_pair(x, y) {
             (Proj { idx: idx_l, structure: structure_l, .. }, Proj { idx: idx_r, structure: structure_r, .. }) =>
                 idx_l == idx_r && self.def_eq(structure_l, structure_r),
             _ => false,
         }
     }
 
-    fn def_eq_local(&mut self, x: ExprPtr<'t>, y: ExprPtr<'t>) -> bool {
-        match self.ctx.read_expr_pair(x, y) {
+    fn def_eq_local(&mut self, x: SPtr<'t>, y: SPtr<'t>) -> bool {
+        match (self.ctx.read_expr(x.ptr), self.ctx.read_expr(y.ptr)) {
             (Local { id: x_id, binder_type: tx, .. }, Local { id: y_id, binder_type: ty, .. }) =>
-                x_id == y_id && self.def_eq(tx, ty),
+                x_id == y_id && self.def_eq(SPtr::unshifted(tx), SPtr::unshifted(ty)),
             _ => false,
         }
     }
-    fn def_eq_const(&mut self, x: ExprPtr<'t>, y: ExprPtr<'t>) -> bool {
-        match self.ctx.read_expr_pair(x, y) {
+    fn def_eq_const(&mut self, x: SPtr<'t>, y: SPtr<'t>) -> bool {
+        match (self.ctx.read_expr(x.ptr), self.ctx.read_expr(y.ptr)) {
             (Const { name: x_name, levels: x_levels, .. }, Const { name: y_name, levels: y_levels, .. }) =>
                 x_name == y_name && self.ctx.eq_antisymm_many(x_levels, y_levels),
             _ => false,
         }
     }
 
-    fn def_eq_app(&mut self, x: ExprPtr<'t>, y: ExprPtr<'t>) -> bool {
-        let (f1, args1, _) = self.ctx.unfold_apps(x);
+    fn def_eq_app(&mut self, x: SPtr<'t>, y: SPtr<'t>) -> bool {
+        let (f1, args1) = self.ctx.unfold_apps(x);
         if args1.is_empty() {
             return false
         }
 
-        let (f2, args2, _) = self.ctx.unfold_apps(y);
+        let (f2, args2) = self.ctx.unfold_apps(y);
         if args2.is_empty() {
             return false
         }
@@ -901,9 +899,9 @@ impl<'x, 't: 'x, 'p: 't> NanodaTypeChecker<'x, 't, 'p> {
         true
     }
 
-    pub fn assert_def_eq(&mut self, u: ExprPtr<'t>, v: ExprPtr<'t>) { assert!(self.def_eq(u, v)) }
+    pub fn assert_def_eq(&mut self, u: SPtr<'t>, v: SPtr<'t>) { assert!(self.def_eq(u, v)) }
 
-    pub fn def_eq(&mut self, x: ExprPtr<'t>, y: ExprPtr<'t>) -> bool {
+    pub fn def_eq(&mut self, x: SPtr<'t>, y: SPtr<'t>) -> bool {
         self.ctx.trace.def_eq_calls += 1;
         if let Some(easy) = self.def_eq_quick_check(x, y) {
             return easy
@@ -912,7 +910,7 @@ impl<'x, 't: 'x, 'p: 't> NanodaTypeChecker<'x, 't, 'p> {
         let x_n = self.whnf_no_unfolding_cheap_proj(x);
         let y_n = self.whnf_no_unfolding_cheap_proj(y);
 
-        if ((!self.ctx.has_fvars(x_n)) || self.ctx.eager_mode) && Some(y_n) == self.ctx.c_bool_true() {
+        if ((!self.ctx.has_fvars(x_n.ptr)) || self.ctx.eager_mode) && Some(y_n) == self.ctx.c_bool_true() {
             let x_nn = self.whnf(x_n);
             if Some(x_nn) == self.ctx.c_bool_true() {
                 return true
@@ -948,12 +946,12 @@ impl<'x, 't: 'x, 'p: 't> NanodaTypeChecker<'x, 't, 'p> {
             }
         };
         if result {
-            self.tc_cache.eq_cache.union(x, y);
+            self.tc_cache.eq_cache.union(x.ptr, y.ptr);
         }
         result
     }
 
-    fn mk_nullary_ctor(&mut self, e: ExprPtr<'t>, num_params: usize) -> Option<ExprPtr<'t>> {
+    fn mk_nullary_ctor(&mut self, e: SPtr<'t>, num_params: usize) -> Option<SPtr<'t>> {
         let (_fun, name, levels, args) = self.ctx.unfold_const_apps(e)?;
         let InductiveData { all_ctor_names, .. } = self.env.get_inductive(&name)?;
         let ctor_name = all_ctor_names[0];
@@ -964,15 +962,15 @@ impl<'x, 't: 'x, 'p: 't> NanodaTypeChecker<'x, 't, 'p> {
 
     fn to_ctor_when_k(
         &mut self,
-        major: ExprPtr<'t>,
+        major: SPtr<'t>,
         rec: &RecursorData<'t>,
-    ) -> Option<ExprPtr<'t>> {
+    ) -> Option<SPtr<'t>> {
         if !rec.is_k {
             return None
         }
         let major_ty = self.infer_then_whnf(major, InferOnly);
         let f = self.ctx.unfold_apps_fun(major_ty);
-        match (self.ctx.read_expr(f), self.ctx.get_major_induct(rec)) {
+        match (self.ctx.read_expr(f.ptr), self.ctx.get_major_induct(rec)) {
             (Const { name, .. }, Some(n)) if name == n => {
                 let new_ctor_app = self.mk_nullary_ctor(major_ty, rec.num_params as usize)?;
                 // This sometimes has free variables.
@@ -987,9 +985,9 @@ impl<'x, 't: 'x, 'p: 't> NanodaTypeChecker<'x, 't, 'p> {
         }
     }
 
-    fn is_ctor_app(&mut self, e: ExprPtr<'t>) -> Option<NamePtr<'t>> {
+    fn is_ctor_app(&mut self, e: SPtr<'t>) -> Option<NamePtr<'t>> {
         let fun = self.ctx.unfold_apps_fun(e);
-        if let Const { name, .. } = self.ctx.read_expr(fun) {
+        if let Const { name, .. } = self.ctx.read_expr(fun.ptr) {
             if let Some(Declar::Constructor { .. }) = self.env.get_declar(&name) {
                 return Some(name)
             }
@@ -997,13 +995,13 @@ impl<'x, 't: 'x, 'p: 't> NanodaTypeChecker<'x, 't, 'p> {
         None
     }
 
-    fn iota_try_eta_struct(&mut self, ind_name: NamePtr<'t>, e: ExprPtr<'t>) -> ExprPtr<'t> {
+    fn iota_try_eta_struct(&mut self, ind_name: NamePtr<'t>, e: SPtr<'t>) -> SPtr<'t> {
         if (!self.env.can_be_struct(&ind_name)) || self.is_ctor_app(e).is_some() {
             e
         } else {
             let e_type = self.infer_then_whnf(e, InferOnly);
             let e_type_f = self.ctx.unfold_apps_fun(e_type);
-            match self.ctx.read_expr(e_type_f) {
+            match self.ctx.read_expr(e_type_f.ptr) {
                 Const { name, .. } if name == ind_name => {
                     let e_sort = self.infer_then_whnf(e_type, InferOnly);
                     // If it's a prop, return the original `e`
@@ -1018,19 +1016,19 @@ impl<'x, 't: 'x, 'p: 't> NanodaTypeChecker<'x, 't, 'p> {
             }
         }
     }
-    
+
     fn reduce_rec(
         &mut self,
         const_name: NamePtr<'t>,
         const_levels: LevelsPtr<'t>,
-        args: &[ExprPtr<'t>],
-    ) -> Option<ExprPtr<'t>> {
+        args: &[SPtr<'t>],
+    ) -> Option<SPtr<'t>> {
         let rec @ RecursorData { info, rec_rules, num_params, num_motives, num_minors, .. } =
             self.env.get_recursor(&const_name)?;
         let major = args.get(rec.major_idx()).copied()?;
         let major = self.to_ctor_when_k(major, rec).unwrap_or(major);
         let major = self.whnf(major);
-        let major = match self.ctx.read_expr(major) {
+        let major = match self.ctx.read_expr(major.ptr) {
             NatLit { ptr, .. } => self.ctx.nat_lit_to_constructor(ptr).unwrap_or(major),
             StringLit { ptr, .. } => self.str_lit_to_ctor_reducing(ptr).unwrap_or(major),
             _ => {
@@ -1038,7 +1036,7 @@ impl<'x, 't: 'x, 'p: 't> NanodaTypeChecker<'x, 't, 'p> {
                 self.iota_try_eta_struct(ind_rec_name_prefix, major)
             }
         };
-        let (major_ctor, major_ctor_args, _) = self.ctx.unfold_apps(major);
+        let (major_ctor, major_ctor_args) = self.ctx.unfold_apps(major);
         let rec_rule = self.get_rec_rule(rec_rules, major_ctor)?;
 
         // The number of parameters in the constructor is not necessarily
@@ -1053,7 +1051,7 @@ impl<'x, 't: 'x, 'p: 't> NanodaTypeChecker<'x, 't, 'p> {
         Some(self.ctx.foldl_apps(r, args.iter().skip(rec.major_idx() + 1).copied()))
     }
 
-    pub fn reduce_quot(&mut self, c_name: NamePtr<'t>, args: &[ExprPtr<'t>]) -> Option<ExprPtr<'t>> {
+    pub fn reduce_quot(&mut self, c_name: NamePtr<'t>, args: &[SPtr<'t>]) -> Option<SPtr<'t>> {
         if !matches!(self.env.get_declar(&c_name), Some(Declar::Quot {..})) {
             return None
         }
@@ -1067,14 +1065,14 @@ impl<'x, 't: 'x, 'p: 't> NanodaTypeChecker<'x, 't, 'p> {
             return None
         };
         {
-            let (qmk_const, qmk_args, _) = self.ctx.unfold_apps(qmk);
-            match self.ctx.read_expr(qmk_const) {
+            let (qmk_const, qmk_args) = self.ctx.unfold_apps(qmk);
+            match self.ctx.read_expr(qmk_const.ptr) {
                 Const { name, .. } if name == self.ctx.export_file.name_cache.quot_mk? && qmk_args.len() == 3 => (),
                 _ => return None,
             };
         }
         let f = args.get(3).copied()?;
-        let appd = match self.ctx.read_expr(qmk) {
+        let appd = match self.ctx.view_sptr(qmk) {
             App { arg, .. } => self.ctx.mk_app(f, arg),
             _ => panic!("Quot iota"),
         };
@@ -1082,9 +1080,9 @@ impl<'x, 't: 'x, 'p: 't> NanodaTypeChecker<'x, 't, 'p> {
     }
 
     // We only need the name and reducibility from this.
-    fn get_applied_def(&mut self, e: ExprPtr<'t>) -> Option<(NamePtr<'t>, ReducibilityHint)> {
+    fn get_applied_def(&mut self, e: SPtr<'t>) -> Option<(NamePtr<'t>, ReducibilityHint)> {
         let fun = self.ctx.unfold_apps_fun(e);
-        if let Const { name, .. } = self.ctx.read_expr(fun) {
+        if let Const { name, .. } = self.ctx.read_expr(fun.ptr) {
             if let Some(Declar::Definition { info, hint, .. }) = self.env.get_declar(&name) {
                 return Some((info.name, *hint))
             } else if let Some(Declar::Theorem { info, .. }) = self.env.get_declar(&name) {
@@ -1096,16 +1094,16 @@ impl<'x, 't: 'x, 'p: 't> NanodaTypeChecker<'x, 't, 'p> {
 
     /// For an expression already known to be an applied definition, unfold
     /// the definition and perform cheap reduction on the unfolded result.
-    fn delta(&mut self, e: ExprPtr<'t>) -> ExprPtr<'t> {
+    fn delta(&mut self, e: SPtr<'t>) -> SPtr<'t> {
         let unfolded = self.unfold_def(e).unwrap();
         self.whnf_no_unfolding_cheap_proj(unfolded)
     }
 
     /// Try to unfold the base `Const` and re-fold applications, but don't
     /// do any further reduction.
-    fn unfold_def(&mut self, e: ExprPtr<'t>) -> Option<ExprPtr<'t>> {
-        let (fun, args, _) = self.ctx.unfold_apps(e);
-        let (name, levels) = self.ctx.try_const_info(fun)?;
+    fn unfold_def(&mut self, e: SPtr<'t>) -> Option<SPtr<'t>> {
+        let (fun, args) = self.ctx.unfold_apps(e);
+        let (name, levels) = self.ctx.try_const_info(fun.ptr)?;
         let (def_uparams, def_value) = self.env.get_declar_val(&name)?;
         if self.ctx.read_levels(levels).len() == self.ctx.read_levels(def_uparams).len() {
             let def_val = self.ctx.subst_expr_levels(def_value, def_uparams, levels);
@@ -1115,18 +1113,18 @@ impl<'x, 't: 'x, 'p: 't> NanodaTypeChecker<'x, 't, 'p> {
         }
     }
 
-    fn def_eq_sort(&mut self, x: ExprPtr<'t>, y: ExprPtr<'t>) -> Option<bool> {
-        match self.ctx.read_expr_pair(x, y) {
+    fn def_eq_sort(&mut self, x: SPtr<'t>, y: SPtr<'t>) -> Option<bool> {
+        match (self.ctx.read_expr(x.ptr), self.ctx.read_expr(y.ptr)) {
             (Sort { level: l, .. }, Sort { level: r, .. }) => Some(self.ctx.eq_antisymm(l, r)),
             _ => None,
         }
     }
 
-    fn def_eq_quick_check(&mut self, x: ExprPtr<'t>, y: ExprPtr<'t>) -> Option<bool> {
+    fn def_eq_quick_check(&mut self, x: SPtr<'t>, y: SPtr<'t>) -> Option<bool> {
         if x == y {
             return Some(true)
         }
-        if self.tc_cache.eq_cache.check_uf_eq(x, y) {
+        if self.tc_cache.eq_cache.check_uf_eq(x.ptr, y.ptr) {
             self.ctx.trace.eq_cache_hits += 1;
             return Some(true)
         }
@@ -1139,22 +1137,22 @@ impl<'x, 't: 'x, 'p: 't> NanodaTypeChecker<'x, 't, 'p> {
         None
     }
 
-    fn failure_cache_contains(&self, x: ExprPtr<'t>, y: ExprPtr<'t>) -> bool {
-        let pr = if x.get_hash() <= y.get_hash() { (x, y) } else { (y, x) };
+    fn failure_cache_contains(&self, x: SPtr<'t>, y: SPtr<'t>) -> bool {
+        let pr = if x.get_hash() <= y.get_hash() { (x.ptr, y.ptr) } else { (y.ptr, x.ptr) };
         self.tc_cache.failure_cache.contains(&pr)
     }
 
-    fn failure_cache_insert(&mut self, x: ExprPtr<'t>, y: ExprPtr<'t>) {
-        let pr = if x.get_hash() <= y.get_hash() { (x, y) } else { (y, x) };
+    fn failure_cache_insert(&mut self, x: SPtr<'t>, y: SPtr<'t>) {
+        let pr = if x.get_hash() <= y.get_hash() { (x.ptr, y.ptr) } else { (y.ptr, x.ptr) };
         self.tc_cache.failure_cache.insert(pr);
     }
 
     fn try_eq_const_app(
         &mut self,
-        x: ExprPtr<'t>,
+        x: SPtr<'t>,
         x_defname: NamePtr<'t>,
         x_hint: ReducibilityHint,
-        y: ExprPtr<'t>,
+        y: SPtr<'t>,
         y_defname: NamePtr<'t>,
         y_hint: ReducibilityHint,
     ) -> Option<DeltaResult<'t>> {
@@ -1171,11 +1169,11 @@ impl<'x, 't: 'x, 'p: 't> NanodaTypeChecker<'x, 't, 'p> {
             return None
         }
 
-        match self.ctx.view_expr_pair(x, y) {
+        match self.ctx.view_sptr_pair(x, y) {
             (App { .. }, App { .. }) if (x_defname == y_defname) => {
-                let (l_fun, l_args, _) = self.ctx.unfold_apps(x);
-                let (r_fun, r_args, _) = self.ctx.unfold_apps(y);
-                match self.ctx.read_expr_pair(l_fun, r_fun) {
+                let (l_fun, l_args) = self.ctx.unfold_apps(x);
+                let (r_fun, r_args) = self.ctx.unfold_apps(y);
+                match (self.ctx.read_expr(l_fun.ptr), self.ctx.read_expr(r_fun.ptr)) {
                     (Const { levels: l_levels, .. }, Const { levels: r_levels, .. })
                         if l_args.len() == r_args.len()
                             && !self.failure_cache_contains(x, y)
@@ -1193,9 +1191,9 @@ impl<'x, 't: 'x, 'p: 't> NanodaTypeChecker<'x, 't, 'p> {
         }
     }
 
-    fn try_unfold_proj_app(&mut self, e: ExprPtr<'t>) -> Option<ExprPtr<'t>> {
+    fn try_unfold_proj_app(&mut self, e: SPtr<'t>) -> Option<SPtr<'t>> {
         let fun = self.ctx.unfold_apps_fun(e);
-        if let Proj { .. } = self.ctx.view_expr(fun) {
+        if let Proj { .. } = self.ctx.view_sptr(fun) {
             let eprime = self.whnf_no_unfolding(e);
             if eprime != e {
                 return Some(eprime)
@@ -1204,11 +1202,11 @@ impl<'x, 't: 'x, 'p: 't> NanodaTypeChecker<'x, 't, 'p> {
         None
     }
 
-    fn delta_try_nat(&mut self, x: ExprPtr<'t>, y: ExprPtr<'t>) -> Option<DeltaResult<'t>> {
+    fn delta_try_nat(&mut self, x: SPtr<'t>, y: SPtr<'t>) -> Option<DeltaResult<'t>> {
         if let Some(short) = self.def_eq_nat(x, y) {
             return Some(DeltaResult::FoundEqResult(short))
         }
-        if (!self.ctx.has_fvars(x) && !self.ctx.has_fvars(y)) || self.ctx.eager_mode {
+        if (!self.ctx.has_fvars(x.ptr) && !self.ctx.has_fvars(y.ptr)) || self.ctx.eager_mode {
             if let Some(xprime) = self.try_reduce_nat(x) {
                 return Some(DeltaResult::FoundEqResult(self.def_eq(xprime, y)))
             } else if let Some(yprime) = self.try_reduce_nat(y) {
@@ -1224,7 +1222,7 @@ impl<'x, 't: 'x, 'p: 't> NanodaTypeChecker<'x, 't, 'p> {
     ///
     /// After each reduction, check whether we can show definitional equality without having
     /// to continue unfolding.
-    fn lazy_delta_step(&mut self, mut x: ExprPtr<'t>, mut y: ExprPtr<'t>) -> DeltaResult<'t> {
+    fn lazy_delta_step(&mut self, mut x: SPtr<'t>, mut y: SPtr<'t>) -> DeltaResult<'t> {
         loop {
             if let Some(r) = self.delta_try_nat(x, y) {
                 return r
@@ -1265,24 +1263,24 @@ impl<'x, 't: 'x, 'p: 't> NanodaTypeChecker<'x, 't, 'p> {
         }
     }
 
-    pub fn is_sort_zero(&mut self, e: ExprPtr<'t>) -> bool {
+    pub fn is_sort_zero(&mut self, e: SPtr<'t>) -> bool {
         let e = self.whnf(e);
-        match self.ctx.read_expr(e) {
+        match self.ctx.read_expr(e.ptr) {
             Sort { level, .. } => self.ctx.read_level(level) == Level::Zero,
             _ => false,
         }
     }
-    pub fn is_proposition(&mut self, e: ExprPtr<'t>) -> (bool, ExprPtr<'t>) {
+    pub fn is_proposition(&mut self, e: SPtr<'t>) -> (bool, SPtr<'t>) {
         let infd = self.infer(e, InferOnly);
         (self.is_sort_zero(infd), infd)
     }
 
-    pub fn is_proof(&mut self, e: ExprPtr<'t>) -> (bool, ExprPtr<'t>) {
+    pub fn is_proof(&mut self, e: SPtr<'t>) -> (bool, SPtr<'t>) {
         let infd = self.infer(e, InferOnly);
         (self.is_proposition(infd).0, infd)
     }
 
-    fn proof_irrel_eq(&mut self, x: ExprPtr<'t>, y: ExprPtr<'t>) -> bool {
+    fn proof_irrel_eq(&mut self, x: SPtr<'t>, y: SPtr<'t>) -> bool {
         match self.is_proof(x) {
             (false, _) => false,
             (true, l_type) => match self.is_proof(y) {
@@ -1292,16 +1290,16 @@ impl<'x, 't: 'x, 'p: 't> NanodaTypeChecker<'x, 't, 'p> {
         }
     }
 
-    fn try_eta_expansion(&mut self, x: ExprPtr<'t>, y: ExprPtr<'t>) -> bool {
+    fn try_eta_expansion(&mut self, x: SPtr<'t>, y: SPtr<'t>) -> bool {
         self.try_eta_expansion_aux(x, y) || self.try_eta_expansion_aux(y, x)
     }
 
-    fn try_eta_expansion_aux(&mut self, x: ExprPtr<'t>, y: ExprPtr<'t>) -> bool {
-        if let Lambda { .. } = self.ctx.view_expr(x) {
+    fn try_eta_expansion_aux(&mut self, x: SPtr<'t>, y: SPtr<'t>) -> bool {
+        if let Lambda { .. } = self.ctx.view_sptr(x) {
             let y_ty = self.infer_then_whnf(y, InferOnly);
-            if let Pi { binder_name, binder_type, binder_style, .. } = self.ctx.view_expr(y_ty) {
+            if let Pi { binder_name, binder_type, binder_style, .. } = self.ctx.view_sptr(y_ty) {
                 let v0 = self.ctx.mk_var(0);
-                let new_body = self.ctx.mk_app(y, v0);
+                let new_body = self.ctx.mk_app(self.ctx.push_shift_up(y, 1), v0);
                 let new_lambda = self.ctx.mk_lambda(binder_name, binder_style, binder_type, new_body);
                 return self.def_eq(x, new_lambda)
             }

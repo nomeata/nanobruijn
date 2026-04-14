@@ -7,7 +7,7 @@ use crate::level::Level;
 use crate::name::Name;
 use crate::util::{
     new_fx_hash_map, new_fx_index_map, BigUintPtr, Config, DagMarker, ExprPtr, FxHashMap, FxIndexMap,
-    LeanDag, LevelPtr, LevelsPtr, NamePtr, StringPtr,
+    LeanDag, LevelPtr, LevelsPtr, NamePtr, SPtr, StringPtr,
 };
 use num_bigint::BigUint;
 use serde::{ Deserialize, Deserializer };
@@ -49,10 +49,10 @@ pub struct Parser<'a, R: BufRead> {
     skipped: Vec<String>,
     mutual_block_sizes: FxHashMap<NamePtr<'a>, (usize, usize)>,
     osnf_count: u32,
-    /// Maps parser expression index → DAG index. Parser indices are sequential
-    /// (matching the export file), but DAG indices may differ due to OSNF core
-    /// inserts and deduplication.
-    expr_remap: Vec<usize>,
+    /// Maps parser expression index → (DAG index, shift). Parser indices are sequential
+    /// (matching the export file). The SPtr for expression i is
+    /// SPtr::new(Ptr::from(ExportFile, remap.0), remap.1).
+    expr_remap: Vec<(usize, u16)>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Deserialize)]
@@ -395,13 +395,9 @@ pub(crate) fn parse_export_file<'p, R: BufRead>(
         }
     }
     
-    let total_inserted = parser.expr_remap.len() + parser.osnf_count as usize;
     let dag_size = parser.dag.exprs.len();
-    let dedup_pct = if total_inserted > 0 && dag_size <= total_inserted {
-        100 - (100 * dag_size / total_inserted)
-    } else { 0 };
-    eprintln!("OSNF: {} expressions normalized, {} parser entries → {} DAG entries ({}% dedup from core sharing)",
-        parser.osnf_count, parser.expr_remap.len(), dag_size, dedup_pct);
+    eprintln!("SPtr parse: {} parser entries → {} DAG entries, {} OSNF-shifted",
+        parser.expr_remap.len(), dag_size, parser.osnf_count);
     let name_cache = parser.dag.mk_name_cache();
     let export_file = crate::util::ExportFile {
         dag: parser.dag,
@@ -410,7 +406,6 @@ pub(crate) fn parse_export_file<'p, R: BufRead>(
         name_cache,
         config: parser.config,
         mutual_block_sizes: parser.mutual_block_sizes,
-        osnf_core: None,
     };
     Ok((export_file, parser.skipped))
 }
@@ -440,51 +435,15 @@ impl<'a, R: BufRead> Parser<'a, R> {
         self.dag.expr_nlbv[e.idx()]
     }
 
-    fn has_fvars(&self, e: ExprPtr<'a>) -> bool { self.dag.exprs.get_index(e.idx()).unwrap().has_fvars() }
+    fn has_fvars_ptr(&self, e: ExprPtr<'a>) -> bool { self.dag.exprs.get_index(e.idx()).unwrap().has_fvars() }
 
-    fn expr_fvar_lb(&self, e: ExprPtr<'a>) -> u16 {
-        self.dag.exprs.get_index(e.idx()).unwrap().get_fvar_lb()
-    }
-
-    /// Find or create BVar(idx) in the DAG. Returns its ExprPtr.
-    fn find_or_insert_bvar(&mut self, idx: u16) -> ExprPtr<'a> {
-        let hash = hash64!(crate::expr::VAR_HASH, idx);
+    /// Find or create Var(0) in the DAG. Returns its ExprPtr.
+    fn find_or_insert_var0(&mut self) -> ExprPtr<'a> {
+        let hash = hash64!(crate::expr::VAR_HASH, 0u16);
         let (dag_idx, _) = self.insert_expr(Expr::Var {
-            dbj_idx: idx, hash, fvar_lb: idx,
+            dbj_idx: 0, hash,
         });
         crate::util::Ptr::from(DagMarker::ExportFile, dag_idx)
-    }
-
-    /// Adjust a child expression for OSNF core extraction.
-    /// The child is already in OSNF in the DAG. We need to reduce its shift by `amount`.
-    /// - Shift(k, core) → Shift(k - amount, core) or core if k == amount
-    /// - BVar(n) → BVar(n - amount)
-    /// - Compound with fvar_lb=0 → use as-is (already a core)
-    /// - nlbv <= cutoff → use as-is (bound var, not affected by outer shift)
-    fn adjust_child(&mut self, child: ExprPtr<'a>, amount: u16, cutoff: u16) -> ExprPtr<'a> {
-        let child_nlbv = self.dag.expr_nlbv[child.idx()];
-        if child_nlbv <= cutoff { return child; }
-        let child_expr = *self.dag.exprs.get_index(child.idx()).unwrap();
-        match child_expr {
-            Expr::Var { dbj_idx, .. } => {
-                self.find_or_insert_bvar(dbj_idx - amount)
-            }
-            Expr::Shift { inner, amount: child_amount, .. } => {
-                debug_assert!(child_amount >= amount);
-                let new_amount = child_amount - amount;
-                if new_amount == 0 {
-                    inner
-                } else {
-                    let dag_idx = self.insert_shift(inner, new_amount);
-                    crate::util::Ptr::from(DagMarker::ExportFile, dag_idx)
-                }
-            }
-            _ => {
-                // Compound with fvar_lb=0 (already a core). Use as-is.
-                debug_assert!(child_expr.get_fvar_lb() == 0, "adjust_child: expected fvar_lb=0 for non-Shift compound, got {}", child_expr.get_fvar_lb());
-                child
-            }
-        }
     }
 
     fn get_name_ptr(&self, idx: u32) -> NamePtr<'a> {
@@ -530,36 +489,26 @@ impl<'a, R: BufRead> Parser<'a, R> {
     /// Insert an expression and track its nlbv in the parallel Vec.
     fn insert_expr(&mut self, e: Expr<'a>) -> (usize, bool) {
         let nlbv = e.num_loose_bvars();
-        let fvar_lb = e.get_fvar_lb();
         let result = self.dag.exprs.insert_full(e);
-        if result.1 { self.dag.expr_nlbv.push(nlbv); self.dag.expr_fvar_lb.push(fvar_lb); }
+        if result.1 { self.dag.expr_nlbv.push(nlbv); }
         result
     }
 
+    fn get_expr_sptr(&self, idx: u32) -> SPtr<'a> {
+        let (dag_idx, shift) = self.expr_remap[idx as usize];
+        SPtr::new(crate::util::Ptr::from(DagMarker::ExportFile, dag_idx), shift)
+    }
+
+    /// Get the ExprPtr for a declaration type/value (must be closed, shift == 0).
     fn get_expr_ptr(&self, idx: u32) -> ExprPtr<'a> {
-        let dag_idx = self.expr_remap[idx as usize];
+        let (dag_idx, shift) = self.expr_remap[idx as usize];
+        debug_assert!(shift == 0, "get_expr_ptr: expected shift=0 for declaration expr, got shift={}", shift);
         crate::util::Ptr::from(DagMarker::ExportFile, dag_idx)
     }
 
-    /// Record the DAG index for a parser expression. Returns the ExprPtr.
-    fn record_expr(&mut self, dag_idx: usize) -> ExprPtr<'a> {
-        self.expr_remap.push(dag_idx);
-        crate::util::Ptr::from(DagMarker::ExportFile, dag_idx)
-    }
-
-    /// Insert a Shift(amount, inner) into the DAG. For OSNF wrapping during parse.
-    fn insert_shift(&mut self, inner: ExprPtr<'a>, amount: u16) -> usize {
-        let inner_expr = *self.dag.exprs.get_index(inner.idx()).unwrap();
-        let inner_nlbv = inner_expr.num_loose_bvars();
-        let inner_lb = inner_expr.get_fvar_lb();
-        let has_fvars = inner_expr.has_fvars();
-        let hash = hash64!(crate::expr::SHIFT_HASH, inner, amount, 0u16);
-        let new_nlbv = inner_nlbv + amount;
-        let fvar_lb = inner_lb + amount;
-        self.insert_expr(Expr::Shift {
-            hash, fvar_lb, inner, amount,
-            num_loose_bvars: new_nlbv, has_fvars,
-        }).0
+    /// Record the DAG index and shift for a parser expression.
+    fn record_expr(&mut self, dag_idx: usize, shift: u16) {
+        self.expr_remap.push((dag_idx, shift));
     }
 
     // Used for the axiom whitelist feature.
@@ -621,14 +570,14 @@ impl<'a, R: BufRead> Parser<'a, R> {
                 let num_ptr = BigUintPtr::from(DagMarker::ExportFile, self.dag.bignums.as_mut().unwrap().insert_full(big_uint).0);
                 let (dag_idx, _) = {
                     let hash = hash64!(crate::expr::NAT_LIT_HASH, num_ptr);
-                    self.insert_expr(Expr::NatLit { ptr: num_ptr, hash, fvar_lb: 0 })
+                    self.insert_expr(Expr::NatLit { ptr: num_ptr, hash })
                 };
                 if !self.config.nat_extension {
                     return Err(Box::<dyn Error>::from(
                         format!("Nat lit extension disallowed by checker execution config, found {:?}", line)
                     ))
                 }
-                self.record_expr(dag_idx);
+                self.record_expr(dag_idx, 0);
             }
             StrLit(cow_str) => {
                 if !self.config.string_extension {
@@ -643,9 +592,9 @@ impl<'a, R: BufRead> Parser<'a, R> {
                 );
                 let (dag_idx, _) = {
                     let hash = hash64!(crate::expr::STRING_LIT_HASH, string_ptr);
-                    self.insert_expr(Expr::StringLit { ptr: string_ptr, hash, fvar_lb: 0 })
+                    self.insert_expr(Expr::StringLit { ptr: string_ptr, hash })
                 };
-                self.record_expr(dag_idx);
+                self.record_expr(dag_idx, 0);
             }
             LevelSucc(l) => {
                 let l = self.get_level_ptr(l);
@@ -685,9 +634,9 @@ impl<'a, R: BufRead> Parser<'a, R> {
                 let level = self.get_level_ptr(level);
                 let (dag_idx, _) = {
                     let hash = hash64!(crate::expr::SORT_HASH, level);
-                    self.insert_expr(Expr::Sort { level, hash, fvar_lb: 0 })
+                    self.insert_expr(Expr::Sort { level, hash })
                 };
-                self.record_expr(dag_idx);
+                self.record_expr(dag_idx, 0);
             }
             ExprMData {..} => {
                 panic!("Expr.mdata not supported");
@@ -697,225 +646,175 @@ impl<'a, R: BufRead> Parser<'a, R> {
                 let levels = self.get_levels_ptr(&levels);
                 let (dag_idx, _) = {
                     let hash = hash64!(crate::expr::CONST_HASH, name, levels);
-                    self.insert_expr(Expr::Const { name, levels, hash, fvar_lb: 0 })
+                    self.insert_expr(Expr::Const { name, levels, hash })
                 };
-                self.record_expr(dag_idx);
+                self.record_expr(dag_idx, 0);
             }
             ExprApp {fun, arg} => {
-                let fun = self.get_expr_ptr(fun);
-                let arg = self.get_expr_ptr(arg);
-                let num_bvars = self.num_loose_bvars(fun).max(self.num_loose_bvars(arg));
-                let fvar_lb = if num_bvars == 0 { 0 } else {
-                    if self.num_loose_bvars(fun) == 0 { self.expr_fvar_lb(arg) }
-                    else if self.num_loose_bvars(arg) == 0 { self.expr_fvar_lb(fun) }
-                    else { self.expr_fvar_lb(fun).min(self.expr_fvar_lb(arg)) }
-                };
-                let (core_fun, core_arg) = if fvar_lb > 0 {
-                    self.osnf_count += 1;
-                    (self.adjust_child(fun, fvar_lb, 0), self.adjust_child(arg, fvar_lb, 0))
-                } else { (fun, arg) };
-                let core_idx = {
-                    let hash = hash64!(crate::expr::APP_HASH, core_fun, core_arg);
-                    let locals = self.has_fvars(core_fun) || self.has_fvars(core_arg);
-                    let core_nlbv = self.num_loose_bvars(core_fun).max(self.num_loose_bvars(core_arg));
-                    let core_fvar_lb = if core_nlbv == 0 { 0 } else {
-                        if self.num_loose_bvars(core_fun) == 0 { self.expr_fvar_lb(core_arg) }
-                        else if self.num_loose_bvars(core_arg) == 0 { self.expr_fvar_lb(core_fun) }
-                        else { self.expr_fvar_lb(core_fun).min(self.expr_fvar_lb(core_arg)) }
-                    };
-                    self.insert_expr(Expr::App { fun: core_fun, arg: core_arg, num_loose_bvars: core_nlbv, has_fvars: locals, hash, fvar_lb: core_fvar_lb }).0
-                };
-                if fvar_lb > 0 {
-                    let core_ptr = crate::util::Ptr::from(DagMarker::ExportFile, core_idx);
-                    let shift_idx = self.insert_shift(core_ptr, fvar_lb);
-                    self.record_expr(shift_idx);
-                } else {
-                    self.record_expr(core_idx);
-                }
+                let fun_sptr = self.get_expr_sptr(fun);
+                let arg_sptr = self.get_expr_sptr(arg);
+                // Effective nlbv for an SPtr child:
+                // if core nlbv == 0 then 0, else core_nlbv + shift
+                let fun_core_nlbv = self.num_loose_bvars(fun_sptr.ptr);
+                let arg_core_nlbv = self.num_loose_bvars(arg_sptr.ptr);
+                let fun_eff_nlbv = if fun_core_nlbv == 0 { 0 } else { fun_core_nlbv + fun_sptr.shift };
+                let arg_eff_nlbv = if arg_core_nlbv == 0 { 0 } else { arg_core_nlbv + arg_sptr.shift };
+                // Compute min_shift from open children for OSNF
+                let min_shift = if fun_eff_nlbv == 0 && arg_eff_nlbv == 0 { 0 }
+                    else if fun_eff_nlbv == 0 { arg_sptr.shift }
+                    else if arg_eff_nlbv == 0 { fun_sptr.shift }
+                    else { fun_sptr.shift.min(arg_sptr.shift) };
+                if min_shift > 0 { self.osnf_count += 1; }
+                // Build core children with min_shift subtracted (only for open children)
+                let core_fun = if fun_eff_nlbv == 0 { fun_sptr } else { SPtr::new(fun_sptr.ptr, fun_sptr.shift - min_shift) };
+                let core_arg = if arg_eff_nlbv == 0 { arg_sptr } else { SPtr::new(arg_sptr.ptr, arg_sptr.shift - min_shift) };
+                let core_fun_nlbv = if fun_core_nlbv == 0 { 0 } else { fun_core_nlbv + core_fun.shift };
+                let core_arg_nlbv = if arg_core_nlbv == 0 { 0 } else { arg_core_nlbv + core_arg.shift };
+                let core_nlbv = core_fun_nlbv.max(core_arg_nlbv);
+                let locals = self.has_fvars_ptr(fun_sptr.ptr) || self.has_fvars_ptr(arg_sptr.ptr);
+                let hash = hash64!(crate::expr::APP_HASH, core_fun, core_arg);
+                let (core_idx, _) = self.insert_expr(Expr::App {
+                    fun: core_fun, arg: core_arg, num_loose_bvars: core_nlbv,
+                    has_fvars: locals, hash,
+                });
+                self.record_expr(core_idx, min_shift);
             }
             ExprBVar(dbj_idx) => {
-                let (dag_idx, _) = {
-                    let hash = hash64!(crate::expr::VAR_HASH, dbj_idx);
-                    let fvar_lb = dbj_idx;
-                    self.insert_expr(Expr::Var { dbj_idx, hash, fvar_lb })
-                };
-                self.record_expr(dag_idx);
+                // Only Var(0) lives in the DAG. BVar(k) is represented as SPtr(var0, k).
+                let var0_ptr = self.find_or_insert_var0();
+                self.record_expr(var0_ptr.idx(), dbj_idx);
             }
             ExprLambda {binder_name, binder_type, binder_info, body} => {
                 let binder_name = self.get_name_ptr(binder_name);
-                let binder_type = self.get_expr_ptr(binder_type);
-                let body = self.get_expr_ptr(body);
-                let num_bvars = self.num_loose_bvars(binder_type).max(self.num_loose_bvars(body).saturating_sub(1));
-                let fvar_lb = if num_bvars == 0 { 0 } else {
-                    let t_nlbv = self.num_loose_bvars(binder_type);
-                    let b_nlbv = self.num_loose_bvars(body);
-                    let b_lb = self.expr_fvar_lb(body).saturating_sub(1);
-                    if t_nlbv == 0 && b_nlbv <= 1 { 0 }
-                    else if t_nlbv == 0 { b_lb }
-                    else if b_nlbv <= 1 { self.expr_fvar_lb(binder_type) }
-                    else { self.expr_fvar_lb(binder_type).min(b_lb) }
+                let ty_sptr = self.get_expr_sptr(binder_type);
+                let body_sptr = self.get_expr_sptr(body);
+                let ty_core_nlbv = self.num_loose_bvars(ty_sptr.ptr);
+                let body_core_nlbv = self.num_loose_bvars(body_sptr.ptr);
+                let ty_eff_nlbv = if ty_core_nlbv == 0 { 0 } else { ty_core_nlbv + ty_sptr.shift };
+                let body_eff_nlbv = if body_core_nlbv == 0 { 0 } else { body_core_nlbv + body_sptr.shift };
+                // For binder body: outer contribution is body_eff_nlbv.saturating_sub(1)
+                // min_shift from open children: ty's shift vs body's shift.saturating_sub(1)
+                // But we need to be careful: the body is under a binder, so its shift
+                // contributes (shift - 1) to the outer expression's fvar_lb.
+                // For OSNF, we want min_shift = min of effective fvar_lb contributions.
+                // ty contribution: ty_sptr.shift (if ty is open)
+                // body contribution: body_sptr.shift.saturating_sub(1) (if body has nlbv > 1,
+                //   or body_sptr.shift > 0 when body has nlbv == 1)
+                let body_outer_shift = if body_eff_nlbv <= 1 { None }
+                    else { Some(body_sptr.shift.saturating_sub(1)) };
+                let min_shift = match (ty_eff_nlbv > 0, body_outer_shift) {
+                    (false, None) => 0,
+                    (true, None) => ty_sptr.shift,
+                    (false, Some(bs)) => bs,
+                    (true, Some(bs)) => ty_sptr.shift.min(bs),
                 };
-                let (core_type, core_body) = if fvar_lb > 0 {
-                    self.osnf_count += 1;
-                    (self.adjust_child(binder_type, fvar_lb, 0), self.adjust_child(body, fvar_lb, 1))
-                } else { (binder_type, body) };
-                let core_idx = {
-                    let hash = hash64!(crate::expr::LAMBDA_HASH, binder_name, binder_info, core_type, core_body);
-                    let core_nlbv = self.num_loose_bvars(core_type).max(self.num_loose_bvars(core_body).saturating_sub(1));
-                    let locals = self.has_fvars(core_type) || self.has_fvars(core_body);
-                    let core_fvar_lb = if core_nlbv == 0 { 0 } else {
-                        let t_nlbv = self.num_loose_bvars(core_type);
-                        let b_nlbv = self.num_loose_bvars(core_body);
-                        let b_lb = self.expr_fvar_lb(core_body).saturating_sub(1);
-                        if t_nlbv == 0 && b_nlbv <= 1 { 0 }
-                        else if t_nlbv == 0 { b_lb }
-                        else if b_nlbv <= 1 { self.expr_fvar_lb(core_type) }
-                        else { self.expr_fvar_lb(core_type).min(b_lb) }
-                    };
-                    self.insert_expr(Expr::Lambda {
-                        binder_name, binder_style: binder_info, binder_type: core_type, body: core_body,
-                        num_loose_bvars: core_nlbv, has_fvars: locals, hash, fvar_lb: core_fvar_lb,
-                    }).0
-                };
-                if fvar_lb > 0 {
-                    let core_ptr = crate::util::Ptr::from(DagMarker::ExportFile, core_idx);
-                    let shift_idx = self.insert_shift(core_ptr, fvar_lb);
-                    self.record_expr(shift_idx);
-                } else {
-                    self.record_expr(core_idx);
-                }
+                if min_shift > 0 { self.osnf_count += 1; }
+                // Build core children: only adjust shifts for open children that contributed
+                let core_ty = if ty_eff_nlbv == 0 { ty_sptr } else { SPtr::new(ty_sptr.ptr, ty_sptr.shift - min_shift) };
+                let core_body = if body_eff_nlbv > 1 { SPtr::new(body_sptr.ptr, body_sptr.shift - min_shift) } else { body_sptr };
+                let core_ty_nlbv = if ty_core_nlbv == 0 { 0 } else { ty_core_nlbv + core_ty.shift };
+                let core_body_nlbv = if body_core_nlbv == 0 { 0 } else { body_core_nlbv + core_body.shift };
+                let core_nlbv = core_ty_nlbv.max(core_body_nlbv.saturating_sub(1));
+                let locals = self.has_fvars_ptr(ty_sptr.ptr) || self.has_fvars_ptr(body_sptr.ptr);
+                let hash = hash64!(crate::expr::LAMBDA_HASH, binder_name, binder_info, core_ty, core_body);
+                let (core_idx, _) = self.insert_expr(Expr::Lambda {
+                    binder_name, binder_style: binder_info, binder_type: core_ty, body: core_body,
+                    num_loose_bvars: core_nlbv, has_fvars: locals, hash,
+                });
+                self.record_expr(core_idx, min_shift);
             }
             ExprPi {binder_name, binder_type, binder_info, body} => {
                 let binder_name = self.get_name_ptr(binder_name);
-                let binder_type = self.get_expr_ptr(binder_type);
-                let body = self.get_expr_ptr(body);
-                let num_bvars = self.num_loose_bvars(binder_type).max(self.num_loose_bvars(body).saturating_sub(1));
-                let fvar_lb = if num_bvars == 0 { 0 } else {
-                    let t_nlbv = self.num_loose_bvars(binder_type);
-                    let b_nlbv = self.num_loose_bvars(body);
-                    let b_lb = self.expr_fvar_lb(body).saturating_sub(1);
-                    if t_nlbv == 0 && b_nlbv <= 1 { 0 }
-                    else if t_nlbv == 0 { b_lb }
-                    else if b_nlbv <= 1 { self.expr_fvar_lb(binder_type) }
-                    else { self.expr_fvar_lb(binder_type).min(b_lb) }
+                let ty_sptr = self.get_expr_sptr(binder_type);
+                let body_sptr = self.get_expr_sptr(body);
+                let ty_core_nlbv = self.num_loose_bvars(ty_sptr.ptr);
+                let body_core_nlbv = self.num_loose_bvars(body_sptr.ptr);
+                let ty_eff_nlbv = if ty_core_nlbv == 0 { 0 } else { ty_core_nlbv + ty_sptr.shift };
+                let body_eff_nlbv = if body_core_nlbv == 0 { 0 } else { body_core_nlbv + body_sptr.shift };
+                let body_outer_shift = if body_eff_nlbv <= 1 { None }
+                    else { Some(body_sptr.shift.saturating_sub(1)) };
+                let min_shift = match (ty_eff_nlbv > 0, body_outer_shift) {
+                    (false, None) => 0,
+                    (true, None) => ty_sptr.shift,
+                    (false, Some(bs)) => bs,
+                    (true, Some(bs)) => ty_sptr.shift.min(bs),
                 };
-                let (core_type, core_body) = if fvar_lb > 0 {
-                    self.osnf_count += 1;
-                    (self.adjust_child(binder_type, fvar_lb, 0), self.adjust_child(body, fvar_lb, 1))
-                } else { (binder_type, body) };
-                let core_idx = {
-                    let hash = hash64!(crate::expr::PI_HASH, binder_name, binder_info, core_type, core_body);
-                    let core_nlbv = self.num_loose_bvars(core_type).max(self.num_loose_bvars(core_body).saturating_sub(1));
-                    let locals = self.has_fvars(core_type) || self.has_fvars(core_body);
-                    let core_fvar_lb = if core_nlbv == 0 { 0 } else {
-                        let t_nlbv = self.num_loose_bvars(core_type);
-                        let b_nlbv = self.num_loose_bvars(core_body);
-                        let b_lb = self.expr_fvar_lb(core_body).saturating_sub(1);
-                        if t_nlbv == 0 && b_nlbv <= 1 { 0 }
-                        else if t_nlbv == 0 { b_lb }
-                        else if b_nlbv <= 1 { self.expr_fvar_lb(core_type) }
-                        else { self.expr_fvar_lb(core_type).min(b_lb) }
-                    };
-                    self.insert_expr(Expr::Pi {
-                        binder_name, binder_style: binder_info, binder_type: core_type, body: core_body,
-                        num_loose_bvars: core_nlbv, has_fvars: locals, hash, fvar_lb: core_fvar_lb,
-                    }).0
-                };
-                if fvar_lb > 0 {
-                    let core_ptr = crate::util::Ptr::from(DagMarker::ExportFile, core_idx);
-                    let shift_idx = self.insert_shift(core_ptr, fvar_lb);
-                    self.record_expr(shift_idx);
-                } else {
-                    self.record_expr(core_idx);
-                }
+                if min_shift > 0 { self.osnf_count += 1; }
+                let core_ty = if ty_eff_nlbv == 0 { ty_sptr } else { SPtr::new(ty_sptr.ptr, ty_sptr.shift - min_shift) };
+                let core_body = if body_eff_nlbv > 1 { SPtr::new(body_sptr.ptr, body_sptr.shift - min_shift) } else { body_sptr };
+                let core_ty_nlbv = if ty_core_nlbv == 0 { 0 } else { ty_core_nlbv + core_ty.shift };
+                let core_body_nlbv = if body_core_nlbv == 0 { 0 } else { body_core_nlbv + core_body.shift };
+                let core_nlbv = core_ty_nlbv.max(core_body_nlbv.saturating_sub(1));
+                let locals = self.has_fvars_ptr(ty_sptr.ptr) || self.has_fvars_ptr(body_sptr.ptr);
+                let hash = hash64!(crate::expr::PI_HASH, binder_name, binder_info, core_ty, core_body);
+                let (core_idx, _) = self.insert_expr(Expr::Pi {
+                    binder_name, binder_style: binder_info, binder_type: core_ty, body: core_body,
+                    num_loose_bvars: core_nlbv, has_fvars: locals, hash,
+                });
+                self.record_expr(core_idx, min_shift);
             }
             ExprLet {name, ty, value, body, nondep} => {
                 let binder_name = self.get_name_ptr(name);
-                let binder_type = self.get_expr_ptr(ty);
-                let val = self.get_expr_ptr(value);
-                let body = self.get_expr_ptr(body);
-                let num_bvars = self
-                    .num_loose_bvars(binder_type)
-                    .max(self.num_loose_bvars(val).max(self.num_loose_bvars(body).saturating_sub(1)));
-                let fvar_lb = if num_bvars == 0 { 0 } else {
-                    let mut lb = u16::MAX;
-                    if self.num_loose_bvars(binder_type) > 0 { lb = lb.min(self.expr_fvar_lb(binder_type)); }
-                    if self.num_loose_bvars(val) > 0 { lb = lb.min(self.expr_fvar_lb(val)); }
-                    let b_nlbv = self.num_loose_bvars(body);
-                    let b_lb = self.expr_fvar_lb(body).saturating_sub(1);
-                    if b_nlbv > 1 || (b_nlbv == 1 && self.expr_fvar_lb(body) > 0) { lb = lb.min(b_lb); }
-                    if lb == u16::MAX { 0 } else { lb }
-                };
-                let (core_type, core_val, core_body) = if fvar_lb > 0 {
-                    self.osnf_count += 1;
-                    (self.adjust_child(binder_type, fvar_lb, 0), self.adjust_child(val, fvar_lb, 0), self.adjust_child(body, fvar_lb, 1))
-                } else { (binder_type, val, body) };
-                let core_idx = {
-                    let hash = hash64!(crate::expr::LET_HASH, binder_name, core_type, core_val, core_body, nondep);
-                    let core_nlbv = self
-                        .num_loose_bvars(core_type)
-                        .max(self.num_loose_bvars(core_val).max(self.num_loose_bvars(core_body).saturating_sub(1)));
-                    let locals = self.has_fvars(core_type) || self.has_fvars(core_val) || self.has_fvars(core_body);
-                    let core_fvar_lb = if core_nlbv == 0 { 0 } else {
-                        let mut lb = u16::MAX;
-                        if self.num_loose_bvars(core_type) > 0 { lb = lb.min(self.expr_fvar_lb(core_type)); }
-                        if self.num_loose_bvars(core_val) > 0 { lb = lb.min(self.expr_fvar_lb(core_val)); }
-                        let b_nlbv = self.num_loose_bvars(core_body);
-                        let b_lb = self.expr_fvar_lb(core_body).saturating_sub(1);
-                        if b_nlbv > 1 || (b_nlbv == 1 && self.expr_fvar_lb(core_body) > 0) { lb = lb.min(b_lb); }
-                        if lb == u16::MAX { 0 } else { lb }
-                    };
-                    self.insert_expr(Expr::Let {
-                        binder_name,
-                        binder_type: core_type,
-                        val: core_val,
-                        body: core_body,
-                        num_loose_bvars: core_nlbv,
-                        has_fvars: locals,
-                        hash,
-                        nondep,
-                        fvar_lb: core_fvar_lb,
-                    }).0
-                };
-                if fvar_lb > 0 {
-                    let core_ptr = crate::util::Ptr::from(DagMarker::ExportFile, core_idx);
-                    let shift_idx = self.insert_shift(core_ptr, fvar_lb);
-                    self.record_expr(shift_idx);
-                } else {
-                    self.record_expr(core_idx);
-                }
+                let ty_sptr = self.get_expr_sptr(ty);
+                let val_sptr = self.get_expr_sptr(value);
+                let body_sptr = self.get_expr_sptr(body);
+                let ty_core_nlbv = self.num_loose_bvars(ty_sptr.ptr);
+                let val_core_nlbv = self.num_loose_bvars(val_sptr.ptr);
+                let body_core_nlbv = self.num_loose_bvars(body_sptr.ptr);
+                let ty_eff_nlbv = if ty_core_nlbv == 0 { 0 } else { ty_core_nlbv + ty_sptr.shift };
+                let val_eff_nlbv = if val_core_nlbv == 0 { 0 } else { val_core_nlbv + val_sptr.shift };
+                let body_eff_nlbv = if body_core_nlbv == 0 { 0 } else { body_core_nlbv + body_sptr.shift };
+                // Body is under a binder; its outer contribution is body_eff_nlbv.saturating_sub(1)
+                let body_outer_shift = if body_eff_nlbv <= 1 { None }
+                    else { Some(body_sptr.shift.saturating_sub(1)) };
+                // min_shift = min of all open children's effective shifts
+                let mut min_shift = u16::MAX;
+                if ty_eff_nlbv > 0 { min_shift = min_shift.min(ty_sptr.shift); }
+                if val_eff_nlbv > 0 { min_shift = min_shift.min(val_sptr.shift); }
+                if let Some(bs) = body_outer_shift { min_shift = min_shift.min(bs); }
+                if min_shift == u16::MAX { min_shift = 0; }
+                if min_shift > 0 { self.osnf_count += 1; }
+                let core_ty = if ty_eff_nlbv == 0 { ty_sptr } else { SPtr::new(ty_sptr.ptr, ty_sptr.shift - min_shift) };
+                let core_val = if val_eff_nlbv == 0 { val_sptr } else { SPtr::new(val_sptr.ptr, val_sptr.shift - min_shift) };
+                let core_body = if body_eff_nlbv > 1 { SPtr::new(body_sptr.ptr, body_sptr.shift - min_shift) } else { body_sptr };
+                let core_ty_nlbv = if ty_core_nlbv == 0 { 0 } else { ty_core_nlbv + core_ty.shift };
+                let core_val_nlbv = if val_core_nlbv == 0 { 0 } else { val_core_nlbv + core_val.shift };
+                let core_body_nlbv = if body_core_nlbv == 0 { 0 } else { body_core_nlbv + core_body.shift };
+                let core_nlbv = core_ty_nlbv.max(core_val_nlbv.max(core_body_nlbv.saturating_sub(1)));
+                let locals = self.has_fvars_ptr(ty_sptr.ptr) || self.has_fvars_ptr(val_sptr.ptr) || self.has_fvars_ptr(body_sptr.ptr);
+                let hash = hash64!(crate::expr::LET_HASH, binder_name, core_ty, core_val, core_body, nondep);
+                let (core_idx, _) = self.insert_expr(Expr::Let {
+                    binder_name,
+                    binder_type: core_ty,
+                    val: core_val,
+                    body: core_body,
+                    num_loose_bvars: core_nlbv,
+                    has_fvars: locals,
+                    hash,
+                    nondep,
+                });
+                self.record_expr(core_idx, min_shift);
             }
             ExprProj {type_name, idx, structure: struct_} => {
                 let ty_name = self.get_name_ptr(type_name);
-                let structure = self.get_expr_ptr(struct_);
-                let num_bvars = self.num_loose_bvars(structure);
-                let fvar_lb = if num_bvars == 0 { 0 } else { self.expr_fvar_lb(structure) };
-                let core_structure = if fvar_lb > 0 {
-                    self.osnf_count += 1;
-                    self.adjust_child(structure, fvar_lb, 0)
-                } else { structure };
-                let core_idx = {
-                    let hash = hash64!(crate::expr::PROJ_HASH, ty_name, idx, core_structure);
-                    let core_nlbv = self.num_loose_bvars(core_structure);
-                    let locals = self.has_fvars(core_structure);
-                    let core_fvar_lb = self.expr_fvar_lb(core_structure);
-                    self.insert_expr(Expr::Proj {
-                        ty_name,
-                        idx,
-                        structure: core_structure,
-                        num_loose_bvars: core_nlbv,
-                        has_fvars: locals,
-                        hash,
-                        fvar_lb: core_fvar_lb,
-                    }).0
-                };
-                if fvar_lb > 0 {
-                    let core_ptr = crate::util::Ptr::from(DagMarker::ExportFile, core_idx);
-                    let shift_idx = self.insert_shift(core_ptr, fvar_lb);
-                    self.record_expr(shift_idx);
-                } else {
-                    self.record_expr(core_idx);
-                }
+                let struct_sptr = self.get_expr_sptr(struct_);
+                let struct_core_nlbv = self.num_loose_bvars(struct_sptr.ptr);
+                let struct_eff_nlbv = if struct_core_nlbv == 0 { 0 } else { struct_core_nlbv + struct_sptr.shift };
+                let min_shift = if struct_eff_nlbv == 0 { 0 } else { struct_sptr.shift };
+                if min_shift > 0 { self.osnf_count += 1; }
+                let core_struct = SPtr::new(struct_sptr.ptr, struct_sptr.shift - min_shift);
+                let core_struct_nlbv = if struct_core_nlbv == 0 { 0 } else { struct_core_nlbv + core_struct.shift };
+                let locals = self.has_fvars_ptr(struct_sptr.ptr);
+                let hash = hash64!(crate::expr::PROJ_HASH, ty_name, idx, core_struct);
+                let (core_idx, _) = self.insert_expr(Expr::Proj {
+                    ty_name,
+                    idx,
+                    structure: core_struct,
+                    num_loose_bvars: core_struct_nlbv,
+                    has_fvars: locals,
+                    hash,
+                });
+                self.record_expr(core_idx, min_shift);
             }
             Axiom {name, ty, uparams, is_unsafe} => {
                 assert!(!is_unsafe);

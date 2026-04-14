@@ -3,7 +3,7 @@
 use crate::env::{ConstructorData, Declar, DeclarInfo, InductiveData, EnvLimit};
 use crate::expr::{BinderStyle, BinderStyle::*};
 use crate::tc::TypeChecker;
-use crate::util::TcCtx;
+use crate::util::{SPtr, TcCtx};
 
 /// From `in ctx, [a, b, c, .., n]`, create `app(app(app(a, b), c).. n)`
 #[macro_export]
@@ -56,7 +56,7 @@ macro_rules! pi_telescope {
 
         {
             let inner = pi_telescope!(in $ctx; $($tl),*);
-            $ctx.abstr_pi($ty, inner)
+            $ctx.abstr_pi($ty.ptr, inner.ptr)
         }
     }
 }
@@ -82,11 +82,11 @@ pub fn check_eq<'x, 't: 'x, 'p: 't>(ctx: &'x mut TcCtx<'t, 'p>, declar: &Declar<
                 &[u] => ctx.mk_sort(u),
                 owise => panic!("Bad `Eq` type; inductive `Eq` is expected to have 1 uparam, found {}", owise.len()),
             };
-            let alpha = ctx.mk_unique(alpha_name, Implicit, uparam);
+            let alpha = ctx.mk_unique(alpha_name, Implicit, uparam.ptr);
             let inner = arrow!(in ctx; alpha, alpha, prop);
             let expected = pi_telescope!(in ctx; alpha, inner);
             let mut tc = TypeChecker::new(ctx, &env, Some(info));
-            tc.assert_def_eq(info.ty, expected);
+            tc.assert_def_eq(SPtr::unshifted(info.ty), SPtr::unshifted(expected.ptr));
             match all_ctor_names.as_ref() {
                 &[ctor_name] => {
                     assert_eq!(cname, ctor_name);
@@ -96,13 +96,13 @@ pub fn check_eq<'x, 't: 'x, 'p: 't>(ctx: &'x mut TcCtx<'t, 'p>, declar: &Declar<
                                 &[uparam] => ctx.mk_sort(uparam),
                                 _ => panic!(),
                             };
-                            let alpha = ctx.mk_unique(alpha_name, Implicit, uparam_sort);
-                            let a = ctx.mk_unique(a_name, Default, alpha);
+                            let alpha = ctx.mk_unique(alpha_name, Implicit, uparam_sort.ptr);
+                            let a = ctx.mk_unique(a_name, Default, alpha.ptr);
 
                             let app = app!(in ctx; eq_const, alpha, a, a);
                             let expected = pi_telescope!(in ctx; alpha, a, app);
                             let mut tc = TypeChecker::new(ctx, &env, Some(*info));
-                            tc.assert_def_eq(info.ty, expected);
+                            tc.assert_def_eq(SPtr::unshifted(info.ty), SPtr::unshifted(expected.ptr));
                         }
                         None => panic!(
                             "cannot add Quot; constructor `Eq.refl` was expected, but not found in the environment"
@@ -145,23 +145,23 @@ pub fn check_quot<'x, 't: 'x, 'p: 't>(ctx: &'x mut TcCtx<'t, 'p>, declar: &Decla
     let b_name = ctx.str1("b");
 
     // local for `{A : Sort u}`
-    let A = ctx.mk_unique(A_name, Implicit, sort_u);
+    let A = ctx.mk_unique(A_name, Implicit, sort_u.ptr);
     // local for `{B : Sort v}`
-    let B = ctx.mk_unique(B_name, Implicit, sort_v);
+    let B = ctx.mk_unique(B_name, Implicit, sort_v.ptr);
     let A_A_Prop = arrow!(in ctx; A, A, prop);
     let A_B = arrow!(in ctx; A, B);
     // local for `(r : A -> A -> Prop)`
-    let r = ctx.mk_unique(r_name, Default, A_A_Prop);
+    let r = ctx.mk_unique(r_name, Default, A_A_Prop.ptr);
     // local for `(f : A -> B)`
-    let f = ctx.mk_unique(f_name, Default, A_B);
+    let f = ctx.mk_unique(f_name, Default, A_B.ptr);
     // local for `(a1 : A)`
-    let a = ctx.mk_unique(a_name, Default, A);
+    let a = ctx.mk_unique(a_name, Default, A.ptr);
     // local for `(b : A)`
-    let b = ctx.mk_unique(b_name, Default, A);
+    let b = ctx.mk_unique(b_name, Default, A.ptr);
 
     // Quot : Π {A : Sort u}, (A → A → Prop) → Sort u
     let expected_quot = Declar::Quot {
-        info: DeclarInfo { name: quot_name, uparams: levels_u, ty: pi_telescope!(in ctx; A, r, sort_u) },
+        info: DeclarInfo { name: quot_name, uparams: levels_u, ty: pi_telescope!(in ctx; A, r, sort_u).ptr },
     };
     let quot_const = ctx.mk_const(expected_quot.info().name, levels_u);
     let quot_A_r = app!(in ctx; quot_const, A, r);
@@ -176,7 +176,7 @@ pub fn check_quot<'x, 't: 'x, 'p: 't>(ctx: &'x mut TcCtx<'t, 'p>, declar: &Decla
                 A,
                 r,
                 arrow!(in ctx; A, quot_A_r)
-            },
+            }.ptr,
         },
     };
 
@@ -205,11 +205,11 @@ pub fn check_quot<'x, 't: 'x, 'p: 't>(ctx: &'x mut TcCtx<'t, 'p>, declar: &Decla
     if declar.info().name == ctx.str1("Quot") {
         let env = ctx.export_file.new_env(EnvLimit::ByName(quot_name));
         let mut tc = TypeChecker::new(ctx, &env, Some(*declar.info()));
-        tc.assert_def_eq(declar.info().ty, expected_quot.info().ty);
+        tc.assert_def_eq(SPtr::unshifted(declar.info().ty), SPtr::unshifted(expected_quot.info().ty));
     } else if declar.info().name == ctx.str2("Quot", "mk") {
         let env = ctx.export_file.new_env(EnvLimit::ByName(quot_mk_name));
         let mut tc = TypeChecker::new(ctx, &env, Some(*declar.info()));
-        tc.assert_def_eq(declar.info().ty, expected_quot_mk.info().ty);
+        tc.assert_def_eq(SPtr::unshifted(declar.info().ty), SPtr::unshifted(expected_quot_mk.info().ty));
     } else if declar.info().name == ctx.str2("Quot", "lift") {
         check_eq(ctx, declar);
         // Quot.lift : Π {A : Sort u} {r : A → A → Prop} {B : Sort v} (f : A → B),
@@ -230,21 +230,21 @@ pub fn check_quot<'x, 't: 'x, 'p: 't>(ctx: &'x mut TcCtx<'t, 'p>, declar: &Decla
                         quot_A_r,
                         B
                     }
-                },
+                }.ptr,
             },
         };
         let env = ctx.export_file.new_env(EnvLimit::ByName(declar.info().name));
         let mut tc = TypeChecker::new(ctx, &env, Some(*declar.info()));
-        tc.assert_def_eq(declar.info().ty, expected_quot_lift.info().ty);
+        tc.assert_def_eq(SPtr::unshifted(declar.info().ty), SPtr::unshifted(expected_quot_lift.info().ty));
         return
     } else if declar.info().name == ctx.str2("Quot", "ind") {
         // {B : @Quot A r → Prop}
         let quot_A_r_prop = arrow!(in ctx; quot_A_r, prop);
 
-        let B_local = ctx.mk_unique(B_name, Implicit, quot_A_r_prop);
+        let B_local = ctx.mk_unique(B_name, Implicit, quot_A_r_prop.ptr);
 
         // (q : @Quot A r)
-        let q_local = ctx.mk_unique(q_name, Default, quot_A_r);
+        let q_local = ctx.mk_unique(q_name, Default, quot_A_r.ptr);
 
         // @Quot.mk A r a
         let quot_mk_app = app!(in ctx; quot_mk_const, A, r, a);
@@ -260,13 +260,13 @@ pub fn check_quot<'x, 't: 'x, 'p: 't>(ctx: &'x mut TcCtx<'t, 'p>, declar: &Decla
             info: DeclarInfo {
                 name: declar.info().name,
                 uparams: levels_u,
-                ty: pi_telescope!(in ctx; A, r, B_local, arrow!(in ctx; lhs, rhs)),
+                ty: pi_telescope!(in ctx; A, r, B_local, arrow!(in ctx; lhs, rhs)).ptr,
             },
         };
 
         let env = ctx.export_file.new_env(EnvLimit::ByName(declar.info().name));
         let mut tc = TypeChecker::new(ctx, &env, Some(*declar.info()));
-        tc.assert_def_eq(declar.info().ty, expected_quot_ind.info().ty);
+        tc.assert_def_eq(SPtr::unshifted(declar.info().ty), SPtr::unshifted(expected_quot_ind.info().ty));
         return
     } else {
         panic!("invalid quotient declaration {:?}", ctx.debug_print(declar.info().name))

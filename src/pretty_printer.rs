@@ -3,7 +3,7 @@ use crate::expr::{BinderStyle, Expr::*, FVarId};
 use crate::hash64;
 use crate::level::Level;
 use crate::name::Name;
-use crate::util::{ExportFile, ExprPtr, LevelPtr, LevelsPtr, NamePtr, StringPtr, TcCtx};
+use crate::util::{ExportFile, ExprPtr, LevelPtr, LevelsPtr, NamePtr, SPtr, StringPtr, TcCtx};
 use serde::Deserialize;
 use std::error::Error;
 use std::rc::Rc;
@@ -526,22 +526,22 @@ impl<'x, 't, 'p> PrettyPrinter<'x, 't, 'p> {
     /// they carry information about whether they're a pi or lambda, if they're seen
     /// later, etc.
     fn parse_binders(&mut self, mut e: ExprPtr<'t>) -> (Vec<ParsedBinder<'t>>, ExprPtr<'t>) {
-        let (mut binders, mut binder_tys) = (Vec::<ParsedBinder>::new(), Vec::new());
+        let (mut binders, mut binder_tys) = (Vec::<ParsedBinder>::new(), Vec::<SPtr>::new());
         while let Pi { binder_name, binder_style, binder_type, body, .. }
         | Lambda { binder_name, binder_style, binder_type, body, .. } = self.ctx.read_expr(e)
         {
             let binder_type = self.ctx.inst(binder_type, binder_tys.as_slice());
-            let local = self.ctx.mk_unique(binder_name, binder_style, binder_type);
+            let local = self.ctx.mk_unique(binder_name, binder_style, binder_type.ptr);
             let is_pi = matches!(self.ctx.read_expr(e), Pi { .. });
             let is_anon = self.ctx.read_name(binder_name) == Name::Anon;
-            let has_var = self.ctx.has_var(body, 0);
-            let new_parsed_binder = self.mk_parsed_binder(is_pi, has_var, is_anon, local);
+            let has_var = self.ctx.has_var(body.ptr, 0);
+            let new_parsed_binder = self.mk_parsed_binder(is_pi, has_var, is_anon, local.ptr);
             binders.push(new_parsed_binder);
             binder_tys.push(local);
-            e = body;
+            e = body.ptr;
         }
-        let instd = self.ctx.inst(e, binder_tys.as_slice());
-        (binders, instd)
+        let instd = self.ctx.inst(SPtr::unshifted(e), binder_tys.as_slice());
+        (binders, instd.ptr)
     }
 
     /// `safe` in the sense that the name will be escaped if it doesn't follow the
@@ -613,8 +613,8 @@ impl<'x, 't, 'p> PrettyPrinter<'x, 't, 'p> {
     /// Does this expression infer as a `Pi` with any binder style other than `Default`
     fn is_implicit_fun(&mut self, fun: ExprPtr<'t>) -> bool {
         self.ctx.with_tc(crate::env::EnvLimit::PpUnlimited, |tc| {
-            let ty = tc.infer_then_whnf(fun, crate::tc::InferFlag::InferOnly);
-            match tc.ctx.read_expr(ty) {
+            let ty = tc.infer_then_whnf(SPtr::unshifted(fun), crate::tc::InferFlag::InferOnly);
+            match tc.ctx.read_expr(ty.ptr) {
                 Pi { binder_style, .. } => binder_style != BinderStyle::Default,
                 _ => false,
             }
@@ -632,9 +632,9 @@ impl<'x, 't, 'p> PrettyPrinter<'x, 't, 'p> {
     fn unfold_apps_pp(&mut self, e: ExprPtr<'t>) -> (ExprPtr<'t>, Vec<ExprPtr<'t>>) {
         match self.ctx.read_expr(e) {
             App { fun, arg, .. } => {
-                let (f, mut out) = self.unfold_apps_pp(fun);
-                if !(self.is_implicit_fun(fun) && !self.options().explicit) {
-                    out.push(arg);
+                let (f, mut out) = self.unfold_apps_pp(fun.ptr);
+                if !(self.is_implicit_fun(fun.ptr) && !self.options().explicit) {
+                    out.push(arg.ptr);
                 }
                 (f, out)
             }
@@ -712,16 +712,16 @@ impl<'x, 't, 'p> PrettyPrinter<'x, 't, 'p> {
     ) -> Parenable {
         let suggestion = self.ctx.mk_unique(binder_name, BinderStyle::Default, binder_type);
         let fresh_lc_name = binder_name;
-        let swapped_lc = self.ctx.swap_local_binding_name(suggestion, fresh_lc_name);
+        let swapped_lc = self.ctx.swap_local_binding_name(suggestion.ptr, fresh_lc_name);
         let (n, t) = match self.ctx.read_expr(swapped_lc) {
             Local { binder_name, binder_type, .. } => (binder_name, binder_type),
             _ => panic!(),
         };
 
-        let instd = self.ctx.inst(body, &[swapped_lc]);
+        let instd = self.ctx.inst(SPtr::unshifted(body), &[SPtr::unshifted(swapped_lc)]);
         let binder = self.pp_bare_binder(n, t).group();
         let val = self.pp_expr_aux(val).parens(0).group();
-        let body = self.pp_expr_aux(instd).parens(0);
+        let body = self.pp_expr_aux(instd.ptr).parens(0);
         DocPtr::from("let")
             .concat_w_space(binder)
             .concat_w_space(":=")
@@ -734,7 +734,7 @@ impl<'x, 't, 'p> PrettyPrinter<'x, 't, 'p> {
     }
 
     fn pp_expr_aux(&mut self, e: ExprPtr<'t>) -> Parenable {
-        if !self.options().proofs && self.ctx.with_tc(crate::env::EnvLimit::PpUnlimited, |tc| tc.is_proof(e).0) {
+        if !self.options().proofs && self.ctx.with_tc(crate::env::EnvLimit::PpUnlimited, |tc| tc.is_proof(crate::util::SPtr::unshifted(e)).0) {
             DocPtr::from("_").as_unparenable()
         } else {
             match self.ctx.read_expr(e) {
@@ -747,21 +747,15 @@ impl<'x, 't, 'p> PrettyPrinter<'x, 't, 'p> {
                     let new_inner = self.pp_expr_aux(instd);
                     self.pp_binders(binders.as_slice(), new_inner)
                 }
-                Let { binder_name, binder_type, val, body, .. } => self.pp_let(binder_name, binder_type, val, body),
+                Let { binder_name, binder_type, val, body, .. } => self.pp_let(binder_name, binder_type.ptr, val.ptr, body.ptr),
                 App { .. } => self.pp_app(e),
                 Proj { idx, structure, .. } => {
                     // Lean's pretty-printer for structure fields is 1-indexed
-                    self.pp_expr_aux(structure)
+                    self.pp_expr_aux(structure.ptr)
                         .parens(MAX_LEVEL)
                         .group()
                         .concat(DocPtr::from("."))
                         .concat(DocPtr::from((idx + 1).to_string()))
-                        .as_unparenable()
-                }
-                Shift { inner, amount, .. } => {
-                    DocPtr::from(format!("⇑{}(", amount))
-                        .concat(self.pp_expr_aux(inner).parens(MAX_LEVEL))
-                        .concat(DocPtr::from(")"))
                         .as_unparenable()
                 }
                 NatLit { ptr, .. } => DocPtr::from(self.ctx.read_bignum(ptr).unwrap().to_string()).as_unparenable(),
@@ -806,22 +800,22 @@ impl<'x, 't, 'p> PrettyPrinter<'x, 't, 'p> {
             match self.ctx.read_expr(val) {
                 Lambda { body, .. } if elem.can_factor_out() => {
                     slice_split_idx += 1;
-                    val = body;
+                    val = body.ptr;
                 }
                 _ => break,
             }
         }
         let (named_binders, rest_binders) = binders.split_at(slice_split_idx);
-        let named_binder_tys = named_binders.iter().map(|x| x.local_const).collect::<std::vec::Vec<_>>();
+        let named_binder_tys: Vec<SPtr> = named_binders.iter().map(|x| SPtr::unshifted(x.local_const)).collect();
 
-        let instd = self.ctx.inst(val, named_binder_tys.as_slice());
+        let instd = self.ctx.inst(SPtr::unshifted(val), named_binder_tys.as_slice());
         let pp_val = {
-            let is_prop = self.ctx.with_tc(crate::env::EnvLimit::PpUnlimited, |tc| tc.is_proposition(declar.info().ty).0);
+            let is_prop = self.ctx.with_tc(crate::env::EnvLimit::PpUnlimited, |tc| tc.is_proposition(SPtr::unshifted(declar.info().ty)).0);
             line()
                 .concat(if is_prop && !self.options().proofs {
                     DocPtr::from("_")
                 } else {
-                    self.pp_expr_aux(instd).parens(0).group()
+                    self.pp_expr_aux(instd.ptr).parens(0).group()
                 })
                 .mk_nest(self.options().indent)
         };
@@ -909,13 +903,12 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         }
         match self.read_expr(e) {
             Var { dbj_idx, .. } => dbj_idx == i,
-            App { fun: a, arg: b, .. } => self.has_var(a, i) || self.has_var(b, i),
+            App { fun: a, arg: b, .. } => self.has_var(a.ptr, i) || self.has_var(b.ptr, i),
             Pi { binder_type, body, .. } | Lambda { binder_type, body, .. } =>
-                self.has_var(binder_type, i) || self.has_var(body, i + 1),
+                self.has_var(binder_type.ptr, i) || self.has_var(body.ptr, i + 1),
             Let { binder_type, val, body, .. } =>
-                self.has_var(binder_type, i) || self.has_var(val, i) || self.has_var(body, i + 1),
-            Proj { structure, .. } => self.has_var(structure, i),
-            Shift { inner, .. } => self.has_var(inner, i),
+                self.has_var(binder_type.ptr, i) || self.has_var(val.ptr, i) || self.has_var(body.ptr, i + 1),
+            Proj { structure, .. } => self.has_var(structure.ptr, i),
             Sort { .. } | Const { .. } | NatLit { .. } | StringLit { .. } => false,
             Local { .. } => panic!(),
         }
@@ -925,7 +918,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         match self.read_expr(e) {
             Local { binder_style, binder_type, id: id @ FVarId::Unique(_), .. } => {
                 let hash = hash64!(crate::expr::LOCAL_HASH, new_name, binder_style, binder_type, id);
-                self.alloc_expr(Local { binder_name: new_name, binder_style, binder_type, id, hash, fvar_lb: 0 })
+                self.alloc_expr(Local { binder_name: new_name, binder_style, binder_type, id, hash })
             }
             _ => panic!(),
         }

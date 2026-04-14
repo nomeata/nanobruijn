@@ -1,5 +1,5 @@
 //! Implementation of Lean expressions
-use crate::util::{AppArgs, BigUintPtr, ExprPtr, FxHashMap, LevelPtr, LevelsPtr, NamePtr, StringPtr, TcCtx};
+use crate::util::{AppArgs, BigUintPtr, ExprPtr, FxHashMap, LevelPtr, LevelsPtr, NamePtr, SPtr, StringPtr, TcCtx};
 use num_bigint::BigUint;
 use num_traits::identities::Zero;
 use Expr::*;
@@ -16,24 +16,20 @@ pub(crate) const APP_HASH: u64 = 233;
 pub(crate) const LOCAL_HASH: u64 = 211;
 pub(crate) const STRING_LIT_HASH: u64 = 1493;
 pub(crate) const NAT_LIT_HASH: u64 = 1583;
-pub(crate) const SHIFT_HASH: u64 = 1699;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Expr<'a> {
     /// A string literal with a pointer to a utf-8 string.
     StringLit {
         hash: u64,
-        fvar_lb: u16,
         ptr: StringPtr<'a>,
     },
     /// A nat literal, holds a pointer to an arbitrary precision bignum.
     NatLit {
         hash: u64,
-        fvar_lb: u16,
         ptr: BigUintPtr<'a>,
     },
     Proj {
         hash: u64,
-        fvar_lb: u16,
         /// The name of the structure being projected. E.g. `Prod` if this is
         /// projection 0 of `Prod.mk ..`
         ty_name: NamePtr<'a>,
@@ -41,62 +37,57 @@ pub enum Expr<'a> {
         /// parameters. For some struct Foo A B, and a constructor Foo.mk A B p q r s,
         /// `q` will have idx 1.
         idx: u32,
-        structure: ExprPtr<'a>,
+        structure: SPtr<'a>,
         num_loose_bvars: u16,
         has_fvars: bool,
     },
     /// A bound variable represented by a deBruijn index.
+    /// In the DAG, only Var { dbj_idx: 0 } exists. All variable references
+    /// are SPtr(var0_ptr, k) where k is the de Bruijn index.
     Var {
         hash: u64,
-        fvar_lb: u16,
         dbj_idx: u16,
     },
     Sort {
         hash: u64,
-        fvar_lb: u16,
         level: LevelPtr<'a>,
     },
     Const {
         hash: u64,
-        fvar_lb: u16,
         name: NamePtr<'a>,
         levels: LevelsPtr<'a>,
     },
     App {
         hash: u64,
-        fvar_lb: u16,
-        fun: ExprPtr<'a>,
-        arg: ExprPtr<'a>,
+        fun: SPtr<'a>,
+        arg: SPtr<'a>,
         num_loose_bvars: u16,
         has_fvars: bool,
     },
     Pi {
         hash: u64,
-        fvar_lb: u16,
         binder_name: NamePtr<'a>,
         binder_style: BinderStyle,
-        binder_type: ExprPtr<'a>,
-        body: ExprPtr<'a>,
+        binder_type: SPtr<'a>,
+        body: SPtr<'a>,
         num_loose_bvars: u16,
         has_fvars: bool,
     },
     Lambda {
         hash: u64,
-        fvar_lb: u16,
         binder_name: NamePtr<'a>,
         binder_style: BinderStyle,
-        binder_type: ExprPtr<'a>,
-        body: ExprPtr<'a>,
+        binder_type: SPtr<'a>,
+        body: SPtr<'a>,
         num_loose_bvars: u16,
         has_fvars: bool,
     },
     Let {
         hash: u64,
-        fvar_lb: u16,
         binder_name: NamePtr<'a>,
-        binder_type: ExprPtr<'a>,
-        val: ExprPtr<'a>,
-        body: ExprPtr<'a>,
+        binder_type: SPtr<'a>,
+        val: SPtr<'a>,
+        body: SPtr<'a>,
         num_loose_bvars: u16,
         has_fvars: bool,
         nondep: bool
@@ -104,22 +95,10 @@ pub enum Expr<'a> {
     /// A free variable with binder information and a unique identifier.
     Local {
         hash: u64,
-        fvar_lb: u16,
         binder_name: NamePtr<'a>,
         binder_style: BinderStyle,
         binder_type: ExprPtr<'a>,
         id: FVarId,
-    },
-    /// Delayed shift: all free Var indices in `inner` are shifted up by `amount`.
-    /// Always cutoff=0. `amount > 0` and `inner.fvar_lb == 0` (OSNF invariant).
-    /// Nested shifts are impossible (inner can't be Shift since inner.fvar_lb == 0).
-    Shift {
-        hash: u64,
-        fvar_lb: u16,
-        inner: ExprPtr<'a>,
-        amount: u16,
-        num_loose_bvars: u16,
-        has_fvars: bool,
     },
 }
 
@@ -145,25 +124,7 @@ impl<'a> Expr<'a> {
             | Local { hash, .. }
             | StringLit { hash, .. }
             | NatLit { hash, .. }
-            | Proj { hash, .. }
-            | Shift { hash, .. } => *hash,
-        }
-    }
-
-    pub(crate) fn get_fvar_lb(&self) -> u16 {
-        match self {
-            Var { fvar_lb, .. }
-            | Sort { fvar_lb, .. }
-            | Const { fvar_lb, .. }
-            | App { fvar_lb, .. }
-            | Pi { fvar_lb, .. }
-            | Lambda { fvar_lb, .. }
-            | Let { fvar_lb, .. }
-            | Local { fvar_lb, .. }
-            | StringLit { fvar_lb, .. }
-            | NatLit { fvar_lb, .. }
-            | Proj { fvar_lb, .. }
-            | Shift { fvar_lb, .. } => *fvar_lb,
+            | Proj { hash, .. } => *hash,
         }
     }
 }
@@ -190,12 +151,13 @@ pub enum BinderStyle {
 }
 
 impl<'t, 'p: 't> TcCtx<'t, 'p> {
-    pub(crate) fn inst_forall_params(&mut self, mut e: ExprPtr<'t>, n: usize, all_args: &[ExprPtr<'t>]) -> ExprPtr<'t> {
+    pub(crate) fn inst_forall_params(&mut self, mut e: SPtr<'t>, n: usize, all_args: &[SPtr<'t>]) -> SPtr<'t> {
         for _ in 0..n {
-            if let Pi { body, .. } = self.view_expr(e) {
-                e = body
-            } else {
-                panic!()
+            match self.read_expr(e.ptr) {
+                Pi { body, .. } => {
+                    e = SPtr::new(body.ptr, body.shift + e.shift);
+                }
+                _ => panic!()
             }
         }
         self.inst_beta(e, &all_args[0..n])
@@ -205,69 +167,79 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
     /// Replaces Var(offset + i) with substs[rev(i)] for i < substs.len().
     /// Vars beyond the substitution range are left unchanged (no shifting).
     /// Used for local-to-local replacement (e.g. replace_params, inductive.rs).
-    pub fn inst(&mut self, e: ExprPtr<'t>, substs: &[ExprPtr<'t>]) -> ExprPtr<'t> {
+    pub fn inst(&mut self, e: SPtr<'t>, substs: &[SPtr<'t>]) -> SPtr<'t> {
         self.trace.inst_calls += 1;
         if substs.is_empty() {
             return e
         }
-        // OSNF fast path: if fvar_lb >= n_substs, no substituted variable appears.
-        // For inst (no shift_down), the expression is unchanged.
-        let fvar_lb = self.fvar_lb(e);
-        if fvar_lb >= substs.len() as u16 {
+        // SPtr fast path: if e.shift >= n_substs, no substituted variable appears.
+        if e.shift >= substs.len() as u16 {
             return e;
         }
         self.expr_cache.inst_substs_id = self.expr_cache.inst_substs_id.wrapping_add(1);
-        self.inst_aux(e, substs, 0, false, 0, 0)
+        self.inst_aux(e.ptr, substs, 0, false, e.shift as i16, 0)
     }
 
     /// Like `inst`, but also shifts down Var indices beyond the substitution range.
     /// Used for beta reduction and let-substitution where binders are being removed.
-    pub fn inst_beta(&mut self, e: ExprPtr<'t>, substs: &[ExprPtr<'t>]) -> ExprPtr<'t> {
+    pub fn inst_beta(&mut self, e: SPtr<'t>, substs: &[SPtr<'t>]) -> SPtr<'t> {
         self.trace.inst_calls += 1;
         if substs.is_empty() {
             return e
         }
-        // OSNF fast path: if fvar_lb >= n_substs, all substituted variables are dead.
-        // Result is just shift_down by n_substs — O(1) for Shift and Var nodes.
+        // SPtr fast path: if e.shift >= n_substs, all substituted variables are dead.
+        // With SPtr, the shift can be adjusted arithmetically.
         let n_substs = substs.len() as u16;
-        let fvar_lb = self.fvar_lb(e);
-        if fvar_lb >= n_substs {
-            return self.push_shift_down(e, n_substs);
+        if e.shift >= n_substs {
+            return SPtr::new(e.ptr, e.shift - n_substs);
         }
         self.expr_cache.inst_substs_id = self.expr_cache.inst_substs_id.wrapping_add(1);
-        self.inst_aux(e, substs, 0, true, 0, 0)
+        self.inst_aux(e.ptr, substs, 0, true, e.shift as i16, 0)
     }
 
     /// Combined shift+instantiation in one pass.
     /// `sh_amt`/`sh_cut` represent a pending outer Shift that is applied to `e` before
     /// instantiation, without creating intermediate Shift wrapper expressions.
-    fn inst_aux(&mut self, e: ExprPtr<'t>, substs: &[ExprPtr<'t>], offset: u16, shift_down: bool, sh_amt: i16, sh_cut: u16) -> ExprPtr<'t> {
+    /// With SPtr children, the child's shift composes with the pending (sh_amt, sh_cut).
+    fn inst_aux(&mut self, e: ExprPtr<'t>, substs: &[SPtr<'t>], offset: u16, shift_down: bool, sh_amt: i16, sh_cut: u16) -> SPtr<'t> {
         stacker::maybe_grow(64 * 1024, 2 * 1024 * 1024, || self.inst_aux_body(e, substs, offset, shift_down, sh_amt, sh_cut))
+    }
+
+    /// Inlined fast path for inst_aux on SPtr children.
+    /// Composes the child's shift into sh_amt before delegating to inst_aux.
+    #[inline(always)]
+    fn inst_aux_quick_sptr(&mut self, child: SPtr<'t>, substs: &[SPtr<'t>], offset: u16, shift_down: bool, sh_amt: i16, sh_cut: u16) -> SPtr<'t> {
+        // Compose child's shift with pending shift: new_sh_amt = sh_amt + child.shift
+        // (child.shift is always a non-negative shift on top of child.ptr)
+        let new_sh_amt = sh_amt + child.shift as i16;
+        self.inst_aux_quick(child.ptr, substs, offset, shift_down, new_sh_amt, sh_cut)
     }
 
     /// Inlined fast path for inst_aux on children: avoids function call + stacker overhead
     /// for the common early-exit cases (closed expressions, nlbv below offset).
     #[inline(always)]
-    fn inst_aux_quick(&mut self, e: ExprPtr<'t>, substs: &[ExprPtr<'t>], offset: u16, shift_down: bool, sh_amt: i16, sh_cut: u16) -> ExprPtr<'t> {
+    fn inst_aux_quick(&mut self, e: ExprPtr<'t>, substs: &[SPtr<'t>], offset: u16, shift_down: bool, sh_amt: i16, sh_cut: u16) -> SPtr<'t> {
         let nlbv = self.num_loose_bvars(e);
         let n_substs = substs.len() as u16;
         if sh_amt == 0 {
-            if nlbv <= offset { return e; }
+            if nlbv <= offset { return SPtr::unshifted(e); }
             // OSNF dead-substitution: if all free vars are past the substitution range,
-            // no variable gets substituted. O(1) for Shift/Var nodes.
+            // no variable gets substituted.
             let fvar_lb = self.fvar_lb(e);
             if fvar_lb >= offset + n_substs {
                 if shift_down {
-                    return self.push_shift_down_cutoff(e, n_substs, offset);
+                    // TODO: push_shift_down_cutoff should return SPtr once util.rs is updated
+                    let r = self.push_shift_down_cutoff(e, n_substs, offset);
+                    return SPtr::unshifted(r);
                 } else {
-                    return e;
+                    return SPtr::unshifted(e);
                 }
             }
         } else {
-            if nlbv == 0 { return e; }
+            if nlbv == 0 { return SPtr::unshifted(e); }
             let effective_nlbv = if nlbv <= sh_cut { nlbv as i16 } else { nlbv as i16 + sh_amt };
             if effective_nlbv <= offset as i16 {
-                if nlbv <= sh_cut { return e; }
+                if nlbv <= sh_cut { return SPtr::unshifted(e); }
                 if sh_cut == 0 { return self.mk_shift(e, sh_amt as u16); }
                 return self.shift_expr(e, sh_amt as u16, sh_cut);
             }
@@ -279,7 +251,9 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
                 if effective_fvar_lb >= offset + n_substs {
                     if shift_down {
                         let shifted = if sh_cut == 0 { self.mk_shift(e, sh_amt as u16) } else { self.shift_expr(e, sh_amt as u16, sh_cut) };
-                        return self.push_shift_down_cutoff(shifted, n_substs, offset);
+                        // TODO: push_shift_down_cutoff needs to take/return SPtr
+                        let r = self.push_shift_down_cutoff(shifted.ptr, n_substs, offset);
+                        return SPtr::new(r, shifted.shift);
                     } else {
                         if sh_cut == 0 { return self.mk_shift(e, sh_amt as u16); }
                         return self.shift_expr(e, sh_amt as u16, sh_cut);
@@ -290,7 +264,8 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         self.inst_aux(e, substs, offset, shift_down, sh_amt, sh_cut)
     }
 
-    fn inst_aux_body(&mut self, e: ExprPtr<'t>, substs: &[ExprPtr<'t>], offset: u16, shift_down: bool, sh_amt: i16, sh_cut: u16) -> ExprPtr<'t> {
+    // TODO: inst_cache needs to be changed to store SPtr instead of ExprPtr in util.rs
+    fn inst_aux_body(&mut self, e: ExprPtr<'t>, substs: &[SPtr<'t>], offset: u16, shift_down: bool, sh_amt: i16, sh_cut: u16) -> SPtr<'t> {
         self.trace.inst_aux_calls += 1;
         if sh_amt != 0 { self.trace.inst_aux_shifted_path += 1; }
         self.check_heartbeat();
@@ -302,18 +277,15 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         if sh_amt == 0 {
             if nlbv <= offset {
                 self.trace.inst_aux_elided += 1;
-                return e;
+                return SPtr::unshifted(e);
             }
         } else {
             let effective_nlbv = if nlbv <= sh_cut { nlbv as i16 } else { nlbv as i16 + sh_amt };
             if effective_nlbv <= offset as i16 {
                 self.trace.inst_aux_elided += 1;
-                // No loose bvars beyond offset after shift — but we still need the shifted form.
-                // If nlbv <= sh_cut, shift is a no-op on this expr:
                 if nlbv <= sh_cut {
-                    return e;
+                    return SPtr::unshifted(e);
                 }
-                // Otherwise the shifted form has bvars but all <= offset, return shifted expr
                 if sh_cut == 0 {
                     return self.mk_shift(e, sh_amt as u16);
                 } else {
@@ -322,41 +294,15 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
             }
         }
 
-        let params = (offset as u64) | ((sh_amt as u16 as u64) << 16) | ((sh_cut as u64) << 32);
-        let substs_id = self.expr_cache.inst_substs_id;
-        let cache_tag = e.get_hash().wrapping_mul(0x517cc1b727220a95) ^ params;
-        // Lazily allocate the DM cache
-        if self.expr_cache.inst_cache.is_empty() {
-            let dummy: ExprPtr<'t> = crate::util::Ptr::from(crate::util::DagMarker::ExportFile, 0);
-            self.expr_cache.inst_cache.resize(crate::util::INST_CACHE_SIZE, (0, 0, dummy, dummy));
-        }
-        let slot = (cache_tag as usize) & (crate::util::INST_CACHE_SIZE - 1);
-        let (sid, p, ke, result) = self.expr_cache.inst_cache[slot];
-        if sid == substs_id && p == params && ke == e {
-            self.trace.inst_aux_cache_hits += 1;
-            return result;
-        }
-
         let n_substs = substs.len() as u16;
 
         // Key optimization: when the shift pushes all vars past the substitution range,
-        // no variable will be substituted. We can return the shift-adjusted result in O(1)
-        // instead of traversing the entire subtree.
-        //
-        // Condition: sh_cut <= offset (unshifted vars can't reach substitution range)
-        //        AND sh_amt + sh_cut >= offset + n_substs (shifted vars are past substitution)
-        // This implies sh_amt >= n_substs (shift never goes negative with shift_down).
-        // When the shift exactly cancels shift_down (sh_amt == n_substs, sh_cut == offset),
-        // no variable gets substituted and the result is just `e` — O(1) with no new allocations.
+        // no variable will be substituted.
         if sh_amt > 0 && shift_down && sh_amt == n_substs as i16 && sh_cut == offset {
             self.trace.inst_aux_shift_skip_clean += 1;
             self.trace.inst_aux_elided += 1;
-            self.expr_cache.inst_cache[slot] = (substs_id, params, e,e);
-            return e;
+            return SPtr::unshifted(e);
         }
-        // More general case: shift pushes vars past substitution range but sh_amt > n_substs
-        // or !shift_down. Creates a Shift wrapper — saves inst_aux traversal at the cost of
-        // potentially increasing downstream TC work from Shift wrappers.
         if sh_amt > 0 && sh_cut <= offset && sh_amt as u16 + sh_cut >= offset + n_substs {
             let r = if shift_down {
                 let new_amt = sh_amt - n_substs as i16;
@@ -376,213 +322,83 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
                 }
             };
             self.trace.inst_aux_elided += 1;
-            self.expr_cache.inst_cache[slot] = (substs_id, params, e,r);
             return r;
         }
 
         // Shift-down-only optimization: when all free bvars are past the substitution
-        // range, no substitution occurs — only shift_down. Use persistently-cached
-        // push_shift_down_cutoff to avoid re-traversing shared subtrees across inst_beta calls.
-        // Only for sh_amt == 0 path; the sh_amt > 0 case has complex shift composition.
-        // Guard: nlbv > offset + n_substs is a necessary condition (free since nlbv already computed).
+        // range, no substitution occurs — only shift_down.
         if shift_down && sh_amt == 0 && n_substs >= 4 && nlbv > offset + n_substs {
-            let lb = self.read_expr(e).get_fvar_lb();
+            let lb = self.fvar_lb(e);
             if lb >= offset + n_substs {
                 let r = self.push_shift_down_cutoff(e, n_substs, offset);
-                self.expr_cache.inst_cache[slot] = (substs_id, params, e,r);
-                return r;
+                return SPtr::unshifted(r);
             }
         }
 
-        // If there's a pending shift, we need to look through Shift nodes on e as well
-        let calcd = if sh_amt > 0 {
-            match self.read_expr(e) {
-                Sort { .. } | Const { .. } | Local { .. } | StringLit { .. } | NatLit { .. } => {
-                    // Closed expression, shift is no-op
-                    return e;
-                }
-                Shift { inner, amount, .. } => {
-                    self.trace.inst_aux_shift_nodes += 1;
-                    // OSNF: Shift always has cutoff=0.
-                    if sh_cut == 0 {
-                        // Compose: Shift(inner, n) with pending (sh_amt, 0) = (sh_amt + n, 0)
-                        let r = self.inst_aux(inner, substs, offset, shift_down, sh_amt + amount as i16, 0);
-                        self.expr_cache.inst_cache[slot] = (substs_id, params, e,r);
-                        return r;
-                    }
-                    // sh_cut > 0: cutoffs don't match. Force via push_shift, then recurse.
-                    if amount as i16 >= sh_cut as i16 {
-                        // All vars >= 0 become >= amount >= sh_cut, compose uniformly
-                        self.trace.inst_aux_shift_compose += 1;
-                        let r = self.inst_aux(inner, substs, offset, shift_down, sh_amt + amount as i16, 0);
-                        self.expr_cache.inst_cache[slot] = (substs_id, params, e,r);
-                        return r;
-                    }
-                    // n < sh_cut: can't compose shifts simply. Use view_expr to see
-                    // through the Shift and process compound children directly.
-                    // This avoids the fixpoint loop where push_shift_up(core, n) → Shift(n, core).
-                    self.trace.inst_aux_shift_mismatch += 1;
-                    let viewed = self.view_expr(e);
-                    let r = match viewed {
-                        Shift { .. } => unreachable!("view_expr never returns Shift"),
-                        Sort { .. } | Const { .. } | Local { .. } | StringLit { .. } | NatLit { .. } => unreachable!("Shift inner is open"),
-                        Var { dbj_idx, .. } => {
-                            let shifted_idx = if dbj_idx >= sh_cut { (dbj_idx as i16 + sh_amt) as u16 } else { dbj_idx };
-                            if shifted_idx < offset { self.mk_var(shifted_idx) }
-                            else {
-                                let rel_idx = shifted_idx - offset;
-                                if rel_idx < n_substs {
-                                    let val = substs[substs.len() - 1 - rel_idx as usize];
-                                    if offset > 0 { self.mk_shift(val, offset) } else { val }
-                                } else if shift_down { self.mk_var(shifted_idx - n_substs) }
-                                else { self.mk_var(shifted_idx) }
-                            }
-                        }
-                        App { fun, arg, .. } => {
-                            let new_fun = self.inst_aux_quick(fun, substs, offset, shift_down, sh_amt, sh_cut);
-                            let new_arg = self.inst_aux_quick(arg, substs, offset, shift_down, sh_amt, sh_cut);
-                            self.mk_app(new_fun, new_arg)
-                        }
-                        Pi { binder_name, binder_style, binder_type, body, .. } => {
-                            let new_type = self.inst_aux_quick(binder_type, substs, offset, shift_down, sh_amt, sh_cut);
-                            let new_body = self.inst_aux_quick(body, substs, offset + 1, shift_down, sh_amt, sh_cut + 1);
-                            self.mk_pi(binder_name, binder_style, new_type, new_body)
-                        }
-                        Lambda { binder_name, binder_style, binder_type, body, .. } => {
-                            let new_type = self.inst_aux_quick(binder_type, substs, offset, shift_down, sh_amt, sh_cut);
-                            let new_body = self.inst_aux_quick(body, substs, offset + 1, shift_down, sh_amt, sh_cut + 1);
-                            self.mk_lambda(binder_name, binder_style, new_type, new_body)
-                        }
-                        Let { binder_name, binder_type, val, body, nondep, .. } => {
-                            let new_type = self.inst_aux_quick(binder_type, substs, offset, shift_down, sh_amt, sh_cut);
-                            let new_val = self.inst_aux_quick(val, substs, offset, shift_down, sh_amt, sh_cut);
-                            let new_body = self.inst_aux_quick(body, substs, offset + 1, shift_down, sh_amt, sh_cut + 1);
-                            self.mk_let(binder_name, new_type, new_val, new_body, nondep)
-                        }
-                        Proj { ty_name, idx, structure, .. } => {
-                            let new_structure = self.inst_aux_quick(structure, substs, offset, shift_down, sh_amt, sh_cut);
-                            self.mk_proj(ty_name, idx, new_structure)
-                        }
-                    };
-                    self.expr_cache.inst_cache[slot] = (substs_id, params, e, r);
-                    return r;
-                }
-                Var { dbj_idx, .. } => {
-                    // Apply pending shift first
-                    let shifted_idx = if dbj_idx >= sh_cut { (dbj_idx as i16 + sh_amt) as u16 } else { dbj_idx };
-                    if shifted_idx < offset {
-                        self.mk_var(shifted_idx)
-                    } else {
-                        let rel_idx = shifted_idx - offset;
-                        if rel_idx < n_substs {
-                            self.trace.inst_aux_shifted_var_subst += 1;
-                            let val = substs[substs.len() - 1 - rel_idx as usize];
-                            if offset > 0 { self.mk_shift(val, offset) } else { val }
-                        } else {
-                            self.trace.inst_aux_shifted_var_nosubst += 1;
-                            if shift_down {
-                                self.mk_var(shifted_idx - n_substs)
-                            } else {
-                                // Return the shifted var directly
-                                if sh_cut == 0 {
-                                    self.mk_shift(e, sh_amt as u16)
-                                } else {
-                                    self.shift_expr(e, sh_amt as u16, sh_cut)
-                                }
-                            }
-                        }
-                    }
-                }
-                App { fun, arg, .. } => {
-                    let new_fun = self.inst_aux_quick(fun, substs, offset, shift_down, sh_amt, sh_cut);
-                    let new_arg = self.inst_aux_quick(arg, substs, offset, shift_down, sh_amt, sh_cut);
-                    if new_fun == fun && new_arg == arg { self.trace.inst_aux_shifted_identity += 1; e } else { self.trace.inst_aux_shifted_alloc += 1; self.mk_app(new_fun, new_arg) }
-                }
-                Pi { binder_name, binder_style, binder_type, body, .. } => {
-                    let new_type = self.inst_aux_quick(binder_type, substs, offset, shift_down, sh_amt, sh_cut);
-                    let new_body = self.inst_aux_quick(body, substs, offset + 1, shift_down, sh_amt, sh_cut + 1);
-                    if new_type == binder_type && new_body == body { self.trace.inst_aux_shifted_identity += 1; e } else { self.trace.inst_aux_shifted_alloc += 1; self.mk_pi(binder_name, binder_style, new_type, new_body) }
-                }
-                Lambda { binder_name, binder_style, binder_type, body, .. } => {
-                    let new_type = self.inst_aux_quick(binder_type, substs, offset, shift_down, sh_amt, sh_cut);
-                    let new_body = self.inst_aux_quick(body, substs, offset + 1, shift_down, sh_amt, sh_cut + 1);
-                    if new_type == binder_type && new_body == body { self.trace.inst_aux_shifted_identity += 1; e } else { self.trace.inst_aux_shifted_alloc += 1; self.mk_lambda(binder_name, binder_style, new_type, new_body) }
-                }
-                Let { binder_name, binder_type, val, body, nondep, .. } => {
-                    let new_type = self.inst_aux_quick(binder_type, substs, offset, shift_down, sh_amt, sh_cut);
-                    let new_val = self.inst_aux_quick(val, substs, offset, shift_down, sh_amt, sh_cut);
-                    let new_body = self.inst_aux_quick(body, substs, offset + 1, shift_down, sh_amt, sh_cut + 1);
-                    if new_type == binder_type && new_val == val && new_body == body { self.trace.inst_aux_shifted_identity += 1; e } else { self.trace.inst_aux_shifted_alloc += 1; self.mk_let(binder_name, new_type, new_val, new_body, nondep) }
-                }
-                Proj { ty_name, idx, structure, .. } => {
-                    let new_structure = self.inst_aux_quick(structure, substs, offset, shift_down, sh_amt, sh_cut);
-                    if new_structure == structure { self.trace.inst_aux_shifted_identity += 1; e } else { self.trace.inst_aux_shifted_alloc += 1; self.mk_proj(ty_name, idx, new_structure) }
-                }
+        // Main dispatch: read the DAG node and process.
+        // Children are SPtr — their shifts compose with the pending (sh_amt, sh_cut).
+        match self.read_expr(e) {
+            Sort { .. } | Const { .. } | Local { .. } | StringLit { .. } | NatLit { .. } => {
+                // Closed expression: if sh_amt > 0, shift is a no-op. Otherwise shouldn't reach here.
+                if sh_amt > 0 { return SPtr::unshifted(e); }
+                panic!("inst_aux_body reached closed expr with sh_amt=0 but nlbv > offset")
             }
-        } else {
-            // No pending shift — original inst_aux logic
-            match self.read_expr(e) {
-                Sort { .. } | Const { .. } | Local { .. } | StringLit { .. } | NatLit { .. } => panic!(),
-                Shift { inner, amount, .. } => {
-                    self.trace.inst_aux_shift_nodes += 1;
-                    // OSNF: Shift always has cutoff=0. Carry as parameters.
-                    let r = self.inst_aux(inner, substs, offset, shift_down, amount as i16, 0);
-                    self.expr_cache.inst_cache[slot] = (substs_id, params, e,r);
-                    return r;
-                }
-                Var { dbj_idx, .. } => {
-                    debug_assert!(dbj_idx >= offset);
-                    let rel_idx = dbj_idx - offset;
+            Var { dbj_idx, .. } => {
+                // Apply pending shift first
+                let shifted_idx = if sh_amt != 0 && dbj_idx >= sh_cut { (dbj_idx as i16 + sh_amt) as u16 } else { dbj_idx };
+                if shifted_idx < offset {
+                    self.mk_var(shifted_idx)
+                } else {
+                    let rel_idx = shifted_idx - offset;
                     if rel_idx < n_substs {
                         let val = substs[substs.len() - 1 - rel_idx as usize];
-                        if offset > 0 {
-                            self.mk_shift(val, offset)
-                        } else {
-                            val
-                        }
+                        // Shift the substitution value up by offset
+                        SPtr::new(val.ptr, val.shift + offset)
                     } else if shift_down {
-                        self.mk_var(dbj_idx - n_substs)
+                        self.mk_var(shifted_idx - n_substs)
                     } else {
-                        e
+                        if sh_amt != 0 {
+                            self.mk_var(shifted_idx)
+                        } else {
+                            SPtr::unshifted(e)
+                        }
                     }
                 }
-                App { fun, arg, .. } => {
-                    let new_fun = self.inst_aux_quick(fun, substs, offset, shift_down, 0, 0);
-                    let new_arg = self.inst_aux_quick(arg, substs, offset, shift_down, 0, 0);
-                    if new_fun == fun && new_arg == arg { self.trace.inst_aux_nonshift_identity += 1; e } else { self.mk_app(new_fun, new_arg) }
-                }
-                Pi { binder_name, binder_style, binder_type, body, .. } => {
-                    let new_type = self.inst_aux_quick(binder_type, substs, offset, shift_down, 0, 0);
-                    let new_body = self.inst_aux_quick(body, substs, offset + 1, shift_down, 0, 0);
-                    if new_type == binder_type && new_body == body { self.trace.inst_aux_nonshift_identity += 1; e } else { self.mk_pi(binder_name, binder_style, new_type, new_body) }
-                }
-                Lambda { binder_name, binder_style, binder_type, body, .. } => {
-                    let new_type = self.inst_aux_quick(binder_type, substs, offset, shift_down, 0, 0);
-                    let new_body = self.inst_aux_quick(body, substs, offset + 1, shift_down, 0, 0);
-                    if new_type == binder_type && new_body == body { self.trace.inst_aux_nonshift_identity += 1; e } else { self.mk_lambda(binder_name, binder_style, new_type, new_body) }
-                }
-                Let { binder_name, binder_type, val, body, nondep, .. } => {
-                    let new_type = self.inst_aux_quick(binder_type, substs, offset, shift_down, 0, 0);
-                    let new_val = self.inst_aux_quick(val, substs, offset, shift_down, 0, 0);
-                    let new_body = self.inst_aux_quick(body, substs, offset + 1, shift_down, 0, 0);
-                    if new_type == binder_type && new_val == val && new_body == body { self.trace.inst_aux_nonshift_identity += 1; e } else { self.mk_let(binder_name, new_type, new_val, new_body, nondep) }
-                }
-                Proj { ty_name, idx, structure, .. } => {
-                    let new_structure = self.inst_aux_quick(structure, substs, offset, shift_down, 0, 0);
-                    if new_structure == structure { self.trace.inst_aux_nonshift_identity += 1; e } else { self.mk_proj(ty_name, idx, new_structure) }
-                }
             }
-        };
-        self.expr_cache.inst_cache[slot] = (substs_id, params, e,calcd);
-        calcd
+            App { fun, arg, .. } => {
+                let new_fun = self.inst_aux_quick_sptr(fun, substs, offset, shift_down, sh_amt, sh_cut);
+                let new_arg = self.inst_aux_quick_sptr(arg, substs, offset, shift_down, sh_amt, sh_cut);
+                self.mk_app(new_fun, new_arg)
+            }
+            Pi { binder_name, binder_style, binder_type, body, .. } => {
+                let new_type = self.inst_aux_quick_sptr(binder_type, substs, offset, shift_down, sh_amt, sh_cut);
+                let new_body = self.inst_aux_quick_sptr(body, substs, offset + 1, shift_down, sh_amt, sh_cut + 1);
+                self.mk_pi(binder_name, binder_style, new_type, new_body)
+            }
+            Lambda { binder_name, binder_style, binder_type, body, .. } => {
+                let new_type = self.inst_aux_quick_sptr(binder_type, substs, offset, shift_down, sh_amt, sh_cut);
+                let new_body = self.inst_aux_quick_sptr(body, substs, offset + 1, shift_down, sh_amt, sh_cut + 1);
+                self.mk_lambda(binder_name, binder_style, new_type, new_body)
+            }
+            Let { binder_name, binder_type, val, body, nondep, .. } => {
+                let new_type = self.inst_aux_quick_sptr(binder_type, substs, offset, shift_down, sh_amt, sh_cut);
+                let new_val = self.inst_aux_quick_sptr(val, substs, offset, shift_down, sh_amt, sh_cut);
+                let new_body = self.inst_aux_quick_sptr(body, substs, offset + 1, shift_down, sh_amt, sh_cut + 1);
+                self.mk_let(binder_name, new_type, new_val, new_body, nondep)
+            }
+            Proj { ty_name, idx, structure, .. } => {
+                let new_structure = self.inst_aux_quick_sptr(structure, substs, offset, shift_down, sh_amt, sh_cut);
+                self.mk_proj(ty_name, idx, new_structure)
+            }
+        }
     }
 
     /// Shift all free variables in `e` (those with index >= cutoff) up by `amount`.
     /// For cutoff=0, creates a lazy Shift node (O(1)).
     /// For cutoff>0, traverses and rebuilds.
-    pub fn shift_expr(&mut self, e: ExprPtr<'t>, amount: u16, cutoff: u16) -> ExprPtr<'t> {
+    pub fn shift_expr(&mut self, e: ExprPtr<'t>, amount: u16, cutoff: u16) -> SPtr<'t> {
         if amount == 0 || self.num_loose_bvars(e) <= cutoff {
-            return e
+            return SPtr::unshifted(e)
         }
         if cutoff == 0 {
             return self.mk_shift(e, amount);
@@ -590,56 +406,72 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         self.shift_expr_aux(e, amount, cutoff)
     }
 
-    fn shift_expr_aux(&mut self, e: ExprPtr<'t>, amount: u16, cutoff: u16) -> ExprPtr<'t> {
+    fn shift_expr_aux(&mut self, e: ExprPtr<'t>, amount: u16, cutoff: u16) -> SPtr<'t> {
         if self.num_loose_bvars(e) <= cutoff {
-            return e
+            return SPtr::unshifted(e)
         }
         // If all free bvars are already >= cutoff, the cutoff is irrelevant —
         // this is a uniform shift, so use O(1) mk_shift instead of traversing.
-        if self.read_expr(e).get_fvar_lb() >= cutoff {
+        if self.fvar_lb(e) >= cutoff {
             return self.mk_shift(e, amount);
         }
         if let Some(&cached) = self.expr_cache.shift_cache.get(&(e, amount, cutoff)) {
-            return cached;
+            // TODO: shift_cache stores ExprPtr, needs SPtr
+            return SPtr::unshifted(cached);
         }
-        let calcd = match self.view_expr(e) {
+        let calcd = match self.read_expr(e) {
             Sort { .. } | Const { .. } | Local { .. } | StringLit { .. } | NatLit { .. } => panic!(),
-            Shift { .. } => unreachable!("view_expr never returns Shift"),
             Var { dbj_idx, .. } => {
                 if dbj_idx >= cutoff {
                     self.mk_var(dbj_idx + amount)
                 } else {
-                    e
+                    SPtr::unshifted(e)
                 }
             }
             App { fun, arg, .. } => {
-                let fun = self.shift_expr_aux(fun, amount, cutoff);
-                let arg = self.shift_expr_aux(arg, amount, cutoff);
-                self.mk_app(fun, arg)
+                let new_fun = self.shift_expr_aux_sptr(fun, amount, cutoff);
+                let new_arg = self.shift_expr_aux_sptr(arg, amount, cutoff);
+                self.mk_app(new_fun, new_arg)
             }
             Pi { binder_name, binder_style, binder_type, body, .. } => {
-                let binder_type = self.shift_expr_aux(binder_type, amount, cutoff);
-                let body = self.shift_expr_aux(body, amount, cutoff + 1);
-                self.mk_pi(binder_name, binder_style, binder_type, body)
+                let new_type = self.shift_expr_aux_sptr(binder_type, amount, cutoff);
+                let new_body = self.shift_expr_aux_sptr(body, amount, cutoff + 1);
+                self.mk_pi(binder_name, binder_style, new_type, new_body)
             }
             Lambda { binder_name, binder_style, binder_type, body, .. } => {
-                let binder_type = self.shift_expr_aux(binder_type, amount, cutoff);
-                let body = self.shift_expr_aux(body, amount, cutoff + 1);
-                self.mk_lambda(binder_name, binder_style, binder_type, body)
+                let new_type = self.shift_expr_aux_sptr(binder_type, amount, cutoff);
+                let new_body = self.shift_expr_aux_sptr(body, amount, cutoff + 1);
+                self.mk_lambda(binder_name, binder_style, new_type, new_body)
             }
             Let { binder_name, binder_type, val, body, nondep, .. } => {
-                let binder_type = self.shift_expr_aux(binder_type, amount, cutoff);
-                let val = self.shift_expr_aux(val, amount, cutoff);
-                let body = self.shift_expr_aux(body, amount, cutoff + 1);
-                self.mk_let(binder_name, binder_type, val, body, nondep)
+                let new_type = self.shift_expr_aux_sptr(binder_type, amount, cutoff);
+                let new_val = self.shift_expr_aux_sptr(val, amount, cutoff);
+                let new_body = self.shift_expr_aux_sptr(body, amount, cutoff + 1);
+                self.mk_let(binder_name, new_type, new_val, new_body, nondep)
             }
             Proj { ty_name, idx, structure, .. } => {
-                let structure = self.shift_expr_aux(structure, amount, cutoff);
-                self.mk_proj(ty_name, idx, structure)
+                let new_structure = self.shift_expr_aux_sptr(structure, amount, cutoff);
+                self.mk_proj(ty_name, idx, new_structure)
             }
         };
-        self.expr_cache.shift_cache.insert((e, amount, cutoff), calcd);
+        // TODO: shift_cache stores ExprPtr, needs SPtr - storing ptr only for now
+        self.expr_cache.shift_cache.insert((e, amount, cutoff), calcd.ptr);
         calcd
+    }
+
+    /// Helper: shift an SPtr child. The child's own shift composes with the operation.
+    /// Returns an SPtr (as the mk_* functions now expect SPtr children).
+    fn shift_expr_aux_sptr(&mut self, child: SPtr<'t>, amount: u16, cutoff: u16) -> SPtr<'t> {
+        // If the child has a shift, vars in child.ptr at index >= 0 become >= child.shift.
+        // If child.shift >= cutoff, the cutoff is irrelevant for child.ptr's vars —
+        // just add amount to the child's shift.
+        if child.shift >= cutoff {
+            return SPtr::new(child.ptr, child.shift + amount);
+        }
+        // Otherwise, we need to traverse child.ptr with adjusted cutoff.
+        let new_cutoff = cutoff - child.shift;
+        let result = self.shift_expr_aux(child.ptr, amount, new_cutoff);
+        SPtr::new(result.ptr, result.shift + child.shift)
     }
 
     /// From `e[x_1..x_n/v_1..v_n]`, abstract and re-inst, creating `e[y_1..y_n/v_1..v_n]`.
@@ -648,204 +480,223 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         e: ExprPtr<'t>,
         ingoing: &[ExprPtr<'t>],
         outgoing: &[ExprPtr<'t>],
-    ) -> ExprPtr<'t> {
+    ) -> SPtr<'t> {
         let e = self.abstr(e, outgoing);
-        self.inst(e, ingoing)
+        let ingoing_sptrs: AppArgs<'t> = ingoing.iter().map(|&p| SPtr::unshifted(p)).collect();
+        self.inst(e, &ingoing_sptrs)
     }
 
-    fn abstr_aux(&mut self, e: ExprPtr<'t>, locals: &[ExprPtr<'t>], offset: u16) -> ExprPtr<'t> {
+    // TODO: abstr_cache in util.rs needs to store SPtr instead of ExprPtr
+    fn abstr_aux(&mut self, e: ExprPtr<'t>, locals: &[ExprPtr<'t>], offset: u16) -> SPtr<'t> {
         stacker::maybe_grow(64 * 1024, 2 * 1024 * 1024, || self.abstr_aux_body(e, locals, offset))
     }
 
-    fn abstr_aux_body(&mut self, e: ExprPtr<'t>, locals: &[ExprPtr<'t>], offset: u16) -> ExprPtr<'t> {
+    fn abstr_aux_body(&mut self, e: ExprPtr<'t>, locals: &[ExprPtr<'t>], offset: u16) -> SPtr<'t> {
         if !self.has_fvars(e) {
-            e
+            SPtr::unshifted(e)
         } else if let Some(cached) = self.expr_cache.abstr_cache.get(&(e, offset)) {
-            *cached
+            // TODO: cache stores ExprPtr, needs SPtr
+            SPtr::unshifted(*cached)
         } else {
-            // Use view_expr to see through Shift nodes transparently.
-            // This avoids an infinite loop where push_shift_up(core, n) can produce
-            // Shift(n, core) — a fixpoint — causing unbounded recursion.
-            let calcd = match self.view_expr(e) {
+            // Children are SPtr. Locals never appear under shift (nlbv=0).
+            let calcd = match self.read_expr(e) {
                 Local { .. } => {
-                    // Under OSNF, Locals never appear under Shift (nlbv=0),
-                    // so `e` is the Local pointer itself.
-                    locals.iter().rev().position(|x| *x == e).map(|pos| self.mk_var(u16::try_from(pos).unwrap() + offset)).unwrap_or(e)
+                    locals.iter().rev().position(|x| *x == e)
+                        .map(|pos| self.mk_var(u16::try_from(pos).unwrap() + offset))
+                        .unwrap_or(SPtr::unshifted(e))
                 }
                 App { fun, arg, .. } => {
-                    let fun = self.abstr_aux(fun, locals, offset);
-                    let arg = self.abstr_aux(arg, locals, offset);
-                    self.mk_app(fun, arg)
+                    let new_fun = self.abstr_aux_sptr(fun, locals, offset);
+                    let new_arg = self.abstr_aux_sptr(arg, locals, offset);
+                    self.mk_app(new_fun, new_arg)
                 }
                 Pi { binder_name, binder_style, binder_type, body, .. } => {
-                    let binder_type = self.abstr_aux(binder_type, locals, offset);
-                    let body = self.abstr_aux(body, locals, offset + 1);
-                    self.mk_pi(binder_name, binder_style, binder_type, body)
+                    let new_type = self.abstr_aux_sptr(binder_type, locals, offset);
+                    let new_body = self.abstr_aux_sptr(body, locals, offset + 1);
+                    self.mk_pi(binder_name, binder_style, new_type, new_body)
                 }
                 Lambda { binder_name, binder_style, binder_type, body, .. } => {
-                    let binder_type = self.abstr_aux(binder_type, locals, offset);
-                    let body = self.abstr_aux(body, locals, offset + 1);
-                    self.mk_lambda(binder_name, binder_style, binder_type, body)
+                    let new_type = self.abstr_aux_sptr(binder_type, locals, offset);
+                    let new_body = self.abstr_aux_sptr(body, locals, offset + 1);
+                    self.mk_lambda(binder_name, binder_style, new_type, new_body)
                 }
                 Let { binder_name, binder_type, val, body, nondep, .. } => {
-                    let binder_type = self.abstr_aux(binder_type, locals, offset);
-                    let val = self.abstr_aux(val, locals, offset);
-                    let body = self.abstr_aux(body, locals, offset + 1);
-                    self.mk_let(binder_name, binder_type, val, body, nondep)
+                    let new_type = self.abstr_aux_sptr(binder_type, locals, offset);
+                    let new_val = self.abstr_aux_sptr(val, locals, offset);
+                    let new_body = self.abstr_aux_sptr(body, locals, offset + 1);
+                    self.mk_let(binder_name, new_type, new_val, new_body, nondep)
                 }
                 StringLit { .. } | NatLit { .. } => panic!(),
                 Proj { ty_name, idx, structure, .. } => {
-                    let structure = self.abstr_aux(structure, locals, offset);
-                    self.mk_proj(ty_name, idx, structure)
+                    let new_structure = self.abstr_aux_sptr(structure, locals, offset);
+                    self.mk_proj(ty_name, idx, new_structure)
                 }
-                Shift { .. } => unreachable!("view_expr never returns Shift"),
                 Var { .. } | Sort { .. } | Const { .. } => panic!("should flag as no locals"),
             };
 
-            self.expr_cache.abstr_cache.insert((e, offset), calcd);
+            // TODO: cache stores ExprPtr, needs SPtr - storing ptr only for now
+            self.expr_cache.abstr_cache.insert((e, offset), calcd.ptr);
             calcd
         }
     }
 
+    /// Helper for abstr_aux: process an SPtr child.
+    /// Locals have nlbv=0 so they can't appear under a shift.
+    /// We recurse on child.ptr and re-wrap with child.shift.
+    fn abstr_aux_sptr(&mut self, child: SPtr<'t>, locals: &[ExprPtr<'t>], offset: u16) -> SPtr<'t> {
+        let result = self.abstr_aux(child.ptr, locals, offset);
+        SPtr::new(result.ptr, result.shift + child.shift)
+    }
+
     /// Abstraction of unique identifiers; replaces free variables with the appropriate
     /// bound variable, if the free variable is in `locals`.
-    pub fn abstr(&mut self, e: ExprPtr<'t>, locals: &[ExprPtr<'t>]) -> ExprPtr<'t> {
+    pub fn abstr(&mut self, e: ExprPtr<'t>, locals: &[ExprPtr<'t>]) -> SPtr<'t> {
         self.expr_cache.abstr_cache.clear();
         self.abstr_aux(e, locals, 0u16)
     }
 
     /// Abstraction by deBruijn level: converts DbjLevel locals back to Var.
     /// Used by nanoda's locally-nameless TC.
-    fn abstr_aux_levels(&mut self, e: ExprPtr<'t>, start_pos: u16, num_open_binders: u16) -> ExprPtr<'t> {
+    // TODO: abstr_cache_levels in util.rs needs to store SPtr instead of ExprPtr
+    fn abstr_aux_levels(&mut self, e: ExprPtr<'t>, start_pos: u16, num_open_binders: u16) -> SPtr<'t> {
         stacker::maybe_grow(64 * 1024, 2 * 1024 * 1024, || self.abstr_aux_levels_body(e, start_pos, num_open_binders))
     }
 
-    fn abstr_aux_levels_body(&mut self, e: ExprPtr<'t>, start_pos: u16, num_open_binders: u16) -> ExprPtr<'t> {
+    fn abstr_aux_levels_body(&mut self, e: ExprPtr<'t>, start_pos: u16, num_open_binders: u16) -> SPtr<'t> {
         if !self.has_fvars(e) {
-            e
+            SPtr::unshifted(e)
         } else if let Some(cached) = self.expr_cache.abstr_cache_levels.get(&(e, start_pos, num_open_binders)) {
-            *cached
+            // TODO: cache stores ExprPtr, needs SPtr
+            SPtr::unshifted(*cached)
         } else {
-            // Use view_expr to see through Shift nodes transparently (same fix as abstr_aux_body).
-            let calcd = match self.view_expr(e) {
+            // Children are SPtr. Locals have nlbv=0 so never under shift.
+            let calcd = match self.read_expr(e) {
                 Local { id: FVarId::DbjLevel(serial), .. } =>
                     if serial < start_pos {
-                        e
+                        SPtr::unshifted(e)
                     } else {
                         self.fvar_to_bvar(num_open_binders, serial)
                     },
-                Local { id: FVarId::Unique(..), .. } => e,
+                Local { id: FVarId::Unique(..), .. } => SPtr::unshifted(e),
                 App { fun, arg, .. } => {
-                    let fun = self.abstr_aux_levels(fun, start_pos, num_open_binders);
-                    let arg = self.abstr_aux_levels(arg, start_pos, num_open_binders);
-                    self.mk_app(fun, arg)
+                    let new_fun = self.abstr_aux_levels_sptr(fun, start_pos, num_open_binders);
+                    let new_arg = self.abstr_aux_levels_sptr(arg, start_pos, num_open_binders);
+                    self.mk_app(new_fun, new_arg)
                 }
                 Pi { binder_name, binder_style, binder_type, body, .. } => {
-                    let binder_type = self.abstr_aux_levels(binder_type, start_pos, num_open_binders);
-                    let body = self.abstr_aux_levels(body, start_pos, num_open_binders + 1);
-                    self.mk_pi(binder_name, binder_style, binder_type, body)
+                    let new_type = self.abstr_aux_levels_sptr(binder_type, start_pos, num_open_binders);
+                    let new_body = self.abstr_aux_levels_sptr(body, start_pos, num_open_binders + 1);
+                    self.mk_pi(binder_name, binder_style, new_type, new_body)
                 }
                 Lambda { binder_name, binder_style, binder_type, body, .. } => {
-                    let binder_type = self.abstr_aux_levels(binder_type, start_pos, num_open_binders);
-                    let body = self.abstr_aux_levels(body, start_pos, num_open_binders + 1);
-                    self.mk_lambda(binder_name, binder_style, binder_type, body)
+                    let new_type = self.abstr_aux_levels_sptr(binder_type, start_pos, num_open_binders);
+                    let new_body = self.abstr_aux_levels_sptr(body, start_pos, num_open_binders + 1);
+                    self.mk_lambda(binder_name, binder_style, new_type, new_body)
                 }
                 Let { binder_name, binder_type, val, body, nondep, .. } => {
-                    let binder_type = self.abstr_aux_levels(binder_type, start_pos, num_open_binders);
-                    let val = self.abstr_aux_levels(val, start_pos, num_open_binders);
-                    let body = self.abstr_aux_levels(body, start_pos, num_open_binders + 1);
-                    self.mk_let(binder_name, binder_type, val, body, nondep)
+                    let new_type = self.abstr_aux_levels_sptr(binder_type, start_pos, num_open_binders);
+                    let new_val = self.abstr_aux_levels_sptr(val, start_pos, num_open_binders);
+                    let new_body = self.abstr_aux_levels_sptr(body, start_pos, num_open_binders + 1);
+                    self.mk_let(binder_name, new_type, new_val, new_body, nondep)
                 }
                 StringLit { .. } | NatLit { .. } => panic!(),
                 Proj { ty_name, idx, structure, .. } => {
-                    let structure = self.abstr_aux_levels(structure, start_pos, num_open_binders);
-                    self.mk_proj(ty_name, idx, structure)
+                    let new_structure = self.abstr_aux_levels_sptr(structure, start_pos, num_open_binders);
+                    self.mk_proj(ty_name, idx, new_structure)
                 }
-                Shift { .. } => unreachable!("view_expr never returns Shift"),
                 Var { .. } | Sort { .. } | Const { .. } => panic!("should flag as no locals"),
             };
-            self.expr_cache.abstr_cache_levels.insert((e, start_pos, num_open_binders), calcd);
+            // TODO: cache stores ExprPtr, needs SPtr - storing ptr only for now
+            self.expr_cache.abstr_cache_levels.insert((e, start_pos, num_open_binders), calcd.ptr);
             calcd
         }
     }
 
+    /// Helper for abstr_aux_levels: process an SPtr child.
+    fn abstr_aux_levels_sptr(&mut self, child: SPtr<'t>, start_pos: u16, num_open_binders: u16) -> SPtr<'t> {
+        let result = self.abstr_aux_levels(child.ptr, start_pos, num_open_binders);
+        SPtr::new(result.ptr, result.shift + child.shift)
+    }
+
     /// Abstract deBruijn-level free variables back to bound variables.
     /// Used by nanoda's locally-nameless TC.
-    pub fn abstr_levels(&mut self, e: ExprPtr<'t>, start_pos: u16) -> ExprPtr<'t> {
+    pub fn abstr_levels(&mut self, e: ExprPtr<'t>, start_pos: u16) -> SPtr<'t> {
         self.expr_cache.abstr_cache_levels.clear();
         self.abstr_aux_levels(e, start_pos, self.dbj_level_counter)
     }
 
-    fn subst_aux(&mut self, e: ExprPtr<'t>, ks: LevelsPtr<'t>, vs: LevelsPtr<'t>) -> ExprPtr<'t> {
+    // TODO: subst_cache and dsubst_cache in util.rs need to store SPtr instead of ExprPtr
+    fn subst_aux(&mut self, e: ExprPtr<'t>, ks: LevelsPtr<'t>, vs: LevelsPtr<'t>) -> SPtr<'t> {
         stacker::maybe_grow(64 * 1024, 2 * 1024 * 1024, || self.subst_aux_body(e, ks, vs))
     }
 
-    fn subst_aux_body(&mut self, e: ExprPtr<'t>, ks: LevelsPtr<'t>, vs: LevelsPtr<'t>) -> ExprPtr<'t> {
+    fn subst_aux_body(&mut self, e: ExprPtr<'t>, ks: LevelsPtr<'t>, vs: LevelsPtr<'t>) -> SPtr<'t> {
         if let Some(cached) = self.expr_cache.subst_cache.get(&(e, ks, vs)) {
-            *cached
-        } else {
-            // Handle Shift directly: level substitution commutes with variable shifting
-            // because they operate on independent parts (levels vs. bvar indices).
-            // subst(Shift(e, k, c)) = Shift(subst(e), k, c)
-            // This avoids expanding Shift via view_expr which creates new pointers
-            // that miss the subst_cache, causing quadratic re-traversal.
-            let r = match self.read_expr(e) {
-                Shift { inner, amount, .. } => {
-                    let inner_subst = self.subst_aux(inner, ks, vs);
-                    if inner_subst == inner { e } else { self.mk_shift(inner_subst, amount) }
-                }
-                _ => match self.view_expr(e) {
-                    Var { .. } | NatLit { .. } | StringLit { .. } => e,
-                    Sort { level, .. } => {
-                        let new_level = self.subst_level(level, ks, vs);
-                        if new_level == level { e } else { self.mk_sort(new_level) }
-                    }
-                    Const { name, levels, .. } => {
-                        let new_levels = self.subst_levels(levels, ks, vs);
-                        if new_levels == levels { e } else { self.mk_const(name, new_levels) }
-                    }
-                    App { fun, arg, .. } => {
-                        let new_fun = self.subst_aux(fun, ks, vs);
-                        let new_arg = self.subst_aux(arg, ks, vs);
-                        if new_fun == fun && new_arg == arg { e } else { self.mk_app(new_fun, new_arg) }
-                    }
-                    Pi { binder_name, binder_style, binder_type, body, .. } => {
-                        let new_type = self.subst_aux(binder_type, ks, vs);
-                        let new_body = self.subst_aux(body, ks, vs);
-                        if new_type == binder_type && new_body == body { e } else { self.mk_pi(binder_name, binder_style, new_type, new_body) }
-                    }
-                    Lambda { binder_name, binder_style, binder_type, body, .. } => {
-                        let new_type = self.subst_aux(binder_type, ks, vs);
-                        let new_body = self.subst_aux(body, ks, vs);
-                        if new_type == binder_type && new_body == body { e } else { self.mk_lambda(binder_name, binder_style, new_type, new_body) }
-                    }
-                    Let { binder_name, binder_type, val, body, nondep, .. } => {
-                        let new_type = self.subst_aux(binder_type, ks, vs);
-                        let new_val = self.subst_aux(val, ks, vs);
-                        let new_body = self.subst_aux(body, ks, vs);
-                        if new_type == binder_type && new_val == val && new_body == body { e } else { self.mk_let(binder_name, new_type, new_val, new_body, nondep) }
-                    }
-                    Local { .. } => panic!("level substitution should not find locals"),
-                    Shift { .. } => unreachable!("view_expr never returns Shift"),
-                    Proj { ty_name, idx, structure, .. } => {
-                        let new_structure = self.subst_aux(structure, ks, vs);
-                        if new_structure == structure { e } else { self.mk_proj(ty_name, idx, new_structure) }
-                    }
-                }
-            };
-            self.expr_cache.subst_cache.insert((e, ks, vs), r);
-            r
+            // TODO: cache stores ExprPtr, needs SPtr
+            return SPtr::unshifted(*cached);
         }
+        // Level substitution commutes with variable shifting (they operate on
+        // independent parts: levels vs. bvar indices). For SPtr children,
+        // we recurse on child.ptr and preserve child.shift.
+        let r = match self.read_expr(e) {
+            Var { .. } | NatLit { .. } | StringLit { .. } => SPtr::unshifted(e),
+            Sort { level, .. } => {
+                let new_level = self.subst_level(level, ks, vs);
+                if new_level == level { SPtr::unshifted(e) } else { self.mk_sort(new_level) }
+            }
+            Const { name, levels, .. } => {
+                let new_levels = self.subst_levels(levels, ks, vs);
+                if new_levels == levels { SPtr::unshifted(e) } else { self.mk_const(name, new_levels) }
+            }
+            App { fun, arg, .. } => {
+                let new_fun = self.subst_aux_sptr(fun, ks, vs);
+                let new_arg = self.subst_aux_sptr(arg, ks, vs);
+                if new_fun == fun && new_arg == arg { SPtr::unshifted(e) } else { self.mk_app(new_fun, new_arg) }
+            }
+            Pi { binder_name, binder_style, binder_type, body, .. } => {
+                let new_type = self.subst_aux_sptr(binder_type, ks, vs);
+                let new_body = self.subst_aux_sptr(body, ks, vs);
+                if new_type == binder_type && new_body == body { SPtr::unshifted(e) } else { self.mk_pi(binder_name, binder_style, new_type, new_body) }
+            }
+            Lambda { binder_name, binder_style, binder_type, body, .. } => {
+                let new_type = self.subst_aux_sptr(binder_type, ks, vs);
+                let new_body = self.subst_aux_sptr(body, ks, vs);
+                if new_type == binder_type && new_body == body { SPtr::unshifted(e) } else { self.mk_lambda(binder_name, binder_style, new_type, new_body) }
+            }
+            Let { binder_name, binder_type, val, body, nondep, .. } => {
+                let new_type = self.subst_aux_sptr(binder_type, ks, vs);
+                let new_val = self.subst_aux_sptr(val, ks, vs);
+                let new_body = self.subst_aux_sptr(body, ks, vs);
+                if new_type == binder_type && new_val == val && new_body == body { SPtr::unshifted(e) } else { self.mk_let(binder_name, new_type, new_val, new_body, nondep) }
+            }
+            Local { .. } => panic!("level substitution should not find locals"),
+            Proj { ty_name, idx, structure, .. } => {
+                let new_structure = self.subst_aux_sptr(structure, ks, vs);
+                if new_structure == structure { SPtr::unshifted(e) } else { self.mk_proj(ty_name, idx, new_structure) }
+            }
+        };
+        // TODO: cache stores ExprPtr, needs SPtr - storing ptr only for now
+        self.expr_cache.subst_cache.insert((e, ks, vs), r.ptr);
+        r
     }
 
-    pub fn subst_expr_levels(&mut self, e: ExprPtr<'t>, ks: LevelsPtr<'t>, vs: LevelsPtr<'t>) -> ExprPtr<'t> {
+    /// Helper for subst_aux: level substitution commutes with shifting,
+    /// so recurse on child.ptr and preserve child.shift.
+    fn subst_aux_sptr(&mut self, child: SPtr<'t>, ks: LevelsPtr<'t>, vs: LevelsPtr<'t>) -> SPtr<'t> {
+        let result = self.subst_aux(child.ptr, ks, vs);
+        SPtr::new(result.ptr, result.shift + child.shift)
+    }
+
+    pub fn subst_expr_levels(&mut self, e: ExprPtr<'t>, ks: LevelsPtr<'t>, vs: LevelsPtr<'t>) -> SPtr<'t> {
         if let Some(cached) = self.expr_cache.dsubst_cache.get(&(e, ks, vs)).copied() {
-            return cached
+            // TODO: dsubst_cache stores ExprPtr, needs SPtr
+            return SPtr::unshifted(cached)
         }
         self.expr_cache.subst_cache.clear();
         assert_eq!(self.read_levels(ks).len(), self.read_levels(vs).len());
         let out = self.subst_aux(e, ks, vs);
-        self.expr_cache.dsubst_cache.insert((e, ks, vs), out);
+        // TODO: dsubst_cache stores ExprPtr, needs SPtr
+        self.expr_cache.dsubst_cache.insert((e, ks, vs), out.ptr);
         out
     }
 
@@ -853,79 +704,56 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         &mut self,
         info: crate::env::DeclarInfo<'t>,
         in_vals: LevelsPtr<'t>,
-    ) -> ExprPtr<'t> {
+    ) -> SPtr<'t> {
         self.subst_expr_levels(info.ty, info.uparams, in_vals)
     }
 
     pub fn num_args(&self, e: ExprPtr<'t>) -> usize {
         let (mut cursor, mut num_args) = (e, 0);
         while let App { fun, .. } = self.read_expr(cursor) {
-            cursor = fun;
+            cursor = fun.ptr;
             num_args += 1;
         }
         num_args
     }
 
-    /// From `f a_0 .. a_N`, return `f`
-    /// The returned head has any top-level Shift pushed one level inside.
-    pub fn unfold_apps_fun(&mut self, mut e: ExprPtr<'t>) -> ExprPtr<'t> {
-        let mut pending_shift: u16 = 0;
+    /// From `f a_0 .. a_N`, return `f` as SPtr.
+    pub fn unfold_apps_fun(&self, mut e: SPtr<'t>) -> SPtr<'t> {
         loop {
-            match self.read_expr(e) {
-                Shift { inner, amount, .. } => {
-                    pending_shift += amount;
-                    e = inner;
+            match self.read_expr(e.ptr) {
+                App { fun, .. } => {
+                    e = SPtr::new(fun.ptr, fun.shift + e.shift);
                 }
-                App { fun, .. } => e = fun,
-                _ => {
-                    return if pending_shift != 0 { self.mk_shift(e, pending_shift) } else { e };
-                }
+                _ => break,
             }
         }
+        e
     }
 
-    /// From `f a_0 .. a_N`, return `(f, [a_0, ..a_N], shifted)`
-    /// Accumulates Shift through the App spine; returns lazy (Shift-wrapped) args and fun.
-    /// `shifted` is true if any Shift nodes were encountered (args/fun may differ from original).
-    pub fn unfold_apps(&mut self, mut e: ExprPtr<'t>) -> (ExprPtr<'t>, AppArgs<'t>, bool) {
+    /// From `f a_0 .. a_N`, return `(f, [a_0, ..a_N])`.
+    /// Composes shifts through the App spine via SPtr arithmetic.
+    pub fn unfold_apps(&self, mut e: SPtr<'t>) -> (SPtr<'t>, AppArgs<'t>) {
         let mut args = AppArgs::new();
-        let mut pending_shift: u16 = 0;
-        let mut shifted = false;
         loop {
-            match self.read_expr(e) {
-                Shift { inner, amount, .. } => {
-                    pending_shift += amount;
-                    shifted = true;
-                    e = inner;
-                }
+            match self.read_expr(e.ptr) {
                 App { fun, arg, .. } => {
-                    e = fun;
-                    let arg = if pending_shift != 0 {
-                        self.mk_shift(arg, pending_shift)
-                    } else {
-                        arg
-                    };
-                    args.push(arg);
-                },
-                _ => {
-                    if pending_shift != 0 {
-                        e = self.mk_shift(e, pending_shift);
-                    }
-                    break;
+                    args.push(SPtr::new(arg.ptr, arg.shift + e.shift));
+                    e = SPtr::new(fun.ptr, fun.shift + e.shift);
                 }
+                _ => break,
             }
         }
         args.reverse();
-        (e, args, shifted)
+        (e, args)
     }
 
-    /// If this is a const application, return (Const {..}, name, levels, args)
+    /// If this is a const application, return (head_sptr, name, levels, args)
     pub fn unfold_const_apps(
-        &mut self,
-        e: ExprPtr<'t>,
-    ) -> Option<(ExprPtr<'t>, NamePtr<'t>, LevelsPtr<'t>, AppArgs<'t>)> {
-        let (f, args, _) = self.unfold_apps(e);
-        match self.read_expr(f) {
+        &self,
+        e: SPtr<'t>,
+    ) -> Option<(SPtr<'t>, NamePtr<'t>, LevelsPtr<'t>, AppArgs<'t>)> {
+        let (f, args) = self.unfold_apps(e);
+        match self.read_expr(f.ptr) {
             Const { name, levels, .. } => Some((f, name, levels, args)),
             _ => None,
         }
@@ -938,76 +766,85 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         }
     }
 
-    pub(crate) fn unfold_apps_stack(&mut self, mut e: ExprPtr<'t>) -> (ExprPtr<'t>, AppArgs<'t>) {
+    /// Like unfold_apps but returns args in reverse order (stack order).
+    pub(crate) fn unfold_apps_stack(&self, mut e: SPtr<'t>) -> (SPtr<'t>, AppArgs<'t>) {
         let mut args = AppArgs::new();
-        let mut pending_shift: u16 = 0;
         loop {
-            match self.read_expr(e) {
-                Shift { inner, amount, .. } => {
-                    pending_shift += amount;
-                    e = inner;
-                }
+            match self.read_expr(e.ptr) {
                 App { fun, arg, .. } => {
-                    let arg = if pending_shift != 0 { self.mk_shift(arg, pending_shift) } else { arg };
-                    args.push(arg);
-                    e = fun;
+                    args.push(SPtr::new(arg.ptr, arg.shift + e.shift));
+                    e = SPtr::new(fun.ptr, fun.shift + e.shift);
                 }
-                _ => {
-                    if pending_shift != 0 { e = self.mk_shift(e, pending_shift); }
-                    break
-                }
+                _ => break,
             }
         }
         (e, args)
     }
 
-    pub fn foldl_apps(&mut self, mut fun: ExprPtr<'t>, args: impl Iterator<Item = ExprPtr<'t>>) -> ExprPtr<'t> {
+    pub fn foldl_apps(&mut self, mut fun: SPtr<'t>, args: impl Iterator<Item = SPtr<'t>>) -> SPtr<'t> {
         for arg in args {
             fun = self.mk_app(fun, arg);
         }
         fun
     }
 
-    pub(crate) fn abstr_pis<I>(&mut self, mut binders: I, mut body: ExprPtr<'t>) -> ExprPtr<'t>
+    pub(crate) fn abstr_pis<I>(&mut self, mut binders: I, body: ExprPtr<'t>) -> SPtr<'t>
     where
         I: Iterator<Item = ExprPtr<'t>> + DoubleEndedIterator, {
+        // TODO: abstr_pi returns SPtr, but we chain multiple calls.
+        // For now, we need a way to pass SPtr body to abstr_pi.
+        // Since abstr_pi takes ExprPtr body, we have a mismatch.
+        // This needs a deeper refactor.
+        let mut result = SPtr::unshifted(body);
         while let Some(local) = binders.next_back() {
-            body = self.abstr_pi(local, body)
+            // abstr_pi needs ExprPtr body, but result is SPtr
+            // For now, this only works if result.shift == 0
+            debug_assert!(result.shift == 0, "abstr_pis: intermediate result has shift>0, needs deeper refactor");
+            result = self.abstr_pi(local, result.ptr)
         }
-        body
+        result
     }
 
-    pub(crate) fn abstr_pi(&mut self, binder: ExprPtr<'t>, body: ExprPtr<'t>) -> ExprPtr<'t> {
+    pub(crate) fn abstr_pi(&mut self, binder: ExprPtr<'t>, body: ExprPtr<'t>) -> SPtr<'t> {
         match self.read_expr(binder) {
             Local { binder_name, binder_style, binder_type, .. } => {
                 let body = self.abstr(body, &[binder]);
-                self.mk_pi(binder_name, binder_style, binder_type, body)
+                self.mk_pi(binder_name, binder_style, SPtr::unshifted(binder_type), body)
             }
             _ => unreachable!("Cannot apply pi with non-local domain type"),
         }
     }
 
-    pub(crate) fn apply_lambda(&mut self, binder: ExprPtr<'t>, body: ExprPtr<'t>) -> ExprPtr<'t> {
+    pub(crate) fn apply_lambda(&mut self, binder: ExprPtr<'t>, body: ExprPtr<'t>) -> SPtr<'t> {
         match self.read_expr(binder) {
             Local { binder_name, binder_style, binder_type, .. } => {
                 let body = self.abstr(body, &[binder]);
-                self.mk_lambda(binder_name, binder_style, binder_type, body)
+                self.mk_lambda(binder_name, binder_style, SPtr::unshifted(binder_type), body)
             }
             _ => unreachable!("Cannot apply lambda with non-local domain type"),
         }
     }
     
-    pub(crate) fn is_nat_zero(&mut self, e: ExprPtr<'t>) -> bool {
-        match self.view_expr(e) {
-            Const { .. } => self.c_nat_zero() == Some(e),
+    pub(crate) fn is_nat_zero(&mut self, e: SPtr<'t>) -> bool {
+        // NatLit and Const are closed (nlbv=0), so shift is irrelevant
+        match self.read_expr(e.ptr) {
+            Const { .. } => self.c_nat_zero().map(|z| z == e.ptr).unwrap_or(false),
             NatLit { ptr, .. } => self.read_bignum(ptr).map(|n| n.is_zero()).unwrap_or(false),
             _ => false,
         }
     }
 
-    pub(crate) fn pred_of_nat_succ(&mut self, e: ExprPtr<'t>) -> Option<ExprPtr<'t>> {
-        match self.view_expr(e) {
-            App { fun, arg, .. } if self.c_nat_succ() == Some(fun) => Some(arg),
+    pub(crate) fn pred_of_nat_succ(&mut self, e: SPtr<'t>) -> Option<SPtr<'t>> {
+        match self.read_expr(e.ptr) {
+            App { fun, arg, .. } => {
+                // fun is SPtr; Nat.succ is a Const (closed), so fun.shift doesn't matter
+                let succ = self.c_nat_succ()?;
+                if fun.ptr == succ {
+                    Some(SPtr::new(arg.ptr, arg.shift + e.shift))
+                } else {
+                    None
+                }
+            }
             NatLit { ptr, .. } => {
                 let n = self.read_bignum(ptr)?;
                 if n.is_zero() {
@@ -1023,30 +860,26 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
     /// Used in iota reduction (`reduce_rec`) to turn a bignum
     /// either `Nat.zero`, or `App (Nat.succ) (bignum - 1)`; in order to do iota reduction,
     /// we need to know what constructor the major premise comes from.
-    pub(crate) fn nat_lit_to_constructor(&mut self, n: BigUintPtr<'t>) -> Option<ExprPtr<'t>> {
+    pub(crate) fn nat_lit_to_constructor(&mut self, n: BigUintPtr<'t>) -> Option<SPtr<'t>> {
         assert!(self.export_file.config.nat_extension);
         let n = self.read_bignum(n).unwrap();
         if n.is_zero() {
-            self.c_nat_zero()
+            self.c_nat_zero().map(SPtr::unshifted)
         } else {
             let pred = self.alloc_bignum(core::ops::Sub::sub(n, 1u8)).unwrap();
             let pred = self.mk_nat_lit(pred).unwrap();
             let succ_c = self.c_nat_succ()?;
-            Some(self.mk_app(succ_c, pred))
+            Some(self.mk_app(SPtr::unshifted(succ_c), pred))
         }
     }
     
     /// Check if `e` is an application of a specific constant with the given arity.
-    /// Peels through Shift and App layers via read_expr without pushing shifts.
+    /// With SPtr children, just follow the App.fun spine ignoring shifts.
     pub(crate) fn is_app_of_const(&self, e: ExprPtr<'t>, name: NamePtr<'t>, arity: usize) -> bool {
         let mut cur = e;
         for _ in 0..arity {
-            // Peel Shift wrapping the App
-            while let Shift { inner, .. } = self.read_expr(cur) { cur = inner; }
-            if let App { fun, .. } = self.read_expr(cur) { cur = fun; } else { return false; }
+            if let App { fun, .. } = self.read_expr(cur) { cur = fun.ptr; } else { return false; }
         }
-        // Peel Shift wrapping the head Const
-        while let Shift { inner, .. } = self.read_expr(cur) { cur = inner; }
         if let Const { name: n, .. } = self.read_expr(cur) { n == name } else { false }
     }
 
@@ -1060,7 +893,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
     }
 
     /// Convert a string literal to `String.ofList <| List.cons (Char.ofNat _) .. List.nil`
-    pub(crate) fn str_lit_to_constructor(&mut self, s: StringPtr<'t>) -> Option<ExprPtr<'t>> {
+    pub(crate) fn str_lit_to_constructor(&mut self, s: StringPtr<'t>) -> Option<SPtr<'t>> {
         if (!self.export_file.config.string_extension) || (!self.export_file.config.nat_extension) {
             return None
         }
@@ -1097,28 +930,39 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
     }
 
     /// If `e` is a NatLit, or `Const Nat.zero []`, return the appropriate Bignum.
-    pub(crate) fn get_bignum_from_expr(&mut self, e: ExprPtr<'t>) -> Option<BigUint> {
-        if let NatLit { ptr, .. } = self.view_expr(e) {
-            self.read_bignum(ptr).cloned()
-        } else if Some(e) == self.c_nat_zero() {
-            Some(BigUint::zero())
-        } else {
-            None
+    pub(crate) fn get_bignum_from_expr(&mut self, e: SPtr<'t>) -> Option<BigUint> {
+        // NatLit and Const are closed, shift irrelevant
+        match self.read_expr(e.ptr) {
+            NatLit { ptr, .. } => self.read_bignum(ptr).cloned(),
+            Const { .. } => {
+                if Some(e.ptr) == self.c_nat_zero() {
+                    Some(BigUint::zero())
+                } else {
+                    None
+                }
+            }
+            _ => None,
         }
     }
 
-    pub(crate) fn get_bignum_succ_from_expr(&mut self, e: ExprPtr<'t>) -> Option<ExprPtr<'t>> {
-        if let NatLit { ptr, .. } = self.view_expr(e) {
-            self.mk_nat_lit_quick(self.read_bignum(ptr)? + 1usize)
-        } else if Some(e) == self.c_nat_zero() {
-            self.mk_nat_lit_quick(BigUint::zero() + 1usize)
-        } else {
-            None
+    pub(crate) fn get_bignum_succ_from_expr(&mut self, e: SPtr<'t>) -> Option<SPtr<'t>> {
+        match self.read_expr(e.ptr) {
+            NatLit { ptr, .. } => {
+                self.mk_nat_lit_quick(self.read_bignum(ptr)? + 1usize)
+            }
+            Const { .. } => {
+                if Some(e.ptr) == self.c_nat_zero() {
+                    self.mk_nat_lit_quick(BigUint::zero() + 1usize)
+                } else {
+                    None
+                }
+            }
+            _ => None,
         }
     }
 
     /// Return the expression representing either `true` or `false`
-    pub(crate) fn bool_to_expr(&mut self, b: bool) -> Option<ExprPtr<'t>> {
+    pub(crate) fn bool_to_expr(&mut self, b: bool) -> Option<SPtr<'t>> {
         if b {
             self.c_bool_true()
         } else {
@@ -1126,39 +970,40 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         }
     }
 
-    pub(crate) fn c_bool_true(&mut self) -> Option<ExprPtr<'t>> {
+    pub(crate) fn c_bool_true(&mut self) -> Option<SPtr<'t>> {
         let n = self.export_file.name_cache.bool_true?;
         let levels = self.alloc_levels_slice(&[]);
         Some(self.mk_const(n, levels))
     }
 
-    pub(crate) fn c_bool_false(&mut self) -> Option<ExprPtr<'t>> {
+    pub(crate) fn c_bool_false(&mut self) -> Option<SPtr<'t>> {
         let n = self.export_file.name_cache.bool_false?;
         let levels = self.alloc_levels_slice(&[]);
         Some(self.mk_const(n, levels))
     }
 
+    /// c_nat_zero and c_nat_succ return ExprPtr for easy comparison with .ptr fields
     pub(crate) fn c_nat_zero(&mut self) -> Option<ExprPtr<'t>> {
         let n = self.export_file.name_cache.nat_zero?;
         let levels = self.alloc_levels_slice(&[]);
-        Some(self.mk_const(n, levels))
+        Some(self.mk_const(n, levels).ptr)
     }
 
     pub(crate) fn c_nat_succ(&mut self) -> Option<ExprPtr<'t>> {
         let n = self.export_file.name_cache.nat_succ?;
         let levels = self.alloc_levels_slice(&[]);
-        Some(self.mk_const(n, levels))
+        Some(self.mk_const(n, levels).ptr)
     }
 
     /// Make `Const("Nat", [])`
-    pub(crate) fn nat_type(&mut self) -> Option<ExprPtr<'t>> {
+    pub(crate) fn nat_type(&mut self) -> Option<SPtr<'t>> {
         let n = self.export_file.name_cache.nat?;
         let levels = self.alloc_levels_slice(&[]);
         Some(self.mk_const(n, levels))
     }
 
     /// Make `Const("String", [])`
-    pub(crate) fn string_type(&mut self) -> Option<ExprPtr<'t>> {
+    pub(crate) fn string_type(&mut self) -> Option<SPtr<'t>> {
         let n = self.export_file.name_cache.string?;
         let levels = self.alloc_levels_slice(&[]);
         Some(self.mk_const(n, levels))
@@ -1168,24 +1013,28 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
     /// telescope while backing out.
     ///
     /// `[a, b, c], e` ~> `(fun (a b c) => e)`
-    pub(crate) fn abstr_lambda_telescope(&mut self, mut binders: &[ExprPtr<'t>], mut e: ExprPtr<'t>) -> ExprPtr<'t> {
+    pub(crate) fn abstr_lambda_telescope(&mut self, mut binders: &[ExprPtr<'t>], body: ExprPtr<'t>) -> SPtr<'t> {
+        let mut result = SPtr::unshifted(body);
         while let [tl @ .., binder] = binders {
-            e = self.apply_lambda(*binder, e);
+            debug_assert!(result.shift == 0, "abstr_lambda_telescope: intermediate shift>0");
+            result = self.apply_lambda(*binder, result.ptr);
             binders = tl;
         }
-        e
+        result
     }
 
-    /// Abstract `e` with the binders in `binders`, creating a lambda
+    /// Abstract `e` with the binders in `binders`, creating a pi
     /// telescope while backing out.
     ///
     /// `[a, b, c], e` ~> `(Pi (a b c) => e)`
-    pub(crate) fn abstr_pi_telescope(&mut self, mut binders: &[ExprPtr<'t>], mut e: ExprPtr<'t>) -> ExprPtr<'t> {
+    pub(crate) fn abstr_pi_telescope(&mut self, mut binders: &[ExprPtr<'t>], body: ExprPtr<'t>) -> SPtr<'t> {
+        let mut result = SPtr::unshifted(body);
         while let [tl @ .., binder] = binders {
-            e = self.abstr_pi(*binder, e);
+            debug_assert!(result.shift == 0, "abstr_pi_telescope: intermediate shift>0");
+            result = self.abstr_pi(*binder, result.ptr);
             binders = tl;
         }
-        e
+        result
     }
 
     pub(crate) fn find_const<F>(&self, e: ExprPtr<'t>, pred: F) -> bool
@@ -1204,16 +1053,15 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
             let r = match self.read_expr(e) {
                 Var { .. } | Sort { .. } | NatLit { .. } | StringLit { .. } => false,
                 Const { name, .. } => pred(name),
-                App { fun, arg, .. } => self.find_const_aux(fun, pred, cache) || self.find_const_aux(arg, pred, cache),
+                App { fun, arg, .. } => self.find_const_aux(fun.ptr, pred, cache) || self.find_const_aux(arg.ptr, pred, cache),
                 Pi { binder_type, body, .. } | Lambda { binder_type, body, .. } =>
-                    self.find_const_aux(binder_type, pred, cache) || self.find_const_aux(body, pred, cache),
+                    self.find_const_aux(binder_type.ptr, pred, cache) || self.find_const_aux(body.ptr, pred, cache),
                 Let { binder_type, val, body, .. } =>
-                    self.find_const_aux(binder_type, pred, cache)
-                        || self.find_const_aux(val, pred, cache)
-                        || self.find_const_aux(body, pred, cache),
+                    self.find_const_aux(binder_type.ptr, pred, cache)
+                        || self.find_const_aux(val.ptr, pred, cache)
+                        || self.find_const_aux(body.ptr, pred, cache),
                 Local { binder_type, .. } => self.find_const_aux(binder_type, pred, cache),
-                Proj { structure, .. } => self.find_const_aux(structure, pred, cache),
-                Shift { inner, .. } => self.find_const_aux(inner, pred, cache),
+                Proj { structure, .. } => self.find_const_aux(structure.ptr, pred, cache),
             };
             cache.insert(e, r);
             r
@@ -1221,37 +1069,44 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
     }
 
     /// Return the number of leading `Pi` binders on this expression.
-    pub(crate) fn pi_telescope_size(&mut self, mut e: ExprPtr<'t>) -> u16 {
+    pub(crate) fn pi_telescope_size(&self, mut e: SPtr<'t>) -> u16 {
         let mut size = 0u16;
-        while let Pi { body, .. } = self.view_expr(e) {
-            size += 1;
-            e = body;
+        loop {
+            match self.read_expr(e.ptr) {
+                Pi { body, .. } => {
+                    size += 1;
+                    e = SPtr::new(body.ptr, body.shift + e.shift);
+                }
+                _ => break,
+            }
         }
         size
     }
 
-    /// Is this expression `Sort(Level::Zero)`?
-    pub(crate) fn prop(&mut self) -> ExprPtr<'t> { self.mk_sort(self.zero()) }
+    /// Make `Sort(Level::Zero)` (Prop).
+    pub(crate) fn prop(&mut self) -> SPtr<'t> { self.mk_sort(self.zero()) }
 
-    pub fn get_nth_pi_binder(&self, mut e: ExprPtr<'t>, n: usize) -> Option<ExprPtr<'t>> {
-        for _ in 0.. n {
-            match self.read_expr(e) {
-                Pi {body, ..} => { e = body; },
+    pub fn get_nth_pi_binder(&self, mut e: SPtr<'t>, n: usize) -> Option<SPtr<'t>> {
+        for _ in 0..n {
+            match self.read_expr(e.ptr) {
+                Pi { body, .. } => {
+                    e = SPtr::new(body.ptr, body.shift + e.shift);
+                }
                 _ => return None
             }
         }
-        match self.read_expr(e) {
-            Pi {binder_type, ..} => Some(binder_type),
+        match self.read_expr(e.ptr) {
+            Pi { binder_type, .. } => Some(SPtr::new(binder_type.ptr, binder_type.shift + e.shift)),
             _ => None
         }
     }
 
     /// Get the name of the inductive type which is the major premise for this recursor
     /// by finding the correct binder in the recursor's type.
-    pub fn get_major_induct(&mut self, rec: &crate::env::RecursorData<'t>) -> Option<NamePtr<'t>> {
-        let binder = self.get_nth_pi_binder(rec.info.ty, rec.major_idx());
-        match binder.map(|x| { let f = self.unfold_apps_fun(x); self.read_expr(f) }) {
-            Some(Const {name, ..}) => Some(name),
+    pub fn get_major_induct(&self, rec: &crate::env::RecursorData<'t>) -> Option<NamePtr<'t>> {
+        let binder = self.get_nth_pi_binder(SPtr::unshifted(rec.info.ty), rec.major_idx());
+        match binder.map(|x| { let f = self.unfold_apps_fun(x); self.read_expr(f.ptr) }) {
+            Some(Const { name, .. }) => Some(name),
             _ => None
         }
     }
@@ -1269,18 +1124,18 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
 
     pub(crate) fn has_fvars(&self, e: ExprPtr<'t>) -> bool { self.read_expr(e).has_fvars() }
 
-    pub(crate) fn fvar_lb(&self, e: ExprPtr<'t>) -> u16 {
-        match e.dag_marker() {
-            crate::util::DagMarker::ExportFile => self.export_file.dag.expr_fvar_lb[e.idx()],
-            crate::util::DagMarker::TcCtx => self.dag.expr_fvar_lb[e.idx()],
-        }
+    /// With SPtr, fvar_lb of a DAG ExprPtr is always 0 (cores are OSNF-normalized).
+    /// The effective fvar_lb of an SPtr is sptr.shift.
+    #[inline(always)]
+    pub(crate) fn fvar_lb(&self, _e: ExprPtr<'t>) -> u16 {
+        0
     }
 
 }
 
 impl<'t> Expr<'t> {
-    /// The number of "loose" bound variables, which is the number of bound variables
-    /// in an expression which are boudn by something above it.
+    /// The number of "loose" bound variables in this core expression.
+    /// For compound expressions with SPtr children, this accounts for children's shifts.
     pub(crate) fn num_loose_bvars(&self) -> u16 {
         match self {
             Sort { .. } | Const { .. } | Local { .. } | StringLit { .. } | NatLit { .. } => 0,
@@ -1289,8 +1144,7 @@ impl<'t> Expr<'t> {
             | Pi { num_loose_bvars, .. }
             | Lambda { num_loose_bvars, .. }
             | Let { num_loose_bvars, .. }
-            | Proj { num_loose_bvars, .. }
-            | Shift { num_loose_bvars, .. } => *num_loose_bvars,
+            | Proj { num_loose_bvars, .. } => *num_loose_bvars,
         }
     }
 
@@ -1302,8 +1156,7 @@ impl<'t> Expr<'t> {
             | Pi { has_fvars, .. }
             | Lambda { has_fvars, .. }
             | Let { has_fvars, .. }
-            | Proj { has_fvars, .. }
-            | Shift { has_fvars, .. } => *has_fvars,
+            | Proj { has_fvars, .. } => *has_fvars,
         }
     }
 }

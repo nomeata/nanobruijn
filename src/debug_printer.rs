@@ -1,7 +1,7 @@
 use crate::expr::Expr::*;
 use crate::level::Level;
 use crate::name::Name;
-use crate::util::{ExprPtr, LevelPtr, NamePtr, TcCtx};
+use crate::util::{ExprPtr, LevelPtr, NamePtr, SPtr, TcCtx};
 
 pub struct DebugPrinter<'x, 't, 'p, A> {
     pub(crate) ctx: &'x TcCtx<'t, 'p>,
@@ -118,6 +118,17 @@ impl<'x, 't, 'p> std::fmt::Debug for DebugPrinter<'x, 't, 'p, LevelPtr<'t>> {
     }
 }
 
+impl<'x, 't, 'p> std::fmt::Debug for DebugPrinter<'x, 't, 'p, SPtr<'t>> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let s = self.elem_to_print;
+        if s.shift != 0 {
+            write!(f, "Shift({:?}, {})", self.ctx.debug_print(s.ptr), s.shift)
+        } else {
+            write!(f, "{:?}", self.ctx.debug_print(s.ptr))
+        }
+    }
+}
+
 impl<'x, 't, 'p> std::fmt::Debug for DebugPrinter<'x, 't, 'p, ExprPtr<'t>> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self.ctx.read_expr(self.elem_to_print) {
@@ -170,9 +181,6 @@ impl<'x, 't, 'p> std::fmt::Debug for DebugPrinter<'x, 't, 'p, ExprPtr<'t>> {
             }
             NatLit { ptr, .. } => write!(f, "NLit({})", self.ctx.read_bignum(ptr).unwrap()),
             StringLit { ptr, .. } => write!(f, "SLit({})", self.ctx.read_string(ptr)),
-            Shift { inner, amount, .. } => {
-                write!(f, "Shift({:?}, {})", self.ctx.debug_print(inner), amount)
-            }
         }
     }
 }
@@ -217,10 +225,10 @@ impl<'x, 't, 'p> std::fmt::Debug for DebugPrinter<'x, 't, 'p, crate::tc::DeltaRe
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self.elem_to_print {
             crate::tc::DeltaResult::FoundEqResult(b) => write!(f, "DeltaResult::FoundEqResult({})", b),
-            crate::tc::DeltaResult::Exhausted(e1, e2) => f
+            crate::tc::DeltaResult::Exhausted(s1, s2) => f
                 .debug_struct("DeltaResult::Exhausted")
-                .field("lhs", &self.ctx.debug_print(e1))
-                .field("rhs", &self.ctx.debug_print(e2))
+                .field("lhs", &self.ctx.debug_print(s1))
+                .field("rhs", &self.ctx.debug_print(s2))
                 .finish(),
         }
     }
