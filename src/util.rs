@@ -257,6 +257,11 @@ pub struct ExprCache<'t> {
     /// Ensures mk_shift(a, k) always returns the same ExprPtr,
     /// enabling O(1) pointer equality in cache verification.
     pub(crate) shift_dedup: FxHashMap<(ExprPtr<'t>, u16, u16), ExprPtr<'t>>,
+    /// Cache for view_expr_shifted: (inner, amount) → Expr.
+    /// Avoids recomputing shifted children and metadata on repeated view_expr calls.
+    pub(crate) view_expr_cache: FxHashMap<(ExprPtr<'t>, u16), Expr<'t>>,
+    /// Cache for unfold_apps: ExprPtr → (head, args, shifted).
+    pub(crate) unfold_apps_cache: FxHashMap<ExprPtr<'t>, (ExprPtr<'t>, AppArgs<'t>, bool)>,
     /// Direct-mapped mk_app cache, lazily allocated after enough misses.
     /// Avoids 16MB alloc for trivial declarations while speeding up heavy ones.
     pub(crate) mk_app_dm_cache: Vec<(u64, ExprPtr<'t>, ExprPtr<'t>, ExprPtr<'t>)>,
@@ -282,6 +287,8 @@ impl<'t> ExprCache<'t> {
             shift_down_cache: new_fx_hash_map(),
             abstr_cache_levels: new_fx_hash_map(),
             shift_dedup: new_fx_hash_map(),
+            view_expr_cache: new_fx_hash_map(),
+            unfold_apps_cache: new_fx_hash_map(),
             mk_app_dm_cache: Vec::new(),
             mk_app_miss_count: 0,
             mk_pi_cache: new_fx_hash_map(),
@@ -725,6 +732,17 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
     /// element. Checks the longer-lived storage first.
     pub fn alloc_expr(&mut self, e: Expr<'t>) -> ExprPtr<'t> {
         self.trace.alloc_expr_calls += 1;
+        // OSNF invariant: compound expressions must have fvar_lb == 0.
+        // Only Var and Shift may have fvar_lb > 0.
+        debug_assert!(
+            match &e {
+                Expr::App { fvar_lb, .. } | Expr::Pi { fvar_lb, .. } | Expr::Lambda { fvar_lb, .. }
+                | Expr::Let { fvar_lb, .. } | Expr::Proj { fvar_lb, .. } => *fvar_lb == 0,
+                _ => true,
+            },
+            "OSNF violation: compound expression with fvar_lb={} allocated to DAG: {:?}",
+            e.get_fvar_lb(), std::mem::discriminant(&e)
+        );
         if let Some(idx) = self.export_file.dag.exprs.get_index_of(&e) {
             Ptr::from(DagMarker::ExportFile, idx)
         } else {
@@ -1359,85 +1377,11 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
     /// Under OSNF, view_expr(Shift(n, core)) calls this.
     /// Non-binder children: mk_shift(child, amount) — O(1).
     /// Binder bodies: shift_expr(body, amount, 1) — traversal, cached.
+    /// Shift all free variables up by `amount`. Just creates a lazy Shift wrapper.
+    /// Consumers must use view_expr/unfold_apps to see through Shifts.
     pub fn push_shift_up(&mut self, e: ExprPtr<'t>, amount: u16) -> ExprPtr<'t> {
         self.trace.push_shift_calls += 1;
-        if amount == 0 {
-            return e;
-        }
-        let expr = self.read_expr(e);
-        if expr.num_loose_bvars() == 0 {
-            return e;
-        }
-        let cache_key = (e, amount, 0u16);
-        if let Some(&result) = self.expr_cache.shift_cache.get(&cache_key) {
-            self.trace.push_shift_cache_hits += 1;
-            return result;
-        }
-        let result = stacker::maybe_grow(64 * 1024, 2 * 1024 * 1024, || self.push_shift_up_inner(e, amount));
-        self.expr_cache.shift_cache.insert(cache_key, result);
-        result
-    }
-
-    fn push_shift_up_inner(&mut self, e: ExprPtr<'t>, amount: u16) -> ExprPtr<'t> {
-        let expr = self.read_expr(e);
-        if expr.num_loose_bvars() == 0 {
-            return e;
-        }
-        match expr {
-            Expr::Shift { inner, amount: prev, .. } => {
-                // Collapse: Shift(Shift(inner, prev), amount) → push_shift_up(inner, prev+amount)
-                self.push_shift_up(inner, prev + amount)
-            }
-            Expr::Var { dbj_idx, .. } => {
-                self.mk_var(dbj_idx + amount)
-            }
-            Expr::App { fun, arg, has_fvars, .. } => {
-                // Recurse into fun to keep App spine visible. Shift-wrap arg.
-                // Allocate directly to avoid OSNF circularity in mk_app.
-                let fun = self.push_shift_up(fun, amount);
-                let arg = self.mk_shift(arg, amount);
-                let fun_e = self.read_expr(fun);
-                let arg_e = self.read_expr(arg);
-                let num_loose_bvars = fun_e.num_loose_bvars().max(arg_e.num_loose_bvars());
-                let hash = hash64!(crate::expr::APP_HASH, fun, arg);
-                let fvar_lb = if num_loose_bvars == 0 { 0 } else {
-                    let f_nlbv = fun_e.num_loose_bvars();
-                    let a_nlbv = arg_e.num_loose_bvars();
-                    if f_nlbv == 0 { arg_e.get_fvar_lb() }
-                    else if a_nlbv == 0 { fun_e.get_fvar_lb() }
-                    else { fun_e.get_fvar_lb().min(arg_e.get_fvar_lb()) }
-                };
-                self.alloc_expr(Expr::App { fun, arg, num_loose_bvars, has_fvars, hash, fvar_lb })
-            }
-            Expr::Pi { binder_name, binder_style, binder_type, body, .. } => {
-                let binder_type = self.mk_shift(binder_type, amount);
-                let body = self.shift_expr(body, amount, 1);
-                self.mk_pi(binder_name, binder_style, binder_type, body)
-            }
-            Expr::Lambda { binder_name, binder_style, binder_type, body, .. } => {
-                let binder_type = self.mk_shift(binder_type, amount);
-                let body = self.shift_expr(body, amount, 1);
-                self.mk_lambda(binder_name, binder_style, binder_type, body)
-            }
-            Expr::Let { binder_name, binder_type, val, body, nondep, .. } => {
-                let binder_type = self.mk_shift(binder_type, amount);
-                let val = self.mk_shift(val, amount);
-                let body = self.shift_expr(body, amount, 1);
-                self.mk_let(binder_name, binder_type, val, body, nondep)
-            }
-            Expr::Proj { ty_name, idx, structure, has_fvars, .. } => {
-                // Allocate directly to avoid OSNF circularity in mk_proj.
-                let structure = self.mk_shift(structure, amount);
-                let s_e = self.read_expr(structure);
-                let num_loose_bvars = s_e.num_loose_bvars();
-                let hash = hash64!(crate::expr::PROJ_HASH, ty_name, idx, structure);
-                let fvar_lb = s_e.get_fvar_lb();
-                self.alloc_expr(Expr::Proj { ty_name, idx, structure, num_loose_bvars, has_fvars, hash, fvar_lb })
-            }
-            Expr::Sort { .. } | Expr::Const { .. } | Expr::Local { .. } | Expr::StringLit { .. } | Expr::NatLit { .. } => {
-                panic!("push_shift_up on closed expression")
-            }
-        }
+        self.mk_shift(e, amount)
     }
 
     /// Shift DOWN: subtract `amount` from all free variable indices.
@@ -1471,6 +1415,47 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         result
     }
 
+    /// Shift down on a viewed (materialized) Expr whose children are ExprPtrs.
+    fn push_shift_down_viewed(&mut self, viewed: Expr<'t>, amount: u16, cutoff: u16) -> ExprPtr<'t> {
+        match viewed {
+            Expr::Shift { .. } => unreachable!("view_expr never returns Shift"),
+            Expr::Var { dbj_idx, .. } => {
+                if dbj_idx >= cutoff {
+                    debug_assert!(dbj_idx >= amount);
+                    self.mk_var(dbj_idx - amount)
+                } else {
+                    self.mk_var(dbj_idx)
+                }
+            }
+            Expr::App { fun, arg, .. } => {
+                let fun = self.push_shift_down_cutoff(fun, amount, cutoff);
+                let arg = self.push_shift_down_cutoff(arg, amount, cutoff);
+                self.mk_app(fun, arg)
+            }
+            Expr::Pi { binder_name, binder_style, binder_type, body, .. } => {
+                let binder_type = self.push_shift_down_cutoff(binder_type, amount, cutoff);
+                let body = self.push_shift_down_cutoff(body, amount, cutoff + 1);
+                self.mk_pi(binder_name, binder_style, binder_type, body)
+            }
+            Expr::Lambda { binder_name, binder_style, binder_type, body, .. } => {
+                let binder_type = self.push_shift_down_cutoff(binder_type, amount, cutoff);
+                let body = self.push_shift_down_cutoff(body, amount, cutoff + 1);
+                self.mk_lambda(binder_name, binder_style, binder_type, body)
+            }
+            Expr::Let { binder_name, binder_type, val, body, nondep, .. } => {
+                let binder_type = self.push_shift_down_cutoff(binder_type, amount, cutoff);
+                let val = self.push_shift_down_cutoff(val, amount, cutoff);
+                let body = self.push_shift_down_cutoff(body, amount, cutoff + 1);
+                self.mk_let(binder_name, binder_type, val, body, nondep)
+            }
+            Expr::Proj { ty_name, idx, structure, .. } => {
+                let structure = self.push_shift_down_cutoff(structure, amount, cutoff);
+                self.mk_proj(ty_name, idx, structure)
+            }
+            _ => panic!("push_shift_down_viewed: unexpected closed expression")
+        }
+    }
+
     fn push_shift_down_inner(&mut self, e: ExprPtr<'t>, amount: u16, cutoff: u16) -> ExprPtr<'t> {
         let expr = self.read_expr(e);
         if expr.num_loose_bvars() <= cutoff {
@@ -1479,8 +1464,8 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         match expr {
             Expr::Shift { inner, amount: prev, .. } => {
                 // OSNF: Shift always has cutoff=0.
-                if cutoff == 0 {
-                    // O(1): Shift(inner, prev) shift_down(amount, 0) = Shift(inner, prev - amount) or inner
+                if cutoff == 0 || prev >= cutoff {
+                    // cutoff=0 or all vars shifted past cutoff: shift_down applies uniformly.
                     debug_assert!(prev >= amount, "push_shift_down: Shift amount {} < shift_down {}", prev, amount);
                     if prev > amount {
                         self.mk_shift(inner, prev - amount)
@@ -1488,9 +1473,9 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
                         inner
                     }
                 } else {
-                    // cutoff > 0: force the Shift, then shift down
-                    let forced = self.push_shift_up(inner, prev);
-                    self.push_shift_down_cutoff(forced, amount, cutoff)
+                    // prev < cutoff: use view_expr to see through Shift, shift_down children.
+                    let viewed = self.view_expr(e);
+                    self.push_shift_down_viewed(viewed, amount, cutoff)
                 }
             }
             Expr::Var { dbj_idx, .. } => {
@@ -1552,11 +1537,14 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
     /// Children are Shift-wrapped via mk_shift (O(1)).
     /// Binder bodies use shift_expr(body, amount, 1) which traverses and rebuilds.
     fn view_expr_shifted(&mut self, inner: ExprPtr<'t>, amount: u16) -> Expr<'t> {
+        if let Some(cached) = self.expr_cache.view_expr_cache.get(&(inner, amount)) {
+            return *cached;
+        }
         let expr = self.read_expr(inner);
-        match expr {
+        let result = match expr {
             Expr::Shift { inner: inner2, amount: prev, .. } => {
-                // Nested shift: compose and retry
-                self.view_expr_shifted(inner2, prev + amount)
+                // Nested shift: compose and retry (result cached by recursive call)
+                return self.view_expr_shifted(inner2, prev + amount);
             }
             Expr::Var { dbj_idx, .. } => {
                 let new_idx = dbj_idx + amount;
@@ -1648,7 +1636,9 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
             | Expr::StringLit { .. } | Expr::NatLit { .. } => {
                 expr // closed, shift is no-op
             }
-        }
+        };
+        self.expr_cache.view_expr_cache.insert((inner, amount), result);
+        result
     }
 
     /// Peel off top-level Shift wrappers only (non-recursive).
