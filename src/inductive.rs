@@ -309,7 +309,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                     self.get_local_params(adjusted_ctor.ty, u16::try_from(st.local_params.len()).unwrap());
                 let replaced_ctor_wo_params = self.replace_all_nested(ctor_type_instd, st, &ctor_local_params);
                 let replaced_ctor_w_params =
-                    self.ctx.abstr_pis(ctor_local_params.iter().copied(), replaced_ctor_wo_params).ptr;
+                    self.ctx.abstr_pis(ctor_local_params.iter().copied(), replaced_ctor_wo_params.ptr).ptr;
                 assert!(!self.ctx.read_expr(replaced_ctor_w_params).has_fvars());
                 // Push the constructor with the params put back, free variables abstracted,
                 // and ococurrences of nested inductives replaced with specialized types.
@@ -339,20 +339,21 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
     /// Return a sequence of expressions which are free variables corresponding to the
     /// inductive type's parameters, also returning the end of the telescope instantiated
     /// with the parameters.
-    fn get_local_params(&mut self, mut e: ExprPtr<'t>, num_params: u16) -> (Vec<ExprPtr<'t>>, ExprPtr<'t>) {
+    fn get_local_params(&mut self, e: ExprPtr<'t>, num_params: u16) -> (Vec<ExprPtr<'t>>, SPtr<'t>) {
+        let mut cursor = SPtr::unshifted(e);
         let mut param_locals = Vec::with_capacity(num_params as usize);
         for _ in 0..num_params {
-            match self.ctx.view_sptr(SPtr::unshifted(e)) {
+            match self.ctx.view_sptr(cursor) {
                 Pi { binder_name, binder_style, binder_type, body, .. } => {
                     let local_ = self.ctx.mk_unique(binder_name, binder_style, binder_type.ptr);
-                    e = self.ctx.inst(body, &[local_]).ptr;
-                    e = self.whnf(SPtr::unshifted(e)).ptr;
+                    cursor = self.ctx.inst(body, &[local_]);
+                    cursor = self.whnf(cursor);
                     param_locals.push(local_.ptr);
                 }
                 _ => panic!("exhausted telescope early"),
             }
         }
-        (param_locals, e)
+        (param_locals, cursor)
     }
 
     /// Check the 0th element of the list of inductive types; this one is different
@@ -614,54 +615,43 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
 
     fn replace_all_nested(
         &mut self,
-        e: ExprPtr<'t>,
-        st: &mut InductiveCheckState<'t>,
-        outgoing_params: &Vec<ExprPtr<'t>>,
-    ) -> ExprPtr<'t> {
-        // Try to replace locally before traversing into the lower parts.
-        if let Some(eprime) = self.replace_if_nested(e, st, outgoing_params) {
-            eprime
-        } else {
-            match self.ctx.read_expr(e) {
-                Var { .. } | Sort { .. } | Const { .. } | Local { .. } | NatLit { .. } | StringLit { .. } => e,
-                Pi { binder_name, binder_style, binder_type, body, .. } => {
-                    let new_type = self.replace_all_nested_sptr(binder_type, st, outgoing_params);
-                    let new_body = self.replace_all_nested_sptr(body, st, outgoing_params);
-                    self.ctx.mk_pi(binder_name, binder_style, new_type, new_body).ptr
-                }
-                Lambda { binder_name, binder_style, binder_type, body, .. } => {
-                    let new_type = self.replace_all_nested_sptr(binder_type, st, outgoing_params);
-                    let new_body = self.replace_all_nested_sptr(body, st, outgoing_params);
-                    self.ctx.mk_lambda(binder_name, binder_style, new_type, new_body).ptr
-                }
-                Let { binder_name, binder_type, val, body, nondep, .. } => {
-                    let new_type = self.replace_all_nested_sptr(binder_type, st, outgoing_params);
-                    let new_val = self.replace_all_nested_sptr(val, st, outgoing_params);
-                    let new_body = self.replace_all_nested_sptr(body, st, outgoing_params);
-                    self.ctx.mk_let(binder_name, new_type, new_val, new_body, nondep).ptr
-                }
-                App { fun, arg, .. } => {
-                    let new_fun = self.replace_all_nested_sptr(fun, st, outgoing_params);
-                    let new_arg = self.replace_all_nested_sptr(arg, st, outgoing_params);
-                    self.ctx.mk_app(new_fun, new_arg).ptr
-                }
-                Proj { ty_name, idx, structure, .. } => {
-                    let new_structure = self.replace_all_nested_sptr(structure, st, outgoing_params);
-                    self.ctx.mk_proj(ty_name, idx, new_structure).ptr
-                }
-            }
-        }
-    }
-
-    /// Helper: replace_all_nested on an SPtr child, preserving the shift.
-    fn replace_all_nested_sptr(
-        &mut self,
-        child: SPtr<'t>,
+        e: SPtr<'t>,
         st: &mut InductiveCheckState<'t>,
         outgoing_params: &Vec<ExprPtr<'t>>,
     ) -> SPtr<'t> {
-        let new_ptr = self.replace_all_nested(child.ptr, st, outgoing_params);
-        if new_ptr == child.ptr { child } else { SPtr::new(new_ptr, child.shift) }
+        // Try to replace locally before traversing into the lower parts.
+        if let Some(eprime) = self.replace_if_nested(e.ptr, st, outgoing_params) {
+            SPtr::unshifted(eprime)
+        } else {
+            match self.ctx.view_sptr(e) {
+                Var { .. } | Sort { .. } | Const { .. } | Local { .. } | NatLit { .. } | StringLit { .. } => e,
+                Pi { binder_name, binder_style, binder_type, body, .. } => {
+                    let new_type = self.replace_all_nested(binder_type, st, outgoing_params);
+                    let new_body = self.replace_all_nested(body, st, outgoing_params);
+                    self.ctx.mk_pi(binder_name, binder_style, new_type, new_body)
+                }
+                Lambda { binder_name, binder_style, binder_type, body, .. } => {
+                    let new_type = self.replace_all_nested(binder_type, st, outgoing_params);
+                    let new_body = self.replace_all_nested(body, st, outgoing_params);
+                    self.ctx.mk_lambda(binder_name, binder_style, new_type, new_body)
+                }
+                Let { binder_name, binder_type, val, body, nondep, .. } => {
+                    let new_type = self.replace_all_nested(binder_type, st, outgoing_params);
+                    let new_val = self.replace_all_nested(val, st, outgoing_params);
+                    let new_body = self.replace_all_nested(body, st, outgoing_params);
+                    self.ctx.mk_let(binder_name, new_type, new_val, new_body, nondep)
+                }
+                App { fun, arg, .. } => {
+                    let new_fun = self.replace_all_nested(fun, st, outgoing_params);
+                    let new_arg = self.replace_all_nested(arg, st, outgoing_params);
+                    self.ctx.mk_app(new_fun, new_arg)
+                }
+                Proj { ty_name, idx, structure, .. } => {
+                    let new_structure = self.replace_all_nested(structure, st, outgoing_params);
+                    self.ctx.mk_proj(ty_name, idx, new_structure)
+                }
+            }
+        }
     }
 
     // This is only ONE of the binders from the constructor's telescope,
