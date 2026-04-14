@@ -274,7 +274,7 @@ pub struct ExprCache<'t> {
     pub(crate) subst_cache: FxHashMap<(ExprPtr<'t>, LevelsPtr<'t>, LevelsPtr<'t>), ExprPtr<'t>>,
     pub(crate) dsubst_cache: FxHashMap<(ExprPtr<'t>, LevelsPtr<'t>, LevelsPtr<'t>), ExprPtr<'t>>,
     /// Caches (e, offset) |-> output for abstraction.
-    pub(crate) abstr_cache: FxHashMap<(ExprPtr<'t>, u16), ExprPtr<'t>>,
+    pub(crate) abstr_cache: FxHashMap<(ExprPtr<'t>, u16), SPtr<'t>>,
     /// Caches (e, amount, cutoff) |-> output for shifting.
     pub(crate) shift_cache: FxHashMap<(ExprPtr<'t>, u16, u16), ExprPtr<'t>>,
     /// Caches (e, amount, cutoff) |-> output for downward shifting.

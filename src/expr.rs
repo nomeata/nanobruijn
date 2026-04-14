@@ -559,8 +559,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         if !self.has_fvars(e) {
             SPtr::unshifted(e)
         } else if let Some(cached) = self.expr_cache.abstr_cache.get(&(e, offset)) {
-            // TODO: cache stores ExprPtr, needs SPtr
-            SPtr::unshifted(*cached)
+            *cached
         } else {
             // Children are SPtr. Locals never appear under shift (nlbv=0).
             let calcd = match self.read_expr(e) {
@@ -598,8 +597,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
                 Var { .. } | Sort { .. } | Const { .. } => panic!("should flag as no locals"),
             };
 
-            // TODO: cache stores ExprPtr, needs SPtr - storing ptr only for now
-            self.expr_cache.abstr_cache.insert((e, offset), calcd.ptr);
+            self.expr_cache.abstr_cache.insert((e, offset), calcd);
             calcd
         }
     }
