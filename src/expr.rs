@@ -869,14 +869,16 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
     /// From `f a_0 .. a_N`, return `f`
     /// The returned head has any top-level Shift pushed one level inside.
     pub fn unfold_apps_fun(&mut self, mut e: ExprPtr<'t>) -> ExprPtr<'t> {
+        let mut pending_shift: u16 = 0;
         loop {
-            match self.view_expr(e) {
+            match self.read_expr(e) {
+                Shift { inner, amount, .. } => {
+                    pending_shift += amount;
+                    e = inner;
+                }
                 App { fun, .. } => e = fun,
                 _ => {
-                    if let Expr::Shift { inner, amount, .. } = self.read_expr(e) {
-                        return self.push_shift_up(inner, amount);
-                    }
-                    return e;
+                    return if pending_shift != 0 { self.mk_shift(e, pending_shift) } else { e };
                 }
             }
         }
@@ -938,16 +940,20 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
 
     pub(crate) fn unfold_apps_stack(&mut self, mut e: ExprPtr<'t>) -> (ExprPtr<'t>, AppArgs<'t>) {
         let mut args = AppArgs::new();
+        let mut pending_shift: u16 = 0;
         loop {
-            match self.view_expr(e) {
+            match self.read_expr(e) {
+                Shift { inner, amount, .. } => {
+                    pending_shift += amount;
+                    e = inner;
+                }
                 App { fun, arg, .. } => {
+                    let arg = if pending_shift != 0 { self.mk_shift(arg, pending_shift) } else { arg };
                     args.push(arg);
                     e = fun;
                 }
                 _ => {
-                    if let Expr::Shift { inner, amount, .. } = self.read_expr(e) {
-                        e = self.push_shift_up(inner, amount);
-                    }
+                    if pending_shift != 0 { e = self.mk_shift(e, pending_shift); }
                     break
                 }
             }
