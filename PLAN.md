@@ -283,6 +283,17 @@ These approaches were tried and found counterproductive, unsound, or out of scop
   improvement on Mathlib 100K** (128s → 115s). Reverted because this is a design-neutral
   optimization that could equally be applied to nanoda — out of scope for the design comparison.
 
+- **OSNF enforcement in push_shift_up** (route App/Proj through mk_app/mk_proj when
+  fvar_lb > 0): push_shift_up_inner bypasses mk_app/mk_proj for App and Proj, producing
+  non-OSNF expressions with fvar_lb > 0. These have different pointers than the equivalent
+  OSNF forms, causing cache misses. Fixing this (either via mk_app or inlined adjust_child_tc)
+  gives dramatic improvement on AlgebraicGeometry declarations (inst_aux 280M → 89M, -10.4%
+  instructions on #272519) but causes 85 panics on full Mathlib (vs 5 baseline) — the
+  adjust_child_tc + alloc_expr + mk_shift overhead for fvar_lb > 0 cases is too expensive
+  on declarations where the non-OSNF forms didn't cause significant cache misses. The fix
+  is correct and beneficial for targeted declarations but needs a cheaper implementation
+  to be globally beneficial. **Key insight**: pointer identity loss from non-OSNF push_shift_up
+  is a real issue — future work should find a way to fix it with lower overhead.
 - **Eager shift resolution** (push_shift in lookup_var, in inst_aux vals): Creates different
   expression identities that cascade poorly through caches. Up to 9x slower.
 - **Lazy beta reduction** (push args as let-locals, whnf at higher depth): Changing evaluation
