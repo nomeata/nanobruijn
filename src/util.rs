@@ -1391,10 +1391,11 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
             Expr::Var { dbj_idx, .. } => {
                 self.mk_var(dbj_idx + amount)
             }
-            Expr::App { fun, arg, .. } => {
-                let fun = self.push_shift_up(fun, amount);
-                let arg = self.mk_shift(arg, amount);
-                self.mk_app(fun, arg)
+            Expr::App { .. } => {
+                // Don't materialize the App spine — just Shift-wrap.
+                // unfold_apps already handles Shift(App(...), k) lazily.
+                // This keeps the DAG OSNF-clean (no App/Proj with fvar_lb > 0).
+                self.mk_shift(e, amount)
             }
             Expr::Pi { binder_name, binder_style, binder_type, body, .. } => {
                 let binder_type = self.mk_shift(binder_type, amount);
@@ -1412,9 +1413,9 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
                 let body = self.shift_expr(body, amount, 1);
                 self.mk_let(binder_name, binder_type, val, body, nondep)
             }
-            Expr::Proj { ty_name, idx, structure, .. } => {
-                let structure = self.mk_shift(structure, amount);
-                self.mk_proj(ty_name, idx, structure)
+            Expr::Proj { .. } => {
+                // Don't materialize — just Shift-wrap. view_expr handles Shift(Proj(...), k).
+                self.mk_shift(e, amount)
             }
             Expr::Sort { .. } | Expr::Const { .. } | Expr::Local { .. } | Expr::StringLit { .. } | Expr::NatLit { .. } => {
                 panic!("push_shift_up on closed expression")
