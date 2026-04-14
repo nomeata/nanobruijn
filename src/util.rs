@@ -853,7 +853,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
                 format!("Sh({},+{})", self.expr_desc(inner, max_depth - 1), amount)
             }
             Expr::Local { .. } => "Local".to_string(),
-            Expr::NatLit { .. } => "Nat".to_string(),
+            Expr::NatLit { ptr, .. } => format!("NatLit({})", self.read_bignum(ptr).map(|n| n.to_string()).unwrap_or("?".into())),
             Expr::StringLit { .. } => "Str".to_string(),
         }
     }
