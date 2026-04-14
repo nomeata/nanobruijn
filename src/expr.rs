@@ -155,7 +155,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         for _ in 0..n {
             match self.read_expr(e.core) {
                 Pi { body, .. } => {
-                    e = SPtr::new(body.core, body.shift + e.shift);
+                    e = self.push_shift_up(body, e.shift);
                 }
                 _ => panic!()
             }
@@ -874,8 +874,8 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         loop {
             match self.read_expr(e.core) {
                 App { fun, arg, .. } => {
-                    args.push(SPtr::new(arg.core, arg.shift + e.shift));
-                    e = SPtr::new(fun.core, fun.shift + e.shift);
+                    args.push(self.push_shift_up(arg, e.shift));
+                    e = self.push_shift_up(fun, e.shift);
                 }
                 _ => break,
             }
@@ -909,8 +909,8 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         loop {
             match self.read_expr(e.core) {
                 App { fun, arg, .. } => {
-                    args.push(SPtr::new(arg.core, arg.shift + e.shift));
-                    e = SPtr::new(fun.core, fun.shift + e.shift);
+                    args.push(self.push_shift_up(arg, e.shift));
+                    e = self.push_shift_up(fun, e.shift);
                 }
                 _ => break,
             }
@@ -972,7 +972,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
                 // fun is SPtr; Nat.succ is a Const (closed), so fun.shift doesn't matter
                 let succ = self.c_nat_succ()?;
                 if fun.core == succ {
-                    Some(SPtr::new(arg.core, arg.shift + e.shift))
+                    Some(self.push_shift_up(arg, e.shift))
                 } else {
                     None
                 }
@@ -1205,7 +1205,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
             match self.read_expr(e.core) {
                 Pi { body, .. } => {
                     size += 1;
-                    e = SPtr::new(body.core, body.shift + e.shift);
+                    e = self.push_shift_up(body, e.shift);
                 }
                 _ => break,
             }
@@ -1220,13 +1220,13 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         for _ in 0..n {
             match self.read_expr(e.core) {
                 Pi { body, .. } => {
-                    e = SPtr::new(body.core, body.shift + e.shift);
+                    e = self.push_shift_up(body, e.shift);
                 }
                 _ => return None
             }
         }
         match self.read_expr(e.core) {
-            Pi { binder_type, .. } => Some(SPtr::new(binder_type.core, binder_type.shift + e.shift)),
+            Pi { binder_type, .. } => Some(self.push_shift_up(binder_type, e.shift)),
             _ => None
         }
     }
