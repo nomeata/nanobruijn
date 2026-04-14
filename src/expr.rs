@@ -1036,16 +1036,27 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         }
     }
     
+    /// Check if `e` is an application of a specific constant with the given arity.
+    /// Peels through Shift and App layers via read_expr without pushing shifts.
+    pub(crate) fn is_app_of_const(&self, e: ExprPtr<'t>, name: NamePtr<'t>, arity: usize) -> bool {
+        let mut cur = e;
+        for _ in 0..arity {
+            // Peel Shift wrapping the App
+            while let Shift { inner, .. } = self.read_expr(cur) { cur = inner; }
+            if let App { fun, .. } = self.read_expr(cur) { cur = fun; } else { return false; }
+        }
+        // Peel Shift wrapping the head Const
+        while let Shift { inner, .. } = self.read_expr(cur) { cur = inner; }
+        if let Const { name: n, .. } = self.read_expr(cur) { n == name } else { false }
+    }
+
     /// Return `true` iff `e` is an application of `@eagerReduce A a`
     pub(crate) fn is_eager_reduce_app(&self, e: ExprPtr<'t>) -> bool {
-        if let App {fun, ..} = self.read_expr(e) {
-            if let App {fun, ..} = self.read_expr(fun) {
-                if let Const {name, ..} = self.read_expr(fun) {
-                    return self.export_file.name_cache.eager_reduce == Some(name)
-                }
-            }
+        if let Some(eager_name) = self.export_file.name_cache.eager_reduce {
+            self.is_app_of_const(e, eager_name, 2)
+        } else {
+            false
         }
-        false
     }
 
     /// Convert a string literal to `String.ofList <| List.cons (Char.ofNat _) .. List.nil`
