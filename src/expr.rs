@@ -828,7 +828,9 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         loop {
             match self.read_expr(e.ptr) {
                 App { fun, .. } => {
-                    e = SPtr::new(fun.ptr, fun.shift + e.shift);
+                    let new_shift = fun.shift.checked_add(e.shift).expect(&format!(
+                        "unfold_apps_fun: shift overflow {}+{}", fun.shift, e.shift));
+                    e = SPtr::new(fun.ptr, new_shift);
                 }
                 _ => break,
             }
