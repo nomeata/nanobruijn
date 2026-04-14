@@ -162,7 +162,8 @@ impl<K: Eq + std::hash::Hash, V> LazyMap<K, V> {
 /// Caches are keyed by ExprPtr (pointer identity, enabled by hash-consing).
 pub(crate) struct DepthFrame<'t> {
     /// The local binding: (type, optional value for let-bindings).
-    pub(crate) local: (ExprPtr<'t>, Option<ExprPtr<'t>>),
+    /// Types are SPtrs valid at the depth where the binder was entered.
+    pub(crate) local: (SPtr<'t>, Option<SPtr<'t>>),
     /// Per-depth whnf cache: ExprPtr → result.
     pub(crate) whnf_cache: LazyMap<ExprPtr<'t>, ExprPtr<'t>>,
     /// Per-depth whnf_no_unfolding cache.
@@ -178,7 +179,7 @@ pub(crate) struct DepthFrame<'t> {
 }
 
 impl<'t> DepthFrame<'t> {
-    pub(crate) fn new(ty: ExprPtr<'t>, val: Option<ExprPtr<'t>>) -> Self {
+    pub(crate) fn new(ty: SPtr<'t>, val: Option<SPtr<'t>>) -> Self {
         DepthFrame {
             local: (ty, val),
             whnf_cache: LazyMap::new(),
@@ -1623,12 +1624,12 @@ impl<'t> TcCache<'t> {
     pub(crate) fn depth(&self) -> usize { self.frames.len() }
 
     /// Push a lambda/pi binder.
-    pub(crate) fn push_local(&mut self, ty: ExprPtr<'t>) {
+    pub(crate) fn push_local(&mut self, ty: SPtr<'t>) {
         self.frames.push(DepthFrame::new(ty, None));
     }
 
     /// Push a let-binding.
-    pub(crate) fn push_local_let(&mut self, ty: ExprPtr<'t>, val: ExprPtr<'t>) {
+    pub(crate) fn push_local_let(&mut self, ty: SPtr<'t>, val: SPtr<'t>) {
         self.frames.push(DepthFrame::new(ty, Some(val)));
     }
 
@@ -1653,14 +1654,14 @@ impl<'t> TcCache<'t> {
     }
 
     /// Look up a local binding by de Bruijn index (0 = most recent).
-    pub(crate) fn local_type(&self, dbj_idx: u16) -> ExprPtr<'t> {
+    pub(crate) fn local_type(&self, dbj_idx: u16) -> SPtr<'t> {
         let depth = self.frames.len();
         assert!(dbj_idx < depth as u16, "local_type: dbj_idx={} >= depth={} (free var reached type lookup)", dbj_idx, depth);
         self.frames[depth - 1 - dbj_idx as usize].local.0
     }
 
     /// Look up the value of a let-bound variable by de Bruijn index.
-    pub(crate) fn local_value(&self, dbj_idx: u16) -> Option<ExprPtr<'t>> {
+    pub(crate) fn local_value(&self, dbj_idx: u16) -> Option<SPtr<'t>> {
         let depth = self.frames.len();
         if dbj_idx >= depth as u16 {
             return None; // Free variable — not in local context

@@ -283,25 +283,25 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
     /// shifted to be valid at the current depth. O(1) via SPtr.
     fn lookup_var(&mut self, dbj_idx: u16) -> SPtr<'t> {
         let ty = self.tc_cache.local_type(dbj_idx);
-        SPtr::new(ty, dbj_idx + 1)
+        // ty is an SPtr at the binder's depth; shift by dbj_idx+1 to bring to current depth
+        SPtr::new(ty.ptr, ty.shift + dbj_idx + 1)
     }
 
     /// Look up the value of a let-bound Var(k), shifted to be valid at current depth.
     /// Returns None for lambda/pi binders. O(1) via SPtr.
     fn lookup_var_value(&mut self, dbj_idx: u16) -> Option<SPtr<'t>> {
         let val = self.tc_cache.local_value(dbj_idx)?;
-        Some(SPtr::new(val, dbj_idx + 1))
+        Some(SPtr::new(val.ptr, val.shift + dbj_idx + 1))
     }
 
     /// Push a lambda/pi binder onto the local context.
-    /// Takes ExprPtr because types are stored at current depth (unshifted).
-    fn push_local(&mut self, ty: ExprPtr<'t>) {
+    /// Takes SPtr because types carry their shift context.
+    fn push_local(&mut self, ty: SPtr<'t>) {
         self.tc_cache.push_local(ty);
     }
 
     /// Push a let-binding onto the local context (type + value).
-    /// Takes ExprPtr because values are stored at current depth (unshifted).
-    fn push_local_let(&mut self, ty: ExprPtr<'t>, val: ExprPtr<'t>) {
+    fn push_local_let(&mut self, ty: SPtr<'t>, val: SPtr<'t>) {
         self.tc_cache.push_local_let(ty, val);
     }
 
@@ -804,7 +804,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             if let Check = flag {
                 self.infer_sort_of(binder_type, flag);
             }
-            self.push_local(binder_type.ptr);
+            self.push_local(binder_type);
             binders.push((binder_name, binder_style, binder_type));
             e = body;
         }
@@ -827,7 +827,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         while let Pi { binder_type, body, .. } = self.ctx.view_sptr(e) {
             let dom_univ = self.infer_sort_of(binder_type, flag);
             universes.push(dom_univ);
-            self.push_local(binder_type.ptr);
+            self.push_local(binder_type);
             e = body;
         }
         // e is now the body of the innermost Pi; infer its sort
@@ -885,14 +885,14 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             }
             Expr::Lambda {binder_name, binder_style, binder_type, body, ..} => {
                 let binder_type_r = self.strong_reduce(binder_type, reduce_types, reduce_proofs);
-                self.push_local(binder_type_r.ptr);
+                self.push_local(binder_type_r);
                 let body_r = self.strong_reduce(body, reduce_types, reduce_proofs);
                 self.pop_local();
                 self.ctx.mk_lambda(binder_name, binder_style, binder_type_r, body_r)
             }
             Expr::Pi {binder_name, binder_style, binder_type, body, ..} => {
                 let binder_type_r = self.strong_reduce(binder_type, reduce_types, reduce_proofs);
-                self.push_local(binder_type_r.ptr);
+                self.push_local(binder_type_r);
                 let body_r = self.strong_reduce(body, reduce_types, reduce_proofs);
                 self.pop_local();
                 self.ctx.mk_pi(binder_name, binder_style, binder_type_r, body_r)
@@ -1066,7 +1066,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                     self.ctx.trace.whnf_let_reductions += 1;
                     // Lazy zeta: push let-binding, reduce body in extended context,
                     // then pop and inst_beta on the (much smaller) whnf result.
-                    self.push_local_let(binder_type.ptr, val.ptr);
+                    self.push_local_let(binder_type, val);
                     // Args from unfold_apps are in the outer context; body is in
                     // the let-extended context (one more binder). Shift args up by 1
                     // so their de Bruijn indices are valid under the let binder.
@@ -1170,7 +1170,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         ) = self.ctx.view_sptr_pair(x, y)
         {
             if self.def_eq(t1, t2) {
-                self.push_local(t1.ptr);
+                self.push_local(t1);
                 x = body1;
                 y = body2;
             } else {
