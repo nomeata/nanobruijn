@@ -1273,12 +1273,10 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         SPtr::new(inner, amount)
     }
 
-    /// Shift an SPtr up by `amount`. Pure value construction.
+    /// Shift an SPtr up by `amount`. No-op for closed expressions.
     pub fn push_shift_up(&self, e: SPtr<'t>, amount: u16) -> SPtr<'t> {
-        let new_shift = e.shift.checked_add(amount).expect(&format!(
-            "push_shift_up: shift overflow {}+{}", e.shift, amount));
-        debug_assert!(new_shift < 10000, "push_shift_up: suspiciously large shift {}", new_shift);
-        SPtr::new(e.core, new_shift)
+        if amount == 0 || self.sptr_nlbv(e) == 0 { return e; }
+        e.shift_up(amount)
     }
 
     /// Shift down: subtract `amount` from all free variable indices in the core expression.
