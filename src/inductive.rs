@@ -309,7 +309,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                     self.get_local_params(adjusted_ctor.ty, u16::try_from(st.local_params.len()).unwrap());
                 let replaced_ctor_wo_params = self.replace_all_nested(ctor_type_instd, st, &ctor_local_params);
                 let replaced_ctor_w_params =
-                    self.ctx.abstr_pis(ctor_local_params.iter().copied(), replaced_ctor_wo_params.ptr).ptr;
+                    self.ctx.abstr_pis(ctor_local_params.iter().copied(), replaced_ctor_wo_params).ptr;
                 assert!(!self.ctx.read_expr(replaced_ctor_w_params).has_fvars());
                 // Push the constructor with the params put back, free variables abstracted,
                 // and ococurrences of nested inductives replaced with specialized types.
@@ -580,7 +580,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                     let base = self.ctx.subst_expr_levels(container_ty_info.ty, container_ty_info.uparams, i_levels);
                     let instd =
                         self.ctx.inst_forall_params(base, nested_container_ty.num_params as usize, args.as_slice());
-                    let out = self.ctx.abstr_pis(outgoing_param_locals.iter().copied(), instd.ptr);
+                    let out = self.ctx.abstr_pis(outgoing_param_locals.iter().copied(), instd);
                     out.ptr
                 };
                 let jsprime = self.ctx.replace_params(js.ptr, st.local_params.as_slice(), outgoing_param_locals).ptr;
@@ -604,7 +604,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                         nested_container_ty.num_params as usize,
                         args.as_slice(),
                     );
-                    let auxj_ctor_type = self.ctx.abstr_pis(outgoing_param_locals.iter().copied(), auxj_ctor_type.ptr).ptr;
+                    let auxj_ctor_type = self.ctx.abstr_pis(outgoing_param_locals.iter().copied(), auxj_ctor_type).ptr;
                     auxj_ctors.push(CtorHeader { name: auxj_ctor_name, ty: auxj_ctor_type })
                 }
                 st.all_inductives_incl_specialized.push(IndTyHeader {
@@ -1073,7 +1073,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                 let u_app = self.ctx.foldl_apps(SPtr::unshifted(rec_arg), xs.iter().copied().map(SPtr::unshifted));
                 self.ctx.mk_app(lhs, u_app)
             };
-            let v_i_ty = self.ctx.abstr_pis(xs.iter().copied(), motive_base.ptr).ptr;
+            let v_i_ty = self.ctx.abstr_pis(xs.iter().copied(), motive_base).ptr;
             let v_name = self.ctx.str1("v");
             // rec_arg often has a hygienic name
             let v_name = self.ctx.append_index_after(v_name, ctor_idx as u64);
@@ -1100,8 +1100,8 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             let c_app = self.ctx.mk_app(c_app, c_app0);
             let v = self.handle_rec_args_minor(st, ctor_idx, rec_ctor_args.as_slice());
 
-            let minor_type = self.ctx.abstr_pis(v.iter().copied(), c_app.ptr);
-            let minor_type = self.ctx.abstr_pis(all_ctor_args.iter().copied(), minor_type.ptr);
+            let minor_type = self.ctx.abstr_pis(v.iter().copied(), c_app);
+            let minor_type = self.ctx.abstr_pis(all_ctor_args.iter().copied(), minor_type);
             let minor_name = match self.ctx.read_name(ctor.name) {
                 // Use the constructor's name if it's available;
                 crate::name::Name::Str(_, sfx, _) => self.ctx.str(self.ctx.anonymous(), sfx),

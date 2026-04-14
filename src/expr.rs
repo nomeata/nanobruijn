@@ -605,9 +605,53 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
     /// Helper for abstr_aux: process an SPtr child.
     /// Locals have nlbv=0 so they can't appear under a shift.
     /// We recurse on child.ptr and re-wrap with child.shift.
+    /// Abstract locals in an SPtr child. Adjusts offset to account for child's shift.
     fn abstr_aux_sptr(&mut self, child: SPtr<'t>, locals: &[ExprPtr<'t>], offset: u16) -> SPtr<'t> {
-        let result = self.abstr_aux(child.ptr, locals, offset);
-        SPtr::new(result.ptr, result.shift + child.shift)
+        if child.shift == 0 {
+            return self.abstr_aux(child.ptr, locals, offset);
+        }
+        // child.shift > 0: the core is at a lower depth.
+        // Adjust offset down to compensate, then reapply child.shift to result.
+        if offset >= child.shift {
+            let result = self.abstr_aux(child.ptr, locals, offset - child.shift);
+            SPtr::new(result.ptr, result.shift + child.shift)
+        } else {
+            // offset < child.shift: materialize via view_sptr and recurse
+            let viewed = self.view_sptr(child);
+            match viewed {
+                Local { .. } => {
+                    locals.iter().rev().position(|x| *x == child.ptr)
+                        .map(|pos| self.mk_var(u16::try_from(pos).unwrap() + offset))
+                        .unwrap_or(child)
+                }
+                App { fun, arg, .. } => {
+                    let f = self.abstr_aux_sptr(fun, locals, offset);
+                    let a = self.abstr_aux_sptr(arg, locals, offset);
+                    self.mk_app(f, a)
+                }
+                Pi { binder_name, binder_style, binder_type, body, .. } => {
+                    let t = self.abstr_aux_sptr(binder_type, locals, offset);
+                    let b = self.abstr_aux_sptr(body, locals, offset + 1);
+                    self.mk_pi(binder_name, binder_style, t, b)
+                }
+                Lambda { binder_name, binder_style, binder_type, body, .. } => {
+                    let t = self.abstr_aux_sptr(binder_type, locals, offset);
+                    let b = self.abstr_aux_sptr(body, locals, offset + 1);
+                    self.mk_lambda(binder_name, binder_style, t, b)
+                }
+                Let { binder_name, binder_type, val, body, nondep, .. } => {
+                    let t = self.abstr_aux_sptr(binder_type, locals, offset);
+                    let v = self.abstr_aux_sptr(val, locals, offset);
+                    let b = self.abstr_aux_sptr(body, locals, offset + 1);
+                    self.mk_let(binder_name, t, v, b, nondep)
+                }
+                Proj { ty_name, idx, structure, .. } => {
+                    let s = self.abstr_aux_sptr(structure, locals, offset);
+                    self.mk_proj(ty_name, idx, s)
+                }
+                _ => child,
+            }
+        }
     }
 
     /// Abstraction of unique identifiers; replaces free variables with the appropriate
@@ -850,12 +894,10 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         fun
     }
 
-    pub(crate) fn abstr_pis<I>(&mut self, mut binders: I, body: ExprPtr<'t>) -> SPtr<'t>
+    pub(crate) fn abstr_pis<I>(&mut self, mut binders: I, body: SPtr<'t>) -> SPtr<'t>
     where
         I: Iterator<Item = ExprPtr<'t>> + DoubleEndedIterator, {
-        // TODO: abstr_pi returns SPtr, but we chain multiple calls.
-        // For now, we need a way to pass SPtr body to abstr_pi.
-        let mut result = SPtr::unshifted(body);
+        let mut result = body;
         while let Some(local) = binders.next_back() {
             result = self.abstr_pi(local, result)
         }
