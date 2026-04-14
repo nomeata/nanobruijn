@@ -522,7 +522,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
 
     /// Helper: shift an SPtr child. The child's own shift composes with the operation.
     /// Returns an SPtr (as the mk_* functions now expect SPtr children).
-    fn shift_expr_aux_sptr(&mut self, child: SPtr<'t>, amount: u16, cutoff: u16) -> SPtr<'t> {
+    pub(crate) fn shift_expr_aux_sptr(&mut self, child: SPtr<'t>, amount: u16, cutoff: u16) -> SPtr<'t> {
         // If the child has a shift, vars in child.ptr at index >= 0 become >= child.shift.
         // If child.shift >= cutoff, the cutoff is irrelevant for child.ptr's vars —
         // just add amount to the child's shift.

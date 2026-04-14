@@ -1066,6 +1066,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                         n_args += 1;
                         e = body;
                     }
+                    debug_assert!(n_args > 0, "beta reduction matched Lambda but consumed 0 args");
                     self.ctx.trace.whnf_beta_reductions += 1;
                     e = self.ctx.inst_beta(e, &args[..n_args]);
                     let next = self.ctx.foldl_apps(e, args.into_iter().skip(n_args));
@@ -1298,6 +1299,10 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             eprintln!("  assert_def_eq FAILED:");
             eprintln!("    u = {} (ptr={:?}@{} shift={})", self.ctx.expr_desc(u.ptr, 15), u.ptr.dag_marker(), u.ptr.idx(), u.shift);
             eprintln!("    v = {} (ptr={:?}@{} shift={})", self.ctx.expr_desc(v.ptr, 15), v.ptr.dag_marker(), v.ptr.idx(), v.shift);
+            let u_whnf = self.whnf(u);
+            let v_whnf = self.whnf(v);
+            eprintln!("    u_whnf = {} (shift={})", self.ctx.expr_desc(u_whnf.ptr, 15), u_whnf.shift);
+            eprintln!("    v_whnf = {} (shift={})", self.ctx.expr_desc(v_whnf.ptr, 15), v_whnf.shift);
             self.find_diff(u, v, 0);
             panic!("assert_def_eq failed");
         }
