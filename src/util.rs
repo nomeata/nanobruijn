@@ -1005,8 +1005,9 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
             else if arg_nlbv == 0 { fun.shift }
             else { fun.shift.min(arg.shift) };
         // Adjust children by subtracting min_shift (only for open children)
-        let adj_fun = if fun_nlbv == 0 { fun } else { SPtr::new(fun.ptr, fun.shift - min_shift) };
-        let adj_arg = if arg_nlbv == 0 { arg } else { SPtr::new(arg.ptr, arg.shift - min_shift) };
+        // Normalize closed children's shifts to 0 (shift is irrelevant for closed expressions)
+        let adj_fun = if fun_nlbv == 0 { SPtr::unshifted(fun.ptr) } else { SPtr::new(fun.ptr, fun.shift - min_shift) };
+        let adj_arg = if arg_nlbv == 0 { SPtr::unshifted(arg.ptr) } else { SPtr::new(arg.ptr, arg.shift - min_shift) };
         // Compute core nlbv and has_fvars
         let adj_fun_nlbv = self.sptr_nlbv(adj_fun);
         let adj_arg_nlbv = self.sptr_nlbv(adj_arg);
@@ -1052,13 +1053,15 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         // (body_nlbv == 1 means only bvar 0, which is bound by this lambda)
         let min_shift = self.binder_min_shift(ty_nlbv, binder_type.shift, body_nlbv, body.shift);
         // Adjust children
-        let adj_ty = if ty_nlbv == 0 { binder_type } else { SPtr::new(binder_type.ptr, binder_type.shift - min_shift) };
+        let adj_ty = if ty_nlbv == 0 { SPtr::unshifted(binder_type.ptr) } else { SPtr::new(binder_type.ptr, binder_type.shift - min_shift) };
         // Body adjustment: only adjust if body contributes (body_nlbv > 1).
         // When body_nlbv <= 1 (only Var(0) or closed), body is unaffected by outer shift extraction.
         let adj_body = if body_nlbv > 1 {
             SPtr::new(body.ptr, body.shift - min_shift)
+        } else if body_nlbv == 0 {
+            SPtr::unshifted(body.ptr) // closed, normalize shift to 0
         } else {
-            body
+            body // body_nlbv == 1: only Var(0), shift should be 0 already
         };
         let adj_ty_nlbv = self.sptr_nlbv(adj_ty);
         let adj_body_nlbv = self.sptr_nlbv(adj_body);
@@ -1087,11 +1090,13 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         let ty_nlbv = self.sptr_nlbv(binder_type);
         let body_nlbv = self.sptr_nlbv(body);
         let min_shift = self.binder_min_shift(ty_nlbv, binder_type.shift, body_nlbv, body.shift);
-        let adj_ty = if ty_nlbv == 0 { binder_type } else { SPtr::new(binder_type.ptr, binder_type.shift - min_shift) };
+        let adj_ty = if ty_nlbv == 0 { SPtr::unshifted(binder_type.ptr) } else { SPtr::new(binder_type.ptr, binder_type.shift - min_shift) };
         let adj_body = if body_nlbv > 1 {
             SPtr::new(body.ptr, body.shift - min_shift)
+        } else if body_nlbv == 0 {
+            SPtr::unshifted(body.ptr) // closed, normalize shift to 0
         } else {
-            body
+            body // body_nlbv == 1: only Var(0), shift should be 0 already
         };
         let adj_ty_nlbv = self.sptr_nlbv(adj_ty);
         let adj_body_nlbv = self.sptr_nlbv(adj_body);
@@ -1126,13 +1131,15 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
             min_shift = min_shift.min(body.shift.saturating_sub(1));
         }
         if min_shift == u16::MAX { min_shift = 0; }
-        let adj_ty = if ty_nlbv == 0 { binder_type } else { SPtr::new(binder_type.ptr, binder_type.shift - min_shift) };
-        let adj_val = if val_nlbv == 0 { val } else { SPtr::new(val.ptr, val.shift - min_shift) };
+        let adj_ty = if ty_nlbv == 0 { SPtr::unshifted(binder_type.ptr) } else { SPtr::new(binder_type.ptr, binder_type.shift - min_shift) };
+        let adj_val = if val_nlbv == 0 { SPtr::unshifted(val.ptr) } else { SPtr::new(val.ptr, val.shift - min_shift) };
         // Body: adjust only when it contributes (body_nlbv > 1)
         let adj_body = if body_nlbv > 1 {
             SPtr::new(body.ptr, body.shift - min_shift)
+        } else if body_nlbv == 0 {
+            SPtr::unshifted(body.ptr) // closed, normalize shift to 0
         } else {
-            body
+            body // body_nlbv == 1: only Var(0), shift should be 0 already
         };
         let adj_ty_nlbv = self.sptr_nlbv(adj_ty);
         let adj_val_nlbv = self.sptr_nlbv(adj_val);
@@ -1149,7 +1156,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         self.trace.alloc_mk_proj += 1;
         let s_nlbv = self.sptr_nlbv(structure);
         let min_shift = if s_nlbv == 0 { 0 } else { structure.shift };
-        let adj_s = SPtr::new(structure.ptr, structure.shift - min_shift);
+        let adj_s = if s_nlbv == 0 { SPtr::unshifted(structure.ptr) } else { SPtr::new(structure.ptr, structure.shift - min_shift) };
         let adj_s_nlbv = self.sptr_nlbv(adj_s);
         let has_fvars = self.has_fvars(structure.ptr);
         let hash = hash64!(crate::expr::PROJ_HASH, ty_name, idx, adj_s);

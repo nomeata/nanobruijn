@@ -870,7 +870,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         loop {
             match self.read_expr(e.ptr) {
                 App { fun, .. } => {
-                    let new_shift = fun.shift.saturating_add(e.shift);
+                    let new_shift = fun.shift + e.shift;
                     e = SPtr::new(fun.ptr, new_shift);
                 }
                 _ => break,

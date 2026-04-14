@@ -972,6 +972,13 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         }
         let mut cursor = e;
         loop {
+            // If cursor has shift > 0, recursively whnf the unshifted core
+            // and compose. This prevents unbounded shift accumulation in the loop.
+            if cursor.shift > 0 {
+                let r = self.whnf(cursor);
+                self.tc_cache.whnf_cache_insert(whnf_bucket_idx, e.ptr, r);
+                return r;
+            }
             let whnfd = self.whnf_no_unfolding(cursor);
             if let Some(reduce_nat_ok) = self.try_reduce_nat(whnfd) {
                 cursor = reduce_nat_ok;
