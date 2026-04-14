@@ -622,35 +622,46 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         if let Some(eprime) = self.replace_if_nested(e, st, outgoing_params) {
             eprime
         } else {
-            match self.ctx.view_sptr(SPtr::unshifted(e)) {
+            match self.ctx.read_expr(e) {
                 Var { .. } | Sort { .. } | Const { .. } | Local { .. } | NatLit { .. } | StringLit { .. } => e,
                 Pi { binder_name, binder_style, binder_type, body, .. } => {
-                    let binder_type = self.replace_all_nested(binder_type.ptr, st, outgoing_params);
-                    let body = self.replace_all_nested(body.ptr, st, outgoing_params);
-                    self.ctx.mk_pi(binder_name, binder_style, SPtr::unshifted(binder_type), SPtr::unshifted(body)).ptr
+                    let new_type = self.replace_all_nested_sptr(binder_type, st, outgoing_params);
+                    let new_body = self.replace_all_nested_sptr(body, st, outgoing_params);
+                    self.ctx.mk_pi(binder_name, binder_style, new_type, new_body).ptr
                 }
                 Lambda { binder_name, binder_style, binder_type, body, .. } => {
-                    let binder_type = self.replace_all_nested(binder_type.ptr, st, outgoing_params);
-                    let body = self.replace_all_nested(body.ptr, st, outgoing_params);
-                    self.ctx.mk_lambda(binder_name, binder_style, SPtr::unshifted(binder_type), SPtr::unshifted(body)).ptr
+                    let new_type = self.replace_all_nested_sptr(binder_type, st, outgoing_params);
+                    let new_body = self.replace_all_nested_sptr(body, st, outgoing_params);
+                    self.ctx.mk_lambda(binder_name, binder_style, new_type, new_body).ptr
                 }
                 Let { binder_name, binder_type, val, body, nondep, .. } => {
-                    let binder_type = self.replace_all_nested(binder_type.ptr, st, outgoing_params);
-                    let val = self.replace_all_nested(val.ptr, st, outgoing_params);
-                    let body = self.replace_all_nested(body.ptr, st, outgoing_params);
-                    self.ctx.mk_let(binder_name, SPtr::unshifted(binder_type), SPtr::unshifted(val), SPtr::unshifted(body), nondep).ptr
+                    let new_type = self.replace_all_nested_sptr(binder_type, st, outgoing_params);
+                    let new_val = self.replace_all_nested_sptr(val, st, outgoing_params);
+                    let new_body = self.replace_all_nested_sptr(body, st, outgoing_params);
+                    self.ctx.mk_let(binder_name, new_type, new_val, new_body, nondep).ptr
                 }
                 App { fun, arg, .. } => {
-                    let fun = self.replace_all_nested(fun.ptr, st, outgoing_params);
-                    let arg = self.replace_all_nested(arg.ptr, st, outgoing_params);
-                    self.ctx.mk_app(SPtr::unshifted(fun), SPtr::unshifted(arg)).ptr
+                    let new_fun = self.replace_all_nested_sptr(fun, st, outgoing_params);
+                    let new_arg = self.replace_all_nested_sptr(arg, st, outgoing_params);
+                    self.ctx.mk_app(new_fun, new_arg).ptr
                 }
                 Proj { ty_name, idx, structure, .. } => {
-                    let structure = self.replace_all_nested(structure.ptr, st, outgoing_params);
-                    self.ctx.mk_proj(ty_name, idx, SPtr::unshifted(structure)).ptr
+                    let new_structure = self.replace_all_nested_sptr(structure, st, outgoing_params);
+                    self.ctx.mk_proj(ty_name, idx, new_structure).ptr
                 }
             }
         }
+    }
+
+    /// Helper: replace_all_nested on an SPtr child, preserving the shift.
+    fn replace_all_nested_sptr(
+        &mut self,
+        child: SPtr<'t>,
+        st: &mut InductiveCheckState<'t>,
+        outgoing_params: &Vec<ExprPtr<'t>>,
+    ) -> SPtr<'t> {
+        let new_ptr = self.replace_all_nested(child.ptr, st, outgoing_params);
+        if new_ptr == child.ptr { child } else { SPtr::new(new_ptr, child.shift) }
     }
 
     // This is only ONE of the binders from the constructor's telescope,
