@@ -290,6 +290,59 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         if self.ctx.num_loose_bvars(e.core) == 0 { 0 } else { self.depth() }
     }
 
+    /// Cross-shift depth-stacked UF: find representative SPtr at current depth.
+    /// Stored entry: core → SPtr(rep, delta). On find(SPtr(A, s)):
+    /// look up A at cache_bucket(A), get SPtr(R, d), follow with SPtr(R, d+s).
+    /// Closed cores always return SPtr::unshifted (shift irrelevant).
+    fn uf_find(&self, x: SPtr<'t>) -> SPtr<'t> {
+        if self.ctx.num_loose_bvars(x.core) == 0 {
+            // Closed: look up in base bucket, shift is irrelevant
+            let mut cur = x.core;
+            loop {
+                match self.tc_cache.uf_get(0, &cur) {
+                    Some(rep) => cur = rep.core,
+                    None => return SPtr::unshifted(cur),
+                }
+            }
+        }
+        // Open: bucket = depth - shift (where the core lives)
+        let bucket = self.depth() - x.shift as usize;
+        match self.tc_cache.uf_get(bucket, &x.core) {
+            Some(stored) => {
+                // stored.shift is delta. Recover rep at current depth:
+                // If rep is closed, sptr_shift returns it unchanged (shift irrelevant).
+                // If rep is open, sptr_shift adds x.shift.
+                let rep_at_depth = self.ctx.sptr_shift(stored, x.shift);
+                self.uf_find(rep_at_depth)
+            }
+            None => x,
+        }
+    }
+
+    fn uf_check_eq(&self, x: SPtr<'t>, y: SPtr<'t>) -> bool {
+        self.uf_find(x) == self.uf_find(y)
+    }
+
+    fn uf_union(&mut self, x: SPtr<'t>, y: SPtr<'t>) {
+        let rx = self.uf_find(x);
+        let ry = self.uf_find(y);
+        if rx == ry { return; }
+        let depth = self.depth();
+        let bx = if self.ctx.num_loose_bvars(rx.core) == 0 { 0 } else { depth - rx.shift as usize };
+        let by = if self.ctx.num_loose_bvars(ry.core) == 0 { 0 } else { depth - ry.shift as usize };
+        // Store non-rep at its bucket, pointing to rep.
+        // Rep = lower bucket (survives more pops).
+        // delta: shift difference so that find recovers the rep's shift.
+        if bx <= by {
+            // rx is rep. Store ry.core → SPtr(rx.core, rx.shift - ry.shift) at by.
+            let delta = rx.shift.wrapping_sub(ry.shift);
+            self.tc_cache.uf_insert(by, ry.core, SPtr::new(rx.core, delta));
+        } else {
+            let delta = ry.shift.wrapping_sub(rx.shift);
+            self.tc_cache.uf_insert(bx, rx.core, SPtr::new(ry.core, delta));
+        }
+    }
+
     /// Look up the type of Var(k) in the local context, returning an SPtr
     /// shifted to be valid at the current depth. O(1) via SPtr.
     fn lookup_var(&mut self, dbj_idx: u16) -> SPtr<'t> {
@@ -1244,8 +1297,8 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
     /// Never calls def_eq recursively.
     fn cheap_eq(&mut self, x: SPtr<'t>, y: SPtr<'t>) -> bool {
         x == y
+            || self.uf_check_eq(x, y)
             || self.eq_cache_contains(x, y)
-            || (self.ctx.sptr_nlbv(x) == 0 && self.ctx.sptr_nlbv(y) == 0 && self.tc_cache.eq_cache_uf.check_uf_eq(x.core, y.core))
     }
 
     fn def_eq_app(&mut self, x: SPtr<'t>, y: SPtr<'t>) -> bool {
@@ -1316,6 +1369,9 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
     }
     pub fn def_eq(&mut self, x: SPtr<'t>, y: SPtr<'t>) -> bool {
         self.ctx.trace.def_eq_calls += 1;
+        // Count quick resolutions
+        let resolved_quick = x == y;
+        if resolved_quick { self.ctx.trace.defeq_ptr_eq += 1; }
         self.ctx.check_heartbeat();
         stacker::maybe_grow(64 * 1024, 2 * 1024 * 1024, || self.def_eq_inner(x, y))
     }
@@ -1332,6 +1388,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             let y_s = if self.ctx.num_loose_bvars(y.core) > 0 { y.shift } else { 0 };
             let common = x_s.min(y_s);
             if common > 0 {
+                self.ctx.trace.defeq_peel_calls += 1;
                 let nx = SPtr::new(x.core, x.shift - common);
                 let ny = SPtr::new(y.core, y.shift - common);
                 let depth = self.depth();
@@ -1353,7 +1410,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                 // Cache the result for future lookups
                 self.eq_cache_insert(x, y);
                 self.defeq_open_store_pos(x, y);
-                if self.ctx.sptr_nlbv(x) == 0 && self.ctx.sptr_nlbv(y) == 0 { self.tc_cache.eq_cache_uf.union(x.core, y.core); }
+                self.uf_union(x, y);
                 return true;
             }
         }
@@ -1399,8 +1456,8 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                 self.eq_cache_insert(x, y);
                 self.eq_cache_insert(x_n, y_n);
                 self.defeq_open_store_pos(x, y);
-                if self.ctx.sptr_nlbv(x) == 0 && self.ctx.sptr_nlbv(y) == 0 { self.tc_cache.eq_cache_uf.union(x.core, y.core); }
-                if self.ctx.sptr_nlbv(x_n) == 0 && self.ctx.sptr_nlbv(y_n) == 0 { self.tc_cache.eq_cache_uf.union(x_n.core, y_n.core); }
+                self.uf_union(x, y);
+                self.uf_union(x_n, y_n);
                 return true;
             }
         }
@@ -1434,7 +1491,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         if result {
             self.eq_cache_insert(x, y);
             self.defeq_open_store_pos(x, y);
-            if self.ctx.sptr_nlbv(x) == 0 && self.ctx.sptr_nlbv(y) == 0 { self.tc_cache.eq_cache_uf.union(x.core, y.core); }
+            self.uf_union(x, y);
         }
         result
     }
@@ -1614,13 +1671,13 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         if x == y {
             return Some(true)
         }
-        // eq_cache_contains checks flat cache (closed) + defeq_open (open)
-        if self.eq_cache_contains(x, y) {
+        // Transitive weighted UnionFind (depth-stacked).
+        if self.uf_check_eq(x, y) {
+            self.ctx.trace.eq_cache_uf_hits += 1;
             return Some(true)
         }
-        // Transitive pointer-based UnionFind for closed expressions only.
-        if self.ctx.sptr_nlbv(x) == 0 && self.ctx.sptr_nlbv(y) == 0 && self.tc_cache.eq_cache_uf.check_uf_eq(x.core, y.core) {
-            self.ctx.trace.eq_cache_uf_hits += 1;
+        // Depth-stacked defeq_pos cache (checked after UF).
+        if self.eq_cache_contains(x, y) {
             return Some(true)
         }
         if let Some(r) = self.def_eq_sort(x, y) {

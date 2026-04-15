@@ -177,6 +177,8 @@ pub(crate) struct DepthFrame<'t> {
     pub(crate) infer_no_check: LazyMap<ExprPtr<'t>, SPtr<'t>>,
     pub(crate) defeq_pos: LazyMap<(SPtr<'t>, SPtr<'t>), (SPtr<'t>, SPtr<'t>, u16)>,
     pub(crate) defeq_neg: LazyMap<(SPtr<'t>, SPtr<'t>), (SPtr<'t>, SPtr<'t>, u16)>,
+    /// Per-depth weighted UF: core → SPtr(rep_core, shift_delta).
+    pub(crate) uf: LazyMap<ExprPtr<'t>, SPtr<'t>>,
 }
 
 impl<'t> DepthFrame<'t> {
@@ -186,6 +188,7 @@ impl<'t> DepthFrame<'t> {
             whnf: LazyMap::new(), wnu: LazyMap::new(),
             infer_check: LazyMap::new(), infer_no_check: LazyMap::new(),
             defeq_pos: LazyMap::new(), defeq_neg: LazyMap::new(),
+            uf: LazyMap::new(),
         }
     }
 }
@@ -552,6 +555,9 @@ pub struct TcTrace {
     // open defeq cache
     pub defeq_open_pos_hits: u64,
     pub defeq_open_neg_hits: u64,
+    pub defeq_peel_calls: u64,
+    pub defeq_shadow_would_hit: u64,
+    pub defeq_ptr_eq: u64,
     pub def_eq_inner_calls: u64,
     pub def_eq_deep_calls: u64,  // survived both quick_checks, entering lazy_delta
     // wnu cache miss breakdown
@@ -582,11 +588,11 @@ pub struct TcTrace {
 
 impl std::fmt::Display for TcTrace {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "def_eq={} dei={}/{} whnf={} infer={} inst={} alloc={} | hits: whnf={} eq={}/vf{} uf={} dop={}/{} infer={} infer_hash={} infer_vfail={} | ps={}/{} | inst_aux={}/{}/{} sh={}/{}/{}",
+        write!(f, "def_eq={} dei={}/{} whnf={} infer={} inst={} alloc={} | hits: whnf={} eq={}/vf{} uf={} dop={}/{} dpeel={} shadow={} ptreq={} infer={} infer_hash={} infer_vfail={} | ps={}/{} | inst_aux={}/{}/{} sh={}/{}/{}",
             self.def_eq_calls, self.def_eq_inner_calls, self.def_eq_deep_calls, self.whnf_calls, self.infer_calls,
             self.inst_calls, self.alloc_expr_calls,
             self.whnf_cache_hits, self.eq_cache_hits, self.eq_cache_verify_fail, self.eq_cache_uf_hits,
-            self.defeq_open_pos_hits, self.defeq_open_neg_hits,
+            self.defeq_open_pos_hits, self.defeq_open_neg_hits, self.defeq_peel_calls, self.defeq_shadow_would_hit, self.defeq_ptr_eq,
             self.infer_cache_hits,
             self.infer_cache_hash_hit, self.infer_cache_verify_fail,
             self.push_shift_calls, self.push_shift_cache_hits,
@@ -1746,8 +1752,8 @@ pub(crate) struct TcCache<'t> {
     pub(crate) infer_no_check_base: LazyMap<ExprPtr<'t>, SPtr<'t>>,
     pub(crate) defeq_pos_base: LazyMap<(SPtr<'t>, SPtr<'t>), (SPtr<'t>, SPtr<'t>, u16)>,
     pub(crate) defeq_neg_base: LazyMap<(SPtr<'t>, SPtr<'t>), (SPtr<'t>, SPtr<'t>, u16)>,
-    /// UnionFind for transitive def_eq (closed expressions only).
-    pub(crate) eq_cache_uf: UnionFind<ExprPtr<'t>>,
+    /// Depth-stacked weighted UF base (bucket 0): closed expressions.
+    pub(crate) uf_base: LazyMap<ExprPtr<'t>, SPtr<'t>>,
     /// Strong reduction cache (global, library feature).
     pub(crate) strong_cache: UniqueHashMap<(ExprPtr<'t>, bool, bool), ExprPtr<'t>>,
     /// Per-depth frames: local bindings + open-expression caches.
@@ -1762,7 +1768,7 @@ impl<'t> TcCache<'t> {
             whnf_base: LazyMap::new(), wnu_base: LazyMap::new(),
             infer_check_base: LazyMap::new(), infer_no_check_base: LazyMap::new(),
             defeq_pos_base: LazyMap::new(), defeq_neg_base: LazyMap::new(),
-            eq_cache_uf: UnionFind::new(),
+            uf_base: LazyMap::new(),
             strong_cache: new_unique_hash_map(),
             frames: Vec::new(),
         }
@@ -1820,6 +1826,16 @@ impl<'t> TcCache<'t> {
     pub(crate) fn infer_check_insert(&mut self, b: usize, k: ExprPtr<'t>, v: SPtr<'t>) { depth_insert!(self, b, k, v, infer_check_base, infer_check) }
     pub(crate) fn infer_no_check_get(&self, b: usize, k: &ExprPtr<'t>) -> Option<SPtr<'t>> { depth_get!(self, b, k, infer_no_check_base, infer_no_check) }
     pub(crate) fn infer_no_check_insert(&mut self, b: usize, k: ExprPtr<'t>, v: SPtr<'t>) { depth_insert!(self, b, k, v, infer_no_check_base, infer_no_check) }
+
+    /// Raw UF lookup at a specific bucket. Returns stored SPtr if present.
+    pub(crate) fn uf_get(&self, bucket: usize, core: &ExprPtr<'t>) -> Option<SPtr<'t>> {
+        depth_get!(self, bucket, core, uf_base, uf)
+    }
+
+    /// Raw UF insert at a specific bucket.
+    pub(crate) fn uf_insert(&mut self, bucket: usize, core: ExprPtr<'t>, rep: SPtr<'t>) {
+        depth_insert!(self, bucket, core, rep, uf_base, uf);
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]

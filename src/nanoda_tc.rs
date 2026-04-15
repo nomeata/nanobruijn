@@ -903,6 +903,7 @@ impl<'x, 't: 'x, 'p: 't> NanodaTypeChecker<'x, 't, 'p> {
 
     pub fn def_eq(&mut self, x: SPtr<'t>, y: SPtr<'t>) -> bool {
         self.ctx.trace.def_eq_calls += 1;
+        if x == y { self.ctx.trace.defeq_ptr_eq += 1; }
         if let Some(easy) = self.def_eq_quick_check(x, y) {
             return easy
         }
@@ -946,7 +947,9 @@ impl<'x, 't: 'x, 'p: 't> NanodaTypeChecker<'x, 't, 'p> {
             }
         };
         if result {
-            self.tc_cache.eq_cache.union(x.core, y.core);
+            if self.ctx.sptr_nlbv(x) == 0 && self.ctx.sptr_nlbv(y) == 0 {
+                self.tc_cache.eq_cache.union(x.core, y.core);
+            }
         }
         result
     }
@@ -1124,7 +1127,7 @@ impl<'x, 't: 'x, 'p: 't> NanodaTypeChecker<'x, 't, 'p> {
         if x == y {
             return Some(true)
         }
-        if self.tc_cache.eq_cache.check_uf_eq(x.core, y.core) {
+        if self.ctx.sptr_nlbv(x) == 0 && self.ctx.sptr_nlbv(y) == 0 && self.tc_cache.eq_cache.check_uf_eq(x.core, y.core) {
             self.ctx.trace.eq_cache_hits += 1;
             return Some(true)
         }
