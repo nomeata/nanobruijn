@@ -1634,7 +1634,6 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         if x == y {
             return Some(true)
         }
-        // Shift normalization: nothing here — handled by whnf peel
         if self.eq_cache_contains(x, y) {
             return Some(true)
         }
