@@ -1024,6 +1024,12 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         let has_fvars = self.has_fvars(fun.core) || self.has_fvars(arg.core);
         let hash = hash64!(crate::expr::APP_HASH, adj_fun, adj_arg);
         let app_expr = Expr::App { fun: adj_fun, arg: adj_arg, num_loose_bvars: core_nlbv, has_fvars, hash };
+        // OSNF check: min_shift of adjusted children should be 0
+        debug_assert!({
+            let f_s = if self.sptr_nlbv(adj_fun) > 0 { adj_fun.shift } else { u16::MAX };
+            let a_s = if self.sptr_nlbv(adj_arg) > 0 { adj_arg.shift } else { u16::MAX };
+            f_s.min(a_s) == 0 || (f_s == u16::MAX && a_s == u16::MAX)
+        }, "mk_app OSNF violation: adj_fun.shift={} adj_arg.shift={}", adj_fun.shift, adj_arg.shift);
         let core = self.alloc_expr(app_expr);
         let result = SPtr::new(core, min_shift);
         // Update DM cache
