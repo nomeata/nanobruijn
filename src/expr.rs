@@ -241,7 +241,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
             } else {
                 effective_shift
             };
-            return SPtr::new(child.core, final_shift);
+            return SPtr::unshifted(child.core); // closed: shift is irrelevant
         }
         if sh_cut == 0 || child.shift >= sh_cut {
             let new_sh_amt = sh_amt + child.shift as i16;
@@ -662,7 +662,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         // Adjust offset down to compensate, then reapply child.shift to result.
         if offset >= child.shift {
             let result = self.abstr_aux(child.core, locals, offset - child.shift);
-            SPtr::new(result.core, result.shift + child.shift)
+            self.sptr_shift(result, child.shift)
         } else {
             // offset < child.shift: materialize via view_sptr and recurse
             let viewed = self.view_sptr(child);
@@ -771,7 +771,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         // Adjust num_open_binders by child.shift (same logic as abstr_aux_sptr)
         if num_open_binders >= child.shift {
             let result = self.abstr_aux_levels(child.core, start_pos, num_open_binders - child.shift);
-            SPtr::new(result.core, result.shift + child.shift)
+            self.sptr_shift(result, child.shift)
         } else {
             // Fallback: materialize and recurse
             let viewed = self.view_sptr(child);
@@ -874,7 +874,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
     /// so recurse on child.core and preserve child.shift.
     fn subst_aux_sptr(&mut self, child: SPtr<'t>, ks: LevelsPtr<'t>, vs: LevelsPtr<'t>) -> SPtr<'t> {
         let result = self.subst_aux(child.core, ks, vs);
-        SPtr::new(result.core, result.shift + child.shift)
+        self.sptr_shift(result, child.shift)
     }
 
     pub fn subst_expr_levels(&mut self, e: ExprPtr<'t>, ks: LevelsPtr<'t>, vs: LevelsPtr<'t>) -> SPtr<'t> {
@@ -910,8 +910,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         loop {
             match self.read_expr(e.core) {
                 App { fun, .. } => {
-                    let new_shift = fun.shift + e.shift;
-                    e = SPtr::new(fun.core, new_shift);
+                    e = self.sptr_shift(fun, e.shift);
                 }
                 _ => break,
             }
