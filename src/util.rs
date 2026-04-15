@@ -182,9 +182,9 @@ pub(crate) struct DepthFrame<'t> {
     /// Per-depth infer cache (no-check mode): ExprPtr → result.
     pub(crate) infer_cache_no_check: LazyMap<ExprPtr<'t>, SPtr<'t>>,
     /// Per-depth positive def_eq cache for open expressions.
-    pub(crate) defeq_pos_open: LazyMap<(ExprPtr<'t>, ExprPtr<'t>), (ExprPtr<'t>, ExprPtr<'t>, u16)>,
+    pub(crate) defeq_pos_open: LazyMap<(SPtr<'t>, SPtr<'t>), (SPtr<'t>, SPtr<'t>, u16)>,
     /// Per-depth negative def_eq cache for open expressions.
-    pub(crate) defeq_neg_open: LazyMap<(ExprPtr<'t>, ExprPtr<'t>), (ExprPtr<'t>, ExprPtr<'t>, u16)>,
+    pub(crate) defeq_neg_open: LazyMap<(SPtr<'t>, SPtr<'t>), (SPtr<'t>, SPtr<'t>, u16)>,
 }
 
 impl<'t> DepthFrame<'t> {
@@ -1694,10 +1694,10 @@ pub(crate) struct TcCache<'t> {
     /// Infer cache (no-check mode) for closed expressions: ExprPtr → result.
     pub(crate) infer_cache_no_check_base: FxHashMap<ExprPtr<'t>, SPtr<'t>>,
     // === Flat caches (not depth-stacked) ===
-    /// Positive def_eq cache for closed expressions (pointer-keyed set).
-    pub(crate) eq_cache: FxHashSet<(ExprPtr<'t>, ExprPtr<'t>)>,
-    /// Negative def_eq cache for closed expressions (pointer-keyed set).
-    pub(crate) failure_cache: FxHashSet<(ExprPtr<'t>, ExprPtr<'t>)>,
+    /// Positive def_eq cache for closed expressions (shift-normalized SPtr pairs).
+    pub(crate) eq_cache: FxHashSet<(SPtr<'t>, SPtr<'t>)>,
+    /// Negative def_eq cache for closed expressions (shift-normalized SPtr pairs).
+    pub(crate) failure_cache: FxHashSet<(SPtr<'t>, SPtr<'t>)>,
     /// Strong reduction cache (library/inspection feature).
     pub(crate) strong_cache: UniqueHashMap<(ExprPtr<'t>, bool, bool), ExprPtr<'t>>,
     /// Pointer-based UnionFind for transitive def_eq caching.
@@ -1831,12 +1831,12 @@ impl<'t> TcCache<'t> {
         }
     }
 
-    pub(crate) fn defeq_open_get(&self, is_pos: bool, bucket_idx: usize, key: &(ExprPtr<'t>, ExprPtr<'t>)) -> Option<&(ExprPtr<'t>, ExprPtr<'t>, u16)> {
+    pub(crate) fn defeq_open_get(&self, is_pos: bool, bucket_idx: usize, key: &(SPtr<'t>, SPtr<'t>)) -> Option<&(SPtr<'t>, SPtr<'t>, u16)> {
         let frame = self.frames.get(bucket_idx)?;
         if is_pos { frame.defeq_pos_open.get(key) } else { frame.defeq_neg_open.get(key) }
     }
 
-    pub(crate) fn defeq_open_insert(&mut self, is_pos: bool, bucket_idx: usize, key: (ExprPtr<'t>, ExprPtr<'t>), val: (ExprPtr<'t>, ExprPtr<'t>, u16)) {
+    pub(crate) fn defeq_open_insert(&mut self, is_pos: bool, bucket_idx: usize, key: (SPtr<'t>, SPtr<'t>), val: (SPtr<'t>, SPtr<'t>, u16)) {
         if let Some(frame) = self.frames.get_mut(bucket_idx) {
             if is_pos { frame.defeq_pos_open.insert(key, val); }
             else { frame.defeq_neg_open.insert(key, val); }

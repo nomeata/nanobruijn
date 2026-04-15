@@ -1350,7 +1350,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                 // Cache the result for future lookups
                 self.eq_cache_insert(x, y);
                 self.defeq_open_store_pos(x, y);
-                self.tc_cache.eq_cache_uf.union(x.core, y.core);
+                if x.shift == y.shift { self.tc_cache.eq_cache_uf.union(x.core, y.core); }
                 return true;
             }
         }
@@ -1393,7 +1393,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                 self.eq_cache_insert(x, y);
                 self.eq_cache_insert(x_n, y_n);
                 self.defeq_open_store_pos(x, y);
-                self.tc_cache.eq_cache_uf.union(x.core, y.core);
+                if x.shift == y.shift { self.tc_cache.eq_cache_uf.union(x.core, y.core); }
                 self.tc_cache.eq_cache_uf.union(x_n.core, y_n.core);
                 return true;
             }
@@ -1631,7 +1631,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
     }
 
     fn failure_cache_contains(&mut self, x: SPtr<'t>, y: SPtr<'t>) -> bool {
-        let (key, _swapped) = self.defeq_canon_key(x.core, y.core);
+        let (key, _) = self.defeq_canon_key_open(x, y);
         if self.tc_cache.failure_cache.contains(&key) {
             return true;
         }
@@ -1642,34 +1642,15 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
     }
 
     fn failure_cache_insert(&mut self, x: SPtr<'t>, y: SPtr<'t>) {
-        let (key, _swapped) = self.defeq_canon_key(x.core, y.core);
+        let (key, _) = self.defeq_canon_key_open(x, y);
         self.tc_cache.failure_cache.insert(key);
         self.defeq_open_store_neg(x, y);
     }
 
-    /// Compute bucket index for shift-invariant def_eq cache.
-    /// Returns None if both expressions are closed (use global cache instead).
-    fn defeq_bucket_idx(&self, x: SPtr<'t>, y: SPtr<'t>) -> Option<usize> {
-        let depth = self.depth() as u16;
-        let x_nlbv = self.ctx.sptr_nlbv(x);
-        let y_nlbv = self.ctx.sptr_nlbv(y);
-        if x_nlbv == 0 && y_nlbv == 0 {
-            return None;
-        }
-        if depth == 0 {
-            return None;
-        }
-        // Use u16::MAX for closed expressions so they don't constrain the bucket
-        // With SPtr, effective fvar_lb is sptr.shift
-        let x_lb = if x_nlbv > 0 { x.shift } else { u16::MAX };
-        let y_lb = if y_nlbv > 0 { y.shift } else { u16::MAX };
-        let min_lb = x_lb.min(y_lb);
-        Some((depth - 1 - min_lb) as usize)
-    }
 
     /// Pointer-based eq_cache lookup for closed expressions.
     fn eq_cache_contains(&mut self, x: SPtr<'t>, y: SPtr<'t>) -> bool {
-        let (key, _swapped) = self.defeq_canon_key(x.core, y.core);
+        let (key, _) = self.defeq_canon_key_open(x, y);
         if self.tc_cache.eq_cache.contains(&key) {
             self.ctx.trace.eq_cache_hits += 1;
             return true;
@@ -1677,14 +1658,34 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         false
     }
 
-    /// Pointer-based eq_cache insert for closed expressions.
     fn eq_cache_insert(&mut self, x: SPtr<'t>, y: SPtr<'t>) {
-        let (key, _swapped) = self.defeq_canon_key(x.core, y.core);
+        let (key, _) = self.defeq_canon_key_open(x, y);
         self.tc_cache.eq_cache.insert(key);
     }
 
-    /// Ordered pointer key for a pair of expressions.
-    fn defeq_canon_key(&self, x: ExprPtr<'t>, y: ExprPtr<'t>) -> ((ExprPtr<'t>, ExprPtr<'t>), bool) {
+    /// Normalize a pair of SPtrs for def_eq caching.
+    /// Subtracts the common min shift, returning normalized SPtrs and bucket index.
+    /// Returns None if both are closed (use global cache).
+    fn defeq_normalize_pair(&self, x: SPtr<'t>, y: SPtr<'t>) -> Option<(SPtr<'t>, SPtr<'t>, usize)> {
+        let x_nlbv = self.ctx.sptr_nlbv(x);
+        let y_nlbv = self.ctx.sptr_nlbv(y);
+        if x_nlbv == 0 && y_nlbv == 0 {
+            return None; // Both closed — use global cache
+        }
+        let depth = self.depth() as u16;
+        if depth == 0 { return None; }
+        let x_lb = if x_nlbv > 0 { x.shift } else { u16::MAX };
+        let y_lb = if y_nlbv > 0 { y.shift } else { u16::MAX };
+        let min_lb = x_lb.min(y_lb);
+        let bucket = (depth - 1 - min_lb) as usize;
+        // Subtract min_lb from both shifts (normalize)
+        let nx = if x_nlbv == 0 { x } else { SPtr::new(x.core, x.shift - min_lb) };
+        let ny = if y_nlbv == 0 { y } else { SPtr::new(y.core, y.shift - min_lb) };
+        Some((nx, ny, bucket))
+    }
+
+    /// Ordered key for a pair of SPtrs (includes shifts for correct caching).
+    fn defeq_canon_key_open(&self, x: SPtr<'t>, y: SPtr<'t>) -> ((SPtr<'t>, SPtr<'t>), bool) {
         if x.get_hash() <= y.get_hash() {
             ((x, y), false)
         } else {
@@ -1699,9 +1700,9 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         x: SPtr<'t>,
         y: SPtr<'t>,
     ) -> bool {
-        let Some(bucket_idx) = self.defeq_bucket_idx(x, y) else { return false };
-        let (key, _swapped) = self.defeq_canon_key(x.core, y.core);
-        let Some(&(_stored_a, _stored_b, _stored_depth)) = self.tc_cache.defeq_open_get(is_pos, bucket_idx, &key) else { return false };
+        let Some((nx, ny, bucket_idx)) = self.defeq_normalize_pair(x, y) else { return false };
+        let (key, _) = self.defeq_canon_key_open(nx, ny);
+        let Some(&(_, _, _)) = self.tc_cache.defeq_open_get(is_pos, bucket_idx, &key) else { return false };
         if is_pos { self.ctx.trace.defeq_open_pos_hits += 1; } else { self.ctx.trace.defeq_open_neg_hits += 1; }
         true
     }
@@ -1717,17 +1718,9 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
 
     fn defeq_open_store_impl(&mut self, is_pos: bool, x: SPtr<'t>, y: SPtr<'t>) {
         let depth = self.depth() as u16;
-        let x_nlbv = self.ctx.sptr_nlbv(x);
-        let y_nlbv = self.ctx.sptr_nlbv(y);
-        if x_nlbv == 0 && y_nlbv == 0 { return; }
-        if depth == 0 { return; }
-        // With SPtr, effective fvar_lb is sptr.shift
-        let x_lb = if x_nlbv > 0 { x.shift } else { u16::MAX };
-        let y_lb = if y_nlbv > 0 { y.shift } else { u16::MAX };
-        let min_lb = x_lb.min(y_lb);
-        let bucket_idx = (depth - 1 - min_lb) as usize;
-        let (key, swapped) = self.defeq_canon_key(x.core, y.core);
-        let (sx, sy) = if swapped { (y.core, x.core) } else { (x.core, y.core) };
+        let Some((nx, ny, bucket_idx)) = self.defeq_normalize_pair(x, y) else { return };
+        let (key, swapped) = self.defeq_canon_key_open(nx, ny);
+        let (sx, sy) = if swapped { (ny, nx) } else { (nx, ny) };
         if self.tc_cache.defeq_open_get(is_pos, bucket_idx, &key).map_or(true, |&(_, _, sd)| depth < sd) {
             self.tc_cache.defeq_open_insert(is_pos, bucket_idx, key, (sx, sy, depth));
         }
