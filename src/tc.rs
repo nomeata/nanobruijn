@@ -5,7 +5,7 @@ use crate::expr::Expr;
 use crate::level::Level;
 use crate::util::{
     nat_div, nat_mod, nat_sub, nat_gcd, nat_land, nat_lor,
-    nat_xor, nat_shr, nat_shl, AppArgs, ExportFile, LevelPtr,
+    nat_xor, nat_shr, nat_shl, AppArgs, ExportFile, ExprPtr, LevelPtr,
     LevelsPtr, NamePtr, SPtr, TcCache, TcCtx, StringPtr,
 };
 use std::error::Error;
@@ -284,10 +284,22 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
     /// Current binding depth.
     fn depth(&self) -> usize { self.tc_cache.depth() }
 
-    /// Cache bucket for an SPtr: 0 for closed expressions, depth for open.
+    /// Look up an SPtr in a depth-indexed cache, shifting the result to current depth.
+    /// Encapsulates: bucket = cache_bucket(x), get(bucket, x.core), sptr_shift(result, x.shift).
+    #[inline(always)]
+    fn sptr_cache_get(&self, x: SPtr<'t>,
+        get: impl FnOnce(&TcCache<'t>, usize, &ExprPtr<'t>) -> Option<SPtr<'t>>
+    ) -> Option<SPtr<'t>> {
+        let bucket = self.cache_bucket(x);
+        let stored = get(&self.tc_cache, bucket, &x.core)?;
+        Some(self.ctx.sptr_shift(stored, x.shift))
+    }
+
+    /// Cache bucket for an SPtr: 0 for closed, depth-shift for open.
+    /// This is the depth at which the core's variables are anchored.
     #[inline(always)]
     fn cache_bucket(&self, e: SPtr<'t>) -> usize {
-        if self.ctx.num_loose_bvars(e.core) == 0 { 0 } else { self.depth() }
+        if self.ctx.num_loose_bvars(e.core) == 0 { 0 } else { self.depth() - e.shift as usize }
     }
 
     /// Cross-shift depth-stacked UF: find representative SPtr at current depth.
@@ -305,16 +317,8 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                 }
             }
         }
-        // Open: bucket = depth - shift (where the core lives)
-        let bucket = self.depth() - x.shift as usize;
-        match self.tc_cache.uf_get(bucket, &x.core) {
-            Some(stored) => {
-                // stored.shift is delta. Recover rep at current depth:
-                // If rep is closed, sptr_shift returns it unchanged (shift irrelevant).
-                // If rep is open, sptr_shift adds x.shift.
-                let rep_at_depth = self.ctx.sptr_shift(stored, x.shift);
-                self.uf_find(rep_at_depth)
-            }
+        match self.sptr_cache_get(x, TcCache::uf_get) {
+            Some(rep) => self.uf_find(rep),
             None => x,
         }
     }
@@ -327,9 +331,8 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         let rx = self.uf_find(x);
         let ry = self.uf_find(y);
         if rx == ry { return; }
-        let depth = self.depth();
-        let bx = if self.ctx.num_loose_bvars(rx.core) == 0 { 0 } else { depth - rx.shift as usize };
-        let by = if self.ctx.num_loose_bvars(ry.core) == 0 { 0 } else { depth - ry.shift as usize };
+        let bx = self.cache_bucket(rx);
+        let by = self.cache_bucket(ry);
         // Store non-rep at its bucket, pointing to rep.
         // Rep = lower bucket (survives more pops).
         // delta: shift difference so that find recovers the rep's shift.
