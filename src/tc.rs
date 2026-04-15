@@ -1340,6 +1340,25 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         if let Some(easy) = self.def_eq_quick_check(x, y) {
             return easy
         }
+        // Peel common shift: if both sides share a non-zero shift, peel it and compare
+        // at the reduced depth. This handles the case where the same expression has
+        // different SPtr representations (shift baked-in vs shift outside).
+        {
+            let x_s = if self.ctx.num_loose_bvars(x.core) > 0 { x.shift } else { 0 };
+            let y_s = if self.ctx.num_loose_bvars(y.core) > 0 { y.shift } else { 0 };
+            let common = x_s.min(y_s);
+            if common > 0 {
+                let nx = SPtr::new(x.core, x.shift - common);
+                let ny = SPtr::new(y.core, y.shift - common);
+                let depth = self.depth();
+                debug_assert!((common as usize) <= depth);
+                let inner_depth = depth - common as usize;
+                let saved = self.tc_cache.split_off(inner_depth);
+                let r = self.def_eq(nx, ny);
+                self.tc_cache.extend(saved);
+                return r;
+            }
+        }
         self.ctx.trace.def_eq_inner_calls += 1;
 
         // Speculative app congruence: if both sides are applications, try comparing
@@ -1608,6 +1627,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         if x == y {
             return Some(true)
         }
+        // Shift normalization: nothing here — handled by whnf peel
         if self.eq_cache_contains(x, y) {
             return Some(true)
         }
