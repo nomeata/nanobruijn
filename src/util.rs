@@ -1914,6 +1914,10 @@ pub struct Config {
     #[serde(default)]
     pub skip_declarations: usize,
 
+    /// Only check declarations whose name contains this substring. For debugging.
+    #[serde(default)]
+    pub declaration_filter: Option<String>,
+
     /// Per-declaration timeout in seconds (0 = unlimited). Declarations exceeding
     /// this timeout are skipped with a warning.
     #[serde(default)]

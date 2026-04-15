@@ -174,6 +174,10 @@ impl<'p> ExportFile<'p> {
                 break;
             }
             if i < skip_decl { continue; }
+            if let Some(ref filter) = self.config.declaration_filter {
+                let name = self.with_ctx(|ctx| ctx.name_to_string(declar.info().name));
+                if !name.contains(filter.as_str()) { continue; }
+            }
             let decl_start = std::time::Instant::now();
             if i % 1000 == 0 || (skip_decl > 0 && i == skip_decl) {
                 let elapsed = decl_start.duration_since(start).as_millis();
