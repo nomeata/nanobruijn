@@ -167,37 +167,42 @@ impl<K: Eq + std::hash::Hash, V> LazyMap<K, V> {
     }
 }
 
-/// A single depth frame: one local context entry plus all per-depth caches.
-/// Caches are keyed by ExprPtr (pointer identity, enabled by hash-consing).
-pub(crate) struct DepthFrame<'t> {
-    /// The local binding: (type, optional value for let-bindings).
-    /// Types are SPtrs valid at the depth where the binder was entered.
-    pub(crate) local: (SPtr<'t>, Option<SPtr<'t>>),
-    /// Per-depth whnf cache: ExprPtr → result.
-    pub(crate) whnf_cache: LazyMap<ExprPtr<'t>, SPtr<'t>>,
-    /// Per-depth whnf_no_unfolding cache.
-    pub(crate) whnf_no_unfolding_cache: LazyMap<ExprPtr<'t>, SPtr<'t>>,
-    /// Per-depth infer cache (check mode): ExprPtr → result.
-    pub(crate) infer_cache_check: LazyMap<ExprPtr<'t>, SPtr<'t>>,
-    /// Per-depth infer cache (no-check mode): ExprPtr → result.
-    pub(crate) infer_cache_no_check: LazyMap<ExprPtr<'t>, SPtr<'t>>,
-    /// Per-depth positive def_eq cache for open expressions.
-    pub(crate) defeq_pos_open: LazyMap<(SPtr<'t>, SPtr<'t>), (SPtr<'t>, SPtr<'t>, u16)>,
-    /// Per-depth negative def_eq cache for open expressions.
-    pub(crate) defeq_neg_open: LazyMap<(SPtr<'t>, SPtr<'t>), (SPtr<'t>, SPtr<'t>, u16)>,
+/// Depth-indexed cache: base bucket (index 0) for closed expressions,
+/// per-depth buckets for open expressions. Buckets are lazily allocated.
+/// Automatically handles push (new empty bucket) and pop (discard bucket).
+pub(crate) struct DepthCache<K: Eq + std::hash::Hash, V> {
+    base: LazyMap<K, V>,
+    per_depth: Vec<LazyMap<K, V>>,
 }
 
-impl<'t> DepthFrame<'t> {
-    pub(crate) fn new(ty: SPtr<'t>, val: Option<SPtr<'t>>) -> Self {
-        DepthFrame {
-            local: (ty, val),
-            whnf_cache: LazyMap::new(),
-            whnf_no_unfolding_cache: LazyMap::new(),
-            infer_cache_check: LazyMap::new(),
-            infer_cache_no_check: LazyMap::new(),
-            defeq_pos_open: LazyMap::new(),
-            defeq_neg_open: LazyMap::new(),
-        }
+impl<K: Eq + std::hash::Hash, V> DepthCache<K, V> {
+    pub(crate) fn new() -> Self {
+        DepthCache { base: LazyMap::new(), per_depth: Vec::new() }
+    }
+
+    /// Get from bucket. Bucket 0 = base (closed), bucket k>0 = per_depth[k-1].
+    pub(crate) fn get(&self, bucket: usize, key: &K) -> Option<&V> {
+        if bucket == 0 { self.base.get(key) }
+        else { self.per_depth.get(bucket - 1)?.get(key) }
+    }
+
+    /// Insert into bucket. Bucket 0 = base (closed), bucket k>0 = per_depth[k-1].
+    pub(crate) fn insert(&mut self, bucket: usize, key: K, value: V) {
+        if bucket == 0 { self.base.insert(key, value); }
+        else if let Some(frame) = self.per_depth.get_mut(bucket - 1) { frame.insert(key, value); }
+    }
+
+    pub(crate) fn push(&mut self) { self.per_depth.push(LazyMap::new()); }
+    pub(crate) fn pop(&mut self) { self.per_depth.pop(); }
+    pub(crate) fn depth(&self) -> usize { self.per_depth.len() }
+    pub(crate) fn split_off(&mut self, at: usize) -> Vec<LazyMap<K, V>> { self.per_depth.split_off(at) }
+    pub(crate) fn extend(&mut self, saved: Vec<LazyMap<K, V>>) { self.per_depth.extend(saved); }
+}
+
+impl<K: Eq + std::hash::Hash + Copy, V: Copy> DepthCache<K, V> {
+    /// Get with Copy (avoids borrow issues).
+    pub(crate) fn get_copied(&self, bucket: usize, key: &K) -> Option<V> {
+        self.get(bucket, key).copied()
     }
 }
 
@@ -1727,164 +1732,145 @@ pub struct NameCache<'p> {
     pub(crate) list_cons: Option<NamePtr<'p>>,
 }
 
+/// Saved frames from a split_off operation, for later restoration.
+pub(crate) struct SplitFrames<'t> {
+    locals: Vec<(SPtr<'t>, Option<SPtr<'t>>)>,
+    whnf: Vec<LazyMap<ExprPtr<'t>, SPtr<'t>>>,
+    wnu: Vec<LazyMap<ExprPtr<'t>, SPtr<'t>>>,
+    infer_check: Vec<LazyMap<ExprPtr<'t>, SPtr<'t>>>,
+    infer_no_check: Vec<LazyMap<ExprPtr<'t>, SPtr<'t>>>,
+    defeq_pos: Vec<LazyMap<(SPtr<'t>, SPtr<'t>), (SPtr<'t>, SPtr<'t>, u16)>>,
+    defeq_neg: Vec<LazyMap<(SPtr<'t>, SPtr<'t>), (SPtr<'t>, SPtr<'t>, u16)>>,
+}
+
 pub(crate) struct TcCache<'t> {
-    // === Base buckets (bucket 0): closed expressions, never evicted ===
-    /// WHNF cache for closed expressions: ExprPtr → result.
-    pub(crate) whnf_cache_base: FxHashMap<ExprPtr<'t>, SPtr<'t>>,
-    /// whnf_no_unfolding cache for closed expressions.
-    pub(crate) wnu_cache_base: FxHashMap<ExprPtr<'t>, SPtr<'t>>,
-    /// Infer cache (check mode) for closed expressions: ExprPtr → result.
-    pub(crate) infer_cache_check_base: FxHashMap<ExprPtr<'t>, SPtr<'t>>,
-    /// Infer cache (no-check mode) for closed expressions: ExprPtr → result.
-    pub(crate) infer_cache_no_check_base: FxHashMap<ExprPtr<'t>, SPtr<'t>>,
-    // === Flat caches (not depth-stacked) ===
-    /// Positive def_eq cache for closed expressions (shift-normalized SPtr pairs).
-    pub(crate) eq_cache: FxHashSet<(SPtr<'t>, SPtr<'t>)>,
-    /// Negative def_eq cache for closed expressions (shift-normalized SPtr pairs).
-    pub(crate) failure_cache: FxHashSet<(SPtr<'t>, SPtr<'t>)>,
-    /// Strong reduction cache (library/inspection feature).
-    pub(crate) strong_cache: UniqueHashMap<(ExprPtr<'t>, bool, bool), ExprPtr<'t>>,
-    /// Pointer-based UnionFind for transitive def_eq caching.
+    /// Depth-indexed caches (base bucket for closed, per-depth for open).
+    pub(crate) whnf_cache: DepthCache<ExprPtr<'t>, SPtr<'t>>,
+    pub(crate) wnu_cache: DepthCache<ExprPtr<'t>, SPtr<'t>>,
+    pub(crate) infer_cache_check: DepthCache<ExprPtr<'t>, SPtr<'t>>,
+    pub(crate) infer_cache_no_check: DepthCache<ExprPtr<'t>, SPtr<'t>>,
+    pub(crate) defeq_pos: DepthCache<(SPtr<'t>, SPtr<'t>), (SPtr<'t>, SPtr<'t>, u16)>,
+    pub(crate) defeq_neg: DepthCache<(SPtr<'t>, SPtr<'t>), (SPtr<'t>, SPtr<'t>, u16)>,
+    /// UnionFind for transitive def_eq (closed expressions only).
     pub(crate) eq_cache_uf: UnionFind<ExprPtr<'t>>,
-    // === Per-depth frames: local context + open-expression caches ===
-    /// Stack of depth frames. Frame at index i corresponds to binder depth i+1.
-    /// For caches with a base bucket (whnf, infer): bucket_idx k > 0 maps to frame[k-1].
-    /// For caches without base bucket (defeq): bucket_idx k maps to frame[k].
-    pub(crate) frames: Vec<DepthFrame<'t>>,
+    /// Strong reduction cache (global, library feature).
+    pub(crate) strong_cache: UniqueHashMap<(ExprPtr<'t>, bool, bool), ExprPtr<'t>>,
+    /// Local bindings: (type, optional let-value). Index i = depth i+1.
+    pub(crate) locals: Vec<(SPtr<'t>, Option<SPtr<'t>>)>,
 }
 
 impl<'t> TcCache<'t> {
     pub(crate) fn new() -> Self {
         Self {
-            whnf_cache_base: new_fx_hash_map(),
-            wnu_cache_base: new_fx_hash_map(),
-            infer_cache_check_base: new_fx_hash_map(),
-            infer_cache_no_check_base: new_fx_hash_map(),
-            eq_cache: new_fx_hash_set(),
-            failure_cache: new_fx_hash_set(),
-            strong_cache: new_unique_hash_map(),
+            whnf_cache: DepthCache::new(),
+            wnu_cache: DepthCache::new(),
+            infer_cache_check: DepthCache::new(),
+            infer_cache_no_check: DepthCache::new(),
+            defeq_pos: DepthCache::new(),
+            defeq_neg: DepthCache::new(),
             eq_cache_uf: UnionFind::new(),
-            frames: Vec::new(),
+            strong_cache: new_unique_hash_map(),
+            locals: Vec::new(),
         }
     }
 
     pub(crate) fn clear(&mut self) {
-        self.whnf_cache_base.clear();
-        self.wnu_cache_base.clear();
-        self.infer_cache_check_base.clear();
-        self.infer_cache_no_check_base.clear();
-        self.eq_cache.clear();
-        self.failure_cache.clear();
-        self.strong_cache.clear();
+        self.whnf_cache = DepthCache::new();
+        self.wnu_cache = DepthCache::new();
+        self.infer_cache_check = DepthCache::new();
+        self.infer_cache_no_check = DepthCache::new();
+        self.defeq_pos = DepthCache::new();
+        self.defeq_neg = DepthCache::new();
         self.eq_cache_uf.clear();
-        self.frames.clear();
+        self.strong_cache.clear();
+        self.locals.clear();
     }
 
     /// Current binding depth (number of binders entered).
-    pub(crate) fn depth(&self) -> usize { self.frames.len() }
+    pub(crate) fn depth(&self) -> usize { self.locals.len() }
 
     /// Push a lambda/pi binder.
     pub(crate) fn push_local(&mut self, ty: SPtr<'t>) {
-        self.frames.push(DepthFrame::new(ty, None));
+        self.locals.push((ty, None));
+        self.whnf_cache.push();
+        self.wnu_cache.push();
+        self.infer_cache_check.push();
+        self.infer_cache_no_check.push();
+        self.defeq_pos.push();
+        self.defeq_neg.push();
     }
 
     /// Push a let-binding.
     pub(crate) fn push_local_let(&mut self, ty: SPtr<'t>, val: SPtr<'t>) {
-        self.frames.push(DepthFrame::new(ty, Some(val)));
+        self.locals.push((ty, Some(val)));
+        self.whnf_cache.push();
+        self.wnu_cache.push();
+        self.infer_cache_check.push();
+        self.infer_cache_no_check.push();
+        self.defeq_pos.push();
+        self.defeq_neg.push();
     }
 
     /// Pop the most recent binder.
     pub(crate) fn pop_local(&mut self) {
-        self.frames.pop().expect("pop_local: empty context");
+        self.locals.pop().expect("pop_local: empty context");
+        self.whnf_cache.pop();
+        self.wnu_cache.pop();
+        self.infer_cache_check.pop();
+        self.infer_cache_no_check.pop();
+        self.defeq_pos.pop();
+        self.defeq_neg.pop();
     }
 
     /// Restore to a previous depth, discarding deeper frames.
     pub(crate) fn restore_depth(&mut self, depth: usize) {
-        self.frames.truncate(depth);
+        self.locals.truncate(depth);
+        while self.whnf_cache.depth() > depth { self.whnf_cache.pop(); }
+        while self.wnu_cache.depth() > depth { self.wnu_cache.pop(); }
+        while self.infer_cache_check.depth() > depth { self.infer_cache_check.pop(); }
+        while self.infer_cache_no_check.depth() > depth { self.infer_cache_no_check.pop(); }
+        while self.defeq_pos.depth() > depth { self.defeq_pos.pop(); }
+        while self.defeq_neg.depth() > depth { self.defeq_neg.pop(); }
     }
 
     /// Temporarily split off frames above `new_depth`, returning them.
-    pub(crate) fn split_off(&mut self, new_depth: usize) -> Vec<DepthFrame<'t>> {
-        self.frames.split_off(new_depth)
+    pub(crate) fn split_off(&mut self, new_depth: usize) -> SplitFrames<'t> {
+        SplitFrames {
+            locals: self.locals.split_off(new_depth),
+            whnf: self.whnf_cache.split_off(new_depth),
+            wnu: self.wnu_cache.split_off(new_depth),
+            infer_check: self.infer_cache_check.split_off(new_depth),
+            infer_no_check: self.infer_cache_no_check.split_off(new_depth),
+            defeq_pos: self.defeq_pos.split_off(new_depth),
+            defeq_neg: self.defeq_neg.split_off(new_depth),
+        }
     }
 
     /// Restore previously split-off frames.
-    pub(crate) fn extend(&mut self, saved: Vec<DepthFrame<'t>>) {
-        self.frames.extend(saved);
+    pub(crate) fn extend(&mut self, saved: SplitFrames<'t>) {
+        self.locals.extend(saved.locals);
+        self.whnf_cache.extend(saved.whnf);
+        self.wnu_cache.extend(saved.wnu);
+        self.infer_cache_check.extend(saved.infer_check);
+        self.infer_cache_no_check.extend(saved.infer_no_check);
+        self.defeq_pos.extend(saved.defeq_pos);
+        self.defeq_neg.extend(saved.defeq_neg);
     }
 
     /// Look up a local binding by de Bruijn index (0 = most recent).
     pub(crate) fn local_type(&self, dbj_idx: u16) -> SPtr<'t> {
-        let depth = self.frames.len();
+        let depth = self.locals.len();
         assert!(dbj_idx < depth as u16, "local_type: dbj_idx={} >= depth={} (free var reached type lookup)", dbj_idx, depth);
-        self.frames[depth - 1 - dbj_idx as usize].local.0
+        self.locals[depth - 1 - dbj_idx as usize].0
     }
 
     /// Look up the value of a let-bound variable by de Bruijn index.
     pub(crate) fn local_value(&self, dbj_idx: u16) -> Option<SPtr<'t>> {
-        let depth = self.frames.len();
+        let depth = self.locals.len();
         if dbj_idx >= depth as u16 {
             return None; // Free variable — not in local context
         }
-        self.frames[depth - 1 - dbj_idx as usize].local.1
-    }
-
-    // === Pointer-based cache accessors (nanoda approach) ===
-    // Hash-consing guarantees: same expression = same pointer = same cache key.
-    // For whnf/infer/wnu caches: bucket 0 = base, bucket k>0 = frames[k-1].
-    // For defeq caches: bucket k = frames[k] (no base bucket).
-
-    pub(crate) fn whnf_cache_get(&self, bucket_idx: usize, key: &ExprPtr<'t>) -> Option<SPtr<'t>> {
-        if bucket_idx == 0 { self.whnf_cache_base.get(key).copied() }
-        else { self.frames.get(bucket_idx - 1)?.whnf_cache.get(key).copied() }
-    }
-
-    pub(crate) fn whnf_cache_insert(&mut self, bucket_idx: usize, key: ExprPtr<'t>, val: SPtr<'t>) {
-        if bucket_idx == 0 { self.whnf_cache_base.insert(key, val); }
-        else if let Some(f) = self.frames.get_mut(bucket_idx - 1) { f.whnf_cache.insert(key, val); }
-    }
-
-    pub(crate) fn wnu_cache_get(&self, bucket_idx: usize, key: &ExprPtr<'t>) -> Option<SPtr<'t>> {
-        if bucket_idx == 0 { self.wnu_cache_base.get(key).copied() }
-        else { self.frames.get(bucket_idx - 1)?.whnf_no_unfolding_cache.get(key).copied() }
-    }
-
-    pub(crate) fn wnu_cache_insert(&mut self, bucket_idx: usize, key: ExprPtr<'t>, val: SPtr<'t>) {
-        if bucket_idx == 0 { self.wnu_cache_base.insert(key, val); }
-        else if let Some(f) = self.frames.get_mut(bucket_idx - 1) { f.whnf_no_unfolding_cache.insert(key, val); }
-    }
-
-    pub(crate) fn infer_cache_get(&self, bucket_idx: usize, key: &ExprPtr<'t>, is_check: bool) -> Option<SPtr<'t>> {
-        if bucket_idx == 0 {
-            if is_check { self.infer_cache_check_base.get(key).copied() }
-            else { self.infer_cache_no_check_base.get(key).copied() }
-        } else {
-            let f = self.frames.get(bucket_idx - 1)?;
-            if is_check { f.infer_cache_check.get(key).copied() }
-            else { f.infer_cache_no_check.get(key).copied() }
-        }
-    }
-
-    pub(crate) fn infer_cache_insert(&mut self, bucket_idx: usize, key: ExprPtr<'t>, val: SPtr<'t>, is_check: bool) {
-        if bucket_idx == 0 {
-            if is_check { self.infer_cache_check_base.insert(key, val); }
-            else { self.infer_cache_no_check_base.insert(key, val); }
-        } else if let Some(f) = self.frames.get_mut(bucket_idx - 1) {
-            if is_check { f.infer_cache_check.insert(key, val); }
-            else { f.infer_cache_no_check.insert(key, val); }
-        }
-    }
-
-    pub(crate) fn defeq_open_get(&self, is_pos: bool, bucket_idx: usize, key: &(SPtr<'t>, SPtr<'t>)) -> Option<&(SPtr<'t>, SPtr<'t>, u16)> {
-        let frame = self.frames.get(bucket_idx)?;
-        if is_pos { frame.defeq_pos_open.get(key) } else { frame.defeq_neg_open.get(key) }
-    }
-
-    pub(crate) fn defeq_open_insert(&mut self, is_pos: bool, bucket_idx: usize, key: (SPtr<'t>, SPtr<'t>), val: (SPtr<'t>, SPtr<'t>, u16)) {
-        if let Some(frame) = self.frames.get_mut(bucket_idx) {
-            if is_pos { frame.defeq_pos_open.insert(key, val); }
-            else { frame.defeq_neg_open.insert(key, val); }
-        }
+        self.locals[depth - 1 - dbj_idx as usize].1
     }
 }
 
