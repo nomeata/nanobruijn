@@ -219,16 +219,17 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
     #[inline(always)]
     fn inst_aux_quick_sptr(&mut self, child: SPtr<'t>, substs: &[SPtr<'t>], offset: u16, shift_down: bool, sh_amt: i16, sh_cut: u16) -> SPtr<'t> {
         if child.shift == 0 {
-            // No child shift to compose
             return self.inst_aux_quick(child.core, substs, offset, shift_down, sh_amt, sh_cut);
         }
+        // If child's core is closed, substitution doesn't affect it.
+        // Return child unchanged — preserving its shift for OSNF consistency.
+        // (In the old code, Shift(closed, k) had nlbv=k and wouldn't be dropped.)
+        if self.num_loose_bvars(child.core) == 0 {
+            return child;
+        }
         if sh_cut == 0 || child.shift >= sh_cut {
-            // Clean composition: child.shift >= sh_cut means all child vars are past the cutoff.
-            // Compose into: (sh_amt + child.shift, sh_cut) for sh_cut==0,
-            // or (sh_amt + child.shift, 0) for child.shift >= sh_cut.
             let new_sh_amt = sh_amt + child.shift as i16;
-            let new_sh_cut = if sh_cut == 0 { 0 } else { 0 }; // both cases: cutoff becomes 0
-            return self.inst_aux_quick(child.core, substs, offset, shift_down, new_sh_amt, new_sh_cut);
+            return self.inst_aux_quick(child.core, substs, offset, shift_down, new_sh_amt, 0);
         }
         // Mismatch: 0 < child.shift < sh_cut. Can't compose into a single (sh_amt, sh_cut).
         // Materialize the child's view, then process each child of the viewed expression.
