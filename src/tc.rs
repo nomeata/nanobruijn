@@ -1257,9 +1257,8 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
     /// Never calls def_eq recursively.
     fn cheap_eq(&mut self, x: SPtr<'t>, y: SPtr<'t>) -> bool {
         x == y
-            || self.eq_cache_contains(x, y)
-            || (x.shift == y.shift && self.tc_cache.eq_cache_uf.check_uf_eq(x.core, y.core))
-            || self.defeq_open_lookup(true, x, y)
+            || self.eq_cache_contains(x, y)  // checks flat (closed) + defeq_open (open)
+            || (self.ctx.sptr_nlbv(x) == 0 && self.ctx.sptr_nlbv(y) == 0 && self.tc_cache.eq_cache_uf.check_uf_eq(x.core, y.core))
     }
 
     fn def_eq_app(&mut self, x: SPtr<'t>, y: SPtr<'t>) -> bool {
@@ -1293,13 +1292,9 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
 
     pub fn assert_def_eq(&mut self, u: SPtr<'t>, v: SPtr<'t>) {
         if !self.def_eq(u, v) {
-            eprintln!("  assert_def_eq FAILED:");
-            eprintln!("    u = {} (ptr={:?}@{} shift={})", self.ctx.expr_desc(u.core, 15), u.core.dag_marker(), u.core.idx(), u.shift);
-            eprintln!("    v = {} (ptr={:?}@{} shift={})", self.ctx.expr_desc(v.core, 15), v.core.dag_marker(), v.core.idx(), v.shift);
-            let u_whnf = self.whnf(u);
-            let v_whnf = self.whnf(v);
-            eprintln!("    u_whnf = {} (shift={})", self.ctx.expr_desc(u_whnf.core, 15), u_whnf.shift);
-            eprintln!("    v_whnf = {} (shift={})", self.ctx.expr_desc(v_whnf.core, 15), v_whnf.shift);
+            eprintln!("  assert_def_eq FAILED at depth {}:", self.depth());
+            eprintln!("    u = {} (shift={} nlbv={})", self.ctx.expr_desc(u.core, 20), u.shift, self.ctx.num_loose_bvars(u.core));
+            eprintln!("    v = {} (shift={} nlbv={})", self.ctx.expr_desc(v.core, 20), v.shift, self.ctx.num_loose_bvars(v.core));
             self.find_diff(u, v, 0);
             panic!("assert_def_eq failed");
         }
@@ -1371,7 +1366,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                 // Cache the result for future lookups
                 self.eq_cache_insert(x, y);
                 self.defeq_open_store_pos(x, y);
-                if x.shift == y.shift { self.tc_cache.eq_cache_uf.union(x.core, y.core); }
+                if self.ctx.sptr_nlbv(x) == 0 && self.ctx.sptr_nlbv(y) == 0 { self.tc_cache.eq_cache_uf.union(x.core, y.core); }
                 return true;
             }
         }
@@ -1417,8 +1412,8 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                 self.eq_cache_insert(x, y);
                 self.eq_cache_insert(x_n, y_n);
                 self.defeq_open_store_pos(x, y);
-                if x.shift == y.shift { self.tc_cache.eq_cache_uf.union(x.core, y.core); }
-                self.tc_cache.eq_cache_uf.union(x_n.core, y_n.core);
+                if self.ctx.sptr_nlbv(x) == 0 && self.ctx.sptr_nlbv(y) == 0 { self.tc_cache.eq_cache_uf.union(x.core, y.core); }
+                if self.ctx.sptr_nlbv(x_n) == 0 && self.ctx.sptr_nlbv(y_n) == 0 { self.tc_cache.eq_cache_uf.union(x_n.core, y_n.core); }
                 return true;
             }
         }
@@ -1452,7 +1447,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         if result {
             self.eq_cache_insert(x, y);
             self.defeq_open_store_pos(x, y);
-            self.tc_cache.eq_cache_uf.union(x.core, y.core);
+            if self.ctx.sptr_nlbv(x) == 0 && self.ctx.sptr_nlbv(y) == 0 { self.tc_cache.eq_cache_uf.union(x.core, y.core); }
         }
         result
     }
@@ -1632,17 +1627,13 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         if x == y {
             return Some(true)
         }
+        // eq_cache_contains checks flat cache (closed) + defeq_open (open)
         if self.eq_cache_contains(x, y) {
             return Some(true)
         }
-        // Transitive pointer-based UnionFind: if A=B and B=C were proven,
-        // finds A=C in O(alpha(n)) without needing a direct cache entry.
-        if x.shift == y.shift && self.tc_cache.eq_cache_uf.check_uf_eq(x.core, y.core) {
+        // Transitive pointer-based UnionFind for closed expressions only.
+        if self.ctx.sptr_nlbv(x) == 0 && self.ctx.sptr_nlbv(y) == 0 && self.tc_cache.eq_cache_uf.check_uf_eq(x.core, y.core) {
             self.ctx.trace.eq_cache_uf_hits += 1;
-            return Some(true)
-        }
-        // Shift-invariant positive def_eq cache for open expressions
-        if self.defeq_open_lookup(true, x, y) {
             return Some(true)
         }
         if let Some(r) = self.def_eq_sort(x, y) {
@@ -1655,9 +1646,12 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
     }
 
     fn failure_cache_contains(&mut self, x: SPtr<'t>, y: SPtr<'t>) -> bool {
-        let (key, _) = self.defeq_canon_key_open(x, y);
-        if self.tc_cache.failure_cache.contains(&key) {
-            return true;
+        // Closed pairs: global flat cache. Open pairs: depth-stacked defeq_open.
+        if self.ctx.sptr_nlbv(x) == 0 && self.ctx.sptr_nlbv(y) == 0 {
+            let (key, _) = self.defeq_canon_key_open(x, y);
+            if self.tc_cache.failure_cache.contains(&key) {
+                return true;
+            }
         }
         if self.defeq_open_lookup(false, x, y) {
             return true;
@@ -1666,25 +1660,36 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
     }
 
     fn failure_cache_insert(&mut self, x: SPtr<'t>, y: SPtr<'t>) {
-        let (key, _) = self.defeq_canon_key_open(x, y);
-        self.tc_cache.failure_cache.insert(key);
+        if self.ctx.sptr_nlbv(x) == 0 && self.ctx.sptr_nlbv(y) == 0 {
+            let (key, _) = self.defeq_canon_key_open(x, y);
+            self.tc_cache.failure_cache.insert(key);
+        }
         self.defeq_open_store_neg(x, y);
     }
 
 
-    /// Pointer-based eq_cache lookup for closed expressions.
+    /// Pointer-based eq_cache: closed pairs use global flat cache,
+    /// open pairs use depth-stacked defeq_open.
     fn eq_cache_contains(&mut self, x: SPtr<'t>, y: SPtr<'t>) -> bool {
-        let (key, _) = self.defeq_canon_key_open(x, y);
-        if self.tc_cache.eq_cache.contains(&key) {
-            self.ctx.trace.eq_cache_hits += 1;
+        if self.ctx.sptr_nlbv(x) == 0 && self.ctx.sptr_nlbv(y) == 0 {
+            let (key, _) = self.defeq_canon_key_open(x, y);
+            if self.tc_cache.eq_cache.contains(&key) {
+                self.ctx.trace.eq_cache_hits += 1;
+                return true;
+            }
+        }
+        if self.defeq_open_lookup(true, x, y) {
             return true;
         }
         false
     }
 
     fn eq_cache_insert(&mut self, x: SPtr<'t>, y: SPtr<'t>) {
-        let (key, _) = self.defeq_canon_key_open(x, y);
-        self.tc_cache.eq_cache.insert(key);
+        if self.ctx.sptr_nlbv(x) == 0 && self.ctx.sptr_nlbv(y) == 0 {
+            let (key, _) = self.defeq_canon_key_open(x, y);
+            self.tc_cache.eq_cache.insert(key);
+        }
+        self.defeq_open_store_pos(x, y);
     }
 
     /// Normalize a pair of SPtrs for def_eq caching.

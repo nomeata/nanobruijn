@@ -197,7 +197,6 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
             return e
         }
         // SPtr fast path: if e.shift >= n_substs, all substituted variables are dead.
-        // With SPtr, the shift can be adjusted arithmetically.
         let n_substs = substs.len() as u16;
         if e.shift >= n_substs {
             return SPtr::new(e.core, e.shift - n_substs);
@@ -221,28 +220,11 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         if child.shift == 0 {
             return self.inst_aux_quick(child.core, substs, offset, shift_down, sh_amt, sh_cut);
         }
-        // If child's core is closed, inst/subst doesn't affect it.
-        // But we must still apply (sh_amt, sh_cut) to the shift itself.
-        // In the old code, Shift(closed, k) had nlbv = k, so it went through
-        // the normal inst_aux path which would compute shift(k, sh_amt, sh_cut)
-        // and then shift_down if needed.
-        if self.num_loose_bvars(child.core) == 0 {
-            // child represents shift(closed_expr, child.shift).
-            // Apply (sh_amt, sh_cut): if child.shift >= sh_cut, result shift = child.shift + sh_amt
-            // Then shift_down: result shift -= n_substs (if shift_down and result shift >= offset)
-            let effective_shift = if sh_amt != 0 && child.shift >= sh_cut {
-                (child.shift as i16 + sh_amt) as u16
-            } else {
-                child.shift
-            };
-            let final_shift = if shift_down && effective_shift >= offset {
-                let n_substs = substs.len() as u16;
-                effective_shift - n_substs
-            } else {
-                effective_shift
-            };
-            return SPtr::unshifted(child.core); // closed: shift is irrelevant
-        }
+        // By the closed-no-shift invariant, child.shift > 0 implies nlbv(core) > 0.
+        debug_assert!(self.num_loose_bvars(child.core) > 0,
+            "closed-no-shift invariant violated in inst_aux_quick_sptr: shift={} nlbv=0", child.shift);
+        // Compose child.shift with (sh_amt, sh_cut):
+        // If sh_cut == 0, or child.shift >= sh_cut, clean composition possible.
         if sh_cut == 0 || child.shift >= sh_cut {
             let new_sh_amt = sh_amt + child.shift as i16;
             return self.inst_aux_quick(child.core, substs, offset, shift_down, new_sh_amt, 0);

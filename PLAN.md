@@ -507,6 +507,17 @@ cascading cache misses → repeated whnf/infer → more expression creation → 
   - Core compound → fvar_lb = 0
   So fvar_lb could be removed as a stored field, shrinking Expr.
 
+- **Depth-stacked UF for def_eq**: The union-find in def_eq is currently restricted to
+  closed expressions only (non-depth-stacked UF is unsound for open expressions — unions
+  from one depth are invalid at another). Investigate a depth-stacked UF where unions are
+  associated with a depth and invalidated on pop. This would recover the performance
+  benefit of transitive equality for open expressions while staying correct.
+
+- **MAXINT shift for closed expressions**: Use `u16::MAX` as the SPtr shift to indicate
+  "closed expression". This makes closed detection O(1) from the shift alone (check
+  `shift == u16::MAX`), and `min` operations naturally work (`min(MAX, k) = k`).
+  Requires careful handling in shift arithmetic to avoid overflow.
+
 - **Fill in Theory.lean sorry's**: OSNF uniqueness, erase preservation
 - **Remove remaining dead code**: thread_local profiling counters, dead locally-nameless
   code (Local variant, FVarId, abstr, etc.), stale TcTrace fields (verify_fail counters)
@@ -519,53 +530,35 @@ cascading cache misses → repeated whnf/infer → more expression creation → 
 - [Type Checking in Lean 4](https://ammkrn.github.io/type_checking_in_lean4/title_page.html)
 - [Lean Type Theory](https://github.com/digama0/lean-type-theory)
 
-## SPtr Refactor Status (2026-04-14)
+## SPtr Refactor Status (2026-04-15)
 
 **Branch**: `joachim/sptr-refactor`
 
 **Completed**:
-- SPtr type: `(ExprPtr, u16)` — shift-in-pointer
+- SPtr type: `(CorePtr, u16)` — shift-in-pointer, no Shift DAG nodes
 - Expr enum: Shift variant removed, fvar_lb removed, children changed to SPtr
 - Only Var(0) in DAG; de Bruijn index carried in SPtr.shift
 - mk_app/mk_pi/mk_lambda/mk_let/mk_proj extract min_shift for OSNF
-- view_sptr replaces view_expr
+- view_sptr replaces view_expr (full traversal for binder bodies)
 - unfold_apps returns (SPtr, SmallVec<[SPtr; 8]>)
-- All caches (whnf, wnu, infer) store SPtr values
+- All caches store SPtr values; defeq caches use SPtr keys
 - Local context stores SPtr types
 - Parser builds SPtr children, only Var(0) in DAG
-- All files compile with 0 errors
+- inst/inst_beta SPtr fast paths for dead substitutions
 
-**Test status**: 73/126 tutorial tests pass
+**Test status**:
+- Tutorial: 126/126
+- Init: 0 errors, 238B instructions (+0.8% vs 236B baseline)
+- Mathlib: 0 panics (pending perf verification)
 
-**Known issues**:
-- inst_beta/inst_aux shift composition under nested binders is incorrect
-  for some cases (53 test failures, mostly inductive types)
-- The `inst_aux_quick_sptr` function's mismatch case (0 < child.shift < sh_cut)
-  falls back to view_sptr materialization, which may produce wrong results
-- push_shift_down is stubbed with todo\!() — needs proper SPtr implementation
-
-### SPtr Refactor Update (2026-04-14, later)
-
-**Test status**: 108/126 tutorial tests pass (86%)
-
-**Key fixes applied**:
-1. abstr_aux_sptr: offset must be adjusted by child.shift when recursing into core
-   (the core is at a lower binder depth, so Var indices need compensation)
-2. All caches (whnf, wnu, infer, abstr) changed to store SPtr instead of ExprPtr
-3. DepthFrame local context stores SPtr for correct shift tracking
-4. abstr_pi/apply_lambda/telescopes take body: SPtr
-5. binder_min_shift uses saturating_sub(1) for body contribution
-6. Peel mechanism uses saturating_sub for shift > depth cases
-
-**Remaining 18 failures**:
-- **Shift overflow** (8 tests: proofIrrelevance, eta, quotLift): whnf/def_eq loop
-  creates App chains with unbounded shift accumulation. Root cause: when whnf
-  unfolds a definition and the result is shifted, it creates new App nodes whose
-  children have increasing shifts. Each unfold-and-reapply cycle adds to the shift.
-  Need to investigate whether the whnf/inst interaction is creating non-terminating
-  shift growth.
-- **Nested inductives** (3 tests: rbTree): complex nested inductive handling
-- **Recursor reductions** (4 tests): rec rule application under shifts
+**Key bug found (2026-04-15)**: The def_eq union-find was unsound for open
+expressions with SPtr. The UF was not depth-stacked, so unions proven at one
+depth (where specific context entries were equal) would persist at other depths
+where those context entries differ. With Shift DAG nodes this was hidden because
+each (Shift, ExprPtr) combination was a unique DAG node. With SPtr, different
+cores can represent the same expression at different shifts, and the UF union
+would incorrectly equate cores that are only def_eq at specific depths.
+Fix: restrict UF to closed expressions only (nlbv == 0).
 - **Recursor types** (3 tests): sortElimProp2, accRec, reduceCtorParam
 
 ### SPtr Refactor Update (2026-04-15)
