@@ -243,7 +243,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
                     let rel_idx = shifted_idx - offset;
                     if rel_idx < n_substs {
                         let val = substs[substs.len() - 1 - rel_idx as usize];
-                        SPtr::new(val.core, val.shift + offset)
+                        self.sptr_shift(val, offset)
                     } else if shift_down {
                         self.mk_var(shifted_idx - n_substs)
                     } else {
@@ -539,7 +539,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         // If child.shift >= cutoff, the cutoff is irrelevant for child.core's vars —
         // just add amount to the child's shift.
         if child.shift >= cutoff {
-            return SPtr::new(child.core, child.shift + amount);
+            return self.sptr_shift(child, amount);
         }
         // Otherwise, we need to traverse child.core with adjusted cutoff.
         let new_cutoff = cutoff - child.shift;
