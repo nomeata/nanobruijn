@@ -670,7 +670,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
                 Local { .. } => {
                     locals.iter().rev().position(|x| *x == child.core)
                         .map(|pos| self.mk_var(u16::try_from(pos).unwrap() + offset))
-                        .unwrap_or(child)
+                        .unwrap_or(SPtr::unshifted(child.core))
                 }
                 App { fun, arg, .. } => {
                     let f = self.abstr_aux_sptr(fun, locals, offset);
@@ -697,7 +697,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
                     let s = self.abstr_aux_sptr(structure, locals, offset);
                     self.mk_proj(ty_name, idx, s)
                 }
-                _ => child,
+                _ => SPtr::unshifted(child.core), // closed: normalize shift to 0
             }
         }
     }
@@ -777,10 +777,10 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
             let viewed = self.view_sptr(child);
             match viewed {
                 Local { id: FVarId::DbjLevel(serial), .. } => {
-                    if serial < start_pos { child }
+                    if serial < start_pos { SPtr::unshifted(child.core) }
                     else { self.fvar_to_bvar(num_open_binders, serial) }
                 }
-                Local { .. } => child,
+                Local { .. } => SPtr::unshifted(child.core),
                 App { fun, arg, .. } => {
                     let f = self.abstr_aux_levels_sptr(fun, start_pos, num_open_binders);
                     let a = self.abstr_aux_levels_sptr(arg, start_pos, num_open_binders);
@@ -806,7 +806,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
                     let s = self.abstr_aux_levels_sptr(structure, start_pos, num_open_binders);
                     self.mk_proj(ty_name, idx, s)
                 }
-                _ => child,
+                _ => SPtr::unshifted(child.core), // closed: normalize shift to 0
             }
         }
     }

@@ -1444,7 +1444,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
                 let new_structure = self.push_shift_down_sptr(structure, amount, cutoff);
                 self.mk_proj(ty_name, idx, new_structure)
             }
-            _ => child, // closed
+            _ => SPtr::unshifted(child.core), // closed: normalize shift to 0
         }
     }
 
