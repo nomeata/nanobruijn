@@ -567,3 +567,22 @@ cascading cache misses → repeated whnf/infer → more expression creation → 
 - **Nested inductives** (3 tests: rbTree): complex nested inductive handling
 - **Recursor reductions** (4 tests): rec rule application under shifts
 - **Recursor types** (3 tests): sortElimProp2, accRec, reduceCtorParam
+
+### SPtr Refactor Update (2026-04-15)
+
+**Test status**:
+- Tutorial: 126/126 (100%)
+- Init: 54086/54086, 0 errors, 243B instructions (baseline 236B, +3%)
+- Mathlib: 14 panics out of ~630K declarations (0.002% failure rate)
+  - Down from 67 after sptr_shift fix in peel paths
+  - Performance regression on some declarations (heartbeat threshold hits)
+
+**Key fix**: Using `sptr_shift` (nlbv-aware) instead of `shift_up` in peel paths
+prevents meaningless shift accumulation on closed expressions. 53 of the 67
+Mathlib failures were caused by this.
+
+**Remaining 14 failures**: peel mechanism corrupts context when processing
+open expressions from view_sptr with OSNF structural shifts. Fix TBD.
+
+**Remaining performance issue**: Some declarations hit heartbeat thresholds
+that didn't before, suggesting cache efficiency regression.
