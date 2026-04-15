@@ -1480,14 +1480,9 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
             }
             Expr::Pi { binder_name, binder_style, binder_type, body, has_fvars, .. } => {
                 let new_type = self.sptr_shift(binder_type, amount);
-                // Body is under a binder (cutoff=1). Compose shift(body_sptr, amount, cutoff=1):
-                // If body.shift >= 1: all vars in body are >= 1, cutoff=1 doesn't block => add amount
-                // If body.shift == 0: need shift_expr(body.core, amount, 1)
-                let new_body = if body.shift >= 1 {
-                    self.sptr_shift(body, amount)
-                } else {
-                    self.shift_expr(body.core, amount, 1)
-                };
+                // Body is under a binder (cutoff=1). Must do full traversal to match
+                // old view_expr behavior and prevent shift accumulation in loops.
+                let new_body = self.shift_expr_aux_sptr(body, amount, 1);
                 let ty_nlbv = self.sptr_nlbv(new_type);
                 let body_nlbv = self.sptr_nlbv(new_body);
                 let num_loose_bvars = ty_nlbv.max(body_nlbv.saturating_sub(1));
@@ -1496,11 +1491,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
             }
             Expr::Lambda { binder_name, binder_style, binder_type, body, has_fvars, .. } => {
                 let new_type = self.sptr_shift(binder_type, amount);
-                let new_body = if body.shift >= 1 {
-                    self.sptr_shift(body, amount)
-                } else {
-                    self.shift_expr(body.core, amount, 1)
-                };
+                let new_body = self.shift_expr_aux_sptr(body, amount, 1);
                 let ty_nlbv = self.sptr_nlbv(new_type);
                 let body_nlbv = self.sptr_nlbv(new_body);
                 let num_loose_bvars = ty_nlbv.max(body_nlbv.saturating_sub(1));
@@ -1510,11 +1501,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
             Expr::Let { binder_name, binder_type, val, body, nondep, has_fvars, .. } => {
                 let new_type = self.sptr_shift(binder_type, amount);
                 let new_val = self.sptr_shift(val, amount);
-                let new_body = if body.shift >= 1 {
-                    self.sptr_shift(body, amount)
-                } else {
-                    self.shift_expr(body.core, amount, 1)
-                };
+                let new_body = self.shift_expr_aux_sptr(body, amount, 1);
                 let ty_nlbv = self.sptr_nlbv(new_type);
                 let val_nlbv = self.sptr_nlbv(new_val);
                 let body_nlbv = self.sptr_nlbv(new_body);

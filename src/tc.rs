@@ -754,7 +754,14 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                         if self.ctx.is_eager_reduce_app(arg.core) {
                             self.ctx.eager_mode = true;
                         }
-                        self.assert_def_eq(binder_type_instd, arg_type);
+                        if binder_type_instd != arg_type && !self.def_eq(binder_type_instd, arg_type) {
+                            eprintln!("INFER_APP_FAIL depth={} ctx_len={}", self.depth(), ctx.len());
+                            eprintln!("  binder_type={} (s={})", self.ctx.expr_desc(binder_type.core, 3), binder_type.shift);
+                            eprintln!("  binder_type_instd={} (s={})", self.ctx.expr_desc(binder_type_instd.core, 3), binder_type_instd.shift);
+                            eprintln!("  arg_type={} (s={})", self.ctx.expr_desc(arg_type.core, 3), arg_type.shift);
+                            eprintln!("  fun={} (s={})", self.ctx.expr_desc(fun.core, 3), fun.shift);
+                            self.assert_def_eq(binder_type_instd, arg_type);
+                        }
                         // replace the outer scope's setting before next iteration
                         self.ctx.eager_mode = outer_scope_eager_setting;
                     }
