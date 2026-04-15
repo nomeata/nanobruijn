@@ -5,7 +5,7 @@ use crate::expr::Expr;
 use crate::level::Level;
 use crate::util::{
     nat_div, nat_mod, nat_sub, nat_gcd, nat_land, nat_lor,
-    nat_xor, nat_shr, nat_shl, AppArgs, ExportFile, ExprPtr, LevelPtr,
+    nat_xor, nat_shr, nat_shl, AppArgs, ExportFile, LevelPtr,
     LevelsPtr, NamePtr, SPtr, TcCache, TcCtx, StringPtr,
 };
 use std::error::Error;
@@ -1127,7 +1127,6 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         };
         // Cache intermediate inputs (non-cheap_proj only).
         if !cheap_proj {
-            let store_depth = self.depth() as u16;
             for entry in cache_entries {
                 if entry.shift > 0 { continue; }
                 let entry_bucket_idx = self.cache_bucket(entry);
