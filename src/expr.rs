@@ -357,6 +357,22 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
             }
         }
 
+        // inst_cache: direct-mapped cache keyed by (e, substs_id, params)
+        let params = (offset as u64) | ((sh_amt as u16 as u64) << 16) | ((sh_cut as u64) << 32);
+        let substs_id = self.expr_cache.inst_substs_id;
+        let cache_tag = e.get_hash().wrapping_mul(0x517cc1b727220a95) ^ params;
+        if self.expr_cache.inst_cache.is_empty() {
+            let dummy = SPtr::unshifted(crate::util::Ptr::from(crate::util::DagMarker::ExportFile, 0));
+            let dummy_e: ExprPtr<'t> = crate::util::Ptr::from(crate::util::DagMarker::ExportFile, 0);
+            self.expr_cache.inst_cache.resize(crate::util::INST_CACHE_SIZE, (0, 0, dummy_e, dummy));
+        }
+        let slot = (cache_tag as usize) & (crate::util::INST_CACHE_SIZE - 1);
+        let (sid, p, ke, result) = self.expr_cache.inst_cache[slot];
+        if sid == substs_id && p == params && ke == e {
+            self.trace.inst_aux_cache_hits += 1;
+            return result;
+        }
+
         let n_substs = substs.len() as u16;
 
         // Key optimization: when the shift pushes all vars past the substitution range,
@@ -400,14 +416,12 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
 
         // Main dispatch: read the DAG node and process.
         // Children are SPtr — their shifts compose with the pending (sh_amt, sh_cut).
-        match self.read_expr(e) {
+        let calcd = match self.read_expr(e) {
             Sort { .. } | Const { .. } | Local { .. } | StringLit { .. } | NatLit { .. } => {
-                // Closed expression: if sh_amt > 0, shift is a no-op. Otherwise shouldn't reach here.
                 if sh_amt > 0 { return SPtr::unshifted(e); }
                 panic!("inst_aux_body reached closed expr with sh_amt=0 but nlbv > offset")
             }
             Var { dbj_idx, .. } => {
-                // Apply pending shift first
                 let shifted_idx = if sh_amt != 0 && dbj_idx >= sh_cut { (dbj_idx as i16 + sh_amt) as u16 } else { dbj_idx };
                 if shifted_idx < offset {
                     self.mk_var(shifted_idx)
@@ -415,16 +429,12 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
                     let rel_idx = shifted_idx - offset;
                     if rel_idx < n_substs {
                         let val = substs[substs.len() - 1 - rel_idx as usize];
-                        // Shift the substitution value up by offset
-                        SPtr::new(val.core, val.shift + offset)
+                        self.sptr_shift(val, offset)
                     } else if shift_down {
                         self.mk_var(shifted_idx - n_substs)
                     } else {
-                        if sh_amt != 0 {
-                            self.mk_var(shifted_idx)
-                        } else {
-                            SPtr::unshifted(e)
-                        }
+                        if sh_amt != 0 { self.mk_var(shifted_idx) }
+                        else { SPtr::unshifted(e) }
                     }
                 }
             }
@@ -453,7 +463,9 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
                 let new_structure = self.inst_aux_quick_sptr(structure, substs, offset, shift_down, sh_amt, sh_cut);
                 self.mk_proj(ty_name, idx, new_structure)
             }
-        }
+        };
+        self.expr_cache.inst_cache[slot] = (substs_id, params, e, calcd);
+        calcd
     }
 
     /// Shift all free variables in `e` (those with index >= cutoff) up by `amount`.
