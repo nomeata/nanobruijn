@@ -662,7 +662,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                 if self.ctx.num_loose_bvars(e.core) == 0 {
                     // Closed: just infer unshifted
                     let r = self.infer(SPtr::unshifted(e.core), flag);
-                    return r.shift_up(e.shift);
+                    return self.ctx.sptr_shift(r, e.shift);
                 }
                 // Open with shift > depth: shouldn't happen in well-typed programs.
                 // Fall through to peel with clamped depth.
@@ -671,12 +671,12 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             let inner_bucket = if self.ctx.num_loose_bvars(e.core) == 0 { 0 } else { inner_depth };
             if let Some(inner_cached) = self.tc_cache.infer_cache_get(inner_bucket, &e.core, true) {
                 self.ctx.trace.infer_cache_hits += 1;
-                return inner_cached.shift_up(e.shift);
+                return self.ctx.sptr_shift(inner_cached, e.shift);
             }
             if !is_check {
                 if let Some(inner_cached) = self.tc_cache.infer_cache_get(inner_bucket, &e.core, false) {
                     self.ctx.trace.infer_cache_hits += 1;
-                    return inner_cached.shift_up(e.shift);
+                    return self.ctx.sptr_shift(inner_cached, e.shift);
                 }
             }
             // Peel: shrink context to depth d-k, infer inner, restore, shift result.
@@ -685,7 +685,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             let saved = self.tc_cache.split_off(inner_depth);
             let inner_type = self.infer(SPtr::unshifted(e.core), flag);
             self.tc_cache.extend(saved);
-            return inner_type.shift_up(e.shift);
+            return self.ctx.sptr_shift(inner_type, e.shift);
         }
         // e.shift == 0 here. Pointer-based infer cache: bucket 0 for closed, bucket depth for open.
         let depth = self.depth() as u16;
@@ -944,19 +944,19 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                 let inner_bucket = if self.ctx.num_loose_bvars(e.core) == 0 { 0 } else { inner_depth };
                 if let Some(inner_cached) = self.tc_cache.whnf_cache_get(inner_bucket, &e.core) {
                     self.ctx.trace.whnf_cache_hits += 1;
-                    return inner_cached.shift_up(e.shift);
+                    return self.ctx.sptr_shift(inner_cached, e.shift);
                 }
             }
             if inner_depth == 0 {
                 let r = self.whnf(SPtr::unshifted(e.core));
-                return r.shift_up(e.shift);
+                return self.ctx.sptr_shift(r, e.shift);
             }
             self.ctx.trace.whnf_shift_peel += 1;
             self.ctx.trace.shift_peel_frames_total += e.shift as u64;
             let saved = self.tc_cache.split_off(inner_depth);
             let r = self.whnf(SPtr::unshifted(e.core));
             self.tc_cache.extend(saved);
-            return r.shift_up(e.shift);
+            return self.ctx.sptr_shift(r, e.shift);
         }
         // e.shift == 0. Pointer-based whnf cache: bucket 0 for closed, bucket depth for open.
         let depth = self.depth() as u16;
@@ -1009,7 +1009,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                 let inner_bucket = if self.ctx.num_loose_bvars(e.core) == 0 { 0 } else { inner_depth };
                 if let Some(inner_cached) = self.tc_cache.wnu_cache_get(inner_bucket, &e.core) {
                     self.ctx.trace.wnu_cache_hits += 1;
-                    return inner_cached.shift_up(e.shift);
+                    return self.ctx.sptr_shift(inner_cached, e.shift);
                 }
             }
             self.ctx.trace.wnu_shift_peel += 1;
