@@ -877,7 +877,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         }
         let e = self.whnf(e);
         if let Some(cached) = self.tc_cache.strong_cache.get(&(e.core, reduce_types, reduce_proofs)).copied() {
-            return SPtr::unshifted(cached)
+            return self.ctx.sptr_shift(SPtr::unshifted(cached), e.shift)
         }
 
         let out = match self.ctx.view_sptr(e) {
@@ -1256,7 +1256,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
     fn cheap_eq(&mut self, x: SPtr<'t>, y: SPtr<'t>) -> bool {
         x == y
             || self.eq_cache_contains(x, y)
-            || self.tc_cache.eq_cache_uf.check_uf_eq(x.core, y.core)
+            || (x.shift == y.shift && self.tc_cache.eq_cache_uf.check_uf_eq(x.core, y.core))
             || self.defeq_open_lookup(true, x, y)
     }
 
@@ -1429,11 +1429,6 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             self.eq_cache_insert(x, y);
             self.defeq_open_store_pos(x, y);
             self.tc_cache.eq_cache_uf.union(x.core, y.core);
-            // Also union shift-stripped versions so UF works across shift levels.
-            // Sound because SPtr(a,k) = SPtr(b,k) iff a = b.
-            if x.shift == y.shift && x.shift > 0 {
-                self.tc_cache.eq_cache_uf.union(x.core, y.core);
-            }
         }
         result
     }

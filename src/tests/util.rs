@@ -1,4 +1,4 @@
-use crate::util::{Config, CowStr, ExportFile, ExprPtr, LevelPtr, TcCtx};
+use crate::util::{Config, CowStr, ExportFile, ExprPtr, LevelPtr, SPtr, TcCtx};
 use rand::distributions::Alphanumeric;
 use rand::{rngs::ThreadRng, Rng};
 use std::error::Error;
@@ -67,9 +67,9 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
 
     #[cfg(test)]
     #[allow(dead_code)]
-    pub(crate) fn mk_succ_app(&mut self, n: usize) -> ExprPtr<'t> {
-        let mut out = self.c_nat_zero().unwrap();
-        let succ = self.c_nat_succ().unwrap();
+    pub(crate) fn mk_succ_app(&mut self, n: usize) -> SPtr<'t> {
+        let mut out = SPtr::unshifted(self.c_nat_zero().unwrap());
+        let succ = SPtr::unshifted(self.c_nat_succ().unwrap());
         for _ in 0..n {
             out = self.mk_app(succ, out);
         }

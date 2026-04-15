@@ -155,7 +155,16 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         for _ in 0..n {
             match self.read_expr(e.core) {
                 Pi { body, .. } => {
-                    e = self.sptr_shift(body, e.shift);
+                    if e.shift == 0 {
+                        e = body;
+                    } else if body.shift >= 1 {
+                        // body.shift >= 1 means all vars in body.core are >= 1,
+                        // so cutoff=1 is irrelevant — uniform shift composition
+                        e = self.sptr_shift(body, e.shift);
+                    } else {
+                        // body.shift == 0 and e.shift > 0: need cutoff=1
+                        e = self.shift_expr(body.core, e.shift, 1);
+                    }
                 }
                 _ => panic!()
             }
@@ -314,10 +323,20 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
                 let effective_fvar_lb = fvar_lb + sh_amt as u16;
                 if effective_fvar_lb >= offset + n_substs {
                     if shift_down {
-                        let shifted = if sh_cut == 0 { self.mk_shift(e, sh_amt as u16) } else { self.shift_expr(e, sh_amt as u16, sh_cut) };
-                        // TODO: push_shift_down_cutoff needs to take/return SPtr
-                        let r = self.push_shift_down_cutoff(shifted.core, n_substs, offset);
-                        return SPtr::new(r, shifted.shift);
+                        // Net effect: shift(e, sh_amt, sh_cut) then shift_down(n_substs, offset).
+                        // All effective vars >= offset + n_substs, so all get shifted down.
+                        // For sh_cut == 0: uniform shift, net = sh_amt - n_substs applied to core.
+                        if sh_cut == 0 {
+                            if sh_amt as u16 > n_substs {
+                                return self.mk_shift(e, sh_amt as u16 - n_substs);
+                            } else if (sh_amt as u16) < n_substs {
+                                let r = self.push_shift_down_cutoff(e, n_substs - sh_amt as u16, 0);
+                                return SPtr::unshifted(r);
+                            } else {
+                                return SPtr::unshifted(e);
+                            }
+                        }
+                        // sh_cut > 0: fall through to full inst_aux
                     } else {
                         if sh_cut == 0 { return self.mk_shift(e, sh_amt as u16); }
                         return self.shift_expr(e, sh_amt as u16, sh_cut);
@@ -380,7 +399,9 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         if sh_amt > 0 && shift_down && sh_amt == n_substs as i16 && sh_cut == offset {
             self.trace.inst_aux_shift_skip_clean += 1;
             self.trace.inst_aux_elided += 1;
-            return SPtr::unshifted(e);
+            let r = SPtr::unshifted(e);
+            self.expr_cache.inst_cache[slot] = (substs_id, params, e, r);
+            return r;
         }
         if sh_amt > 0 && sh_cut <= offset && sh_amt as u16 + sh_cut >= offset + n_substs {
             let r = if shift_down {
@@ -401,6 +422,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
                 }
             };
             self.trace.inst_aux_elided += 1;
+            self.expr_cache.inst_cache[slot] = (substs_id, params, e, r);
             return r;
         }
 
@@ -409,8 +431,9 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         if shift_down && sh_amt == 0 && n_substs >= 4 && nlbv > offset + n_substs {
             let lb = self.fvar_lb(e);
             if lb >= offset + n_substs {
-                let r = self.push_shift_down_cutoff(e, n_substs, offset);
-                return SPtr::unshifted(r);
+                let r = SPtr::unshifted(self.push_shift_down_cutoff(e, n_substs, offset));
+                self.expr_cache.inst_cache[slot] = (substs_id, params, e, r);
+                return r;
             }
         }
 
@@ -950,9 +973,10 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
     pub(crate) fn abstr_pi(&mut self, binder: ExprPtr<'t>, body: SPtr<'t>) -> SPtr<'t> {
         match self.read_expr(binder) {
             Local { binder_name, binder_style, binder_type, .. } => {
-                // abstr takes ExprPtr, so pass body.core. The abstr result's shift
-                // replaces body's old shift (abstr rebuilds the expression).
-                let body = self.abstr(body.core, &[binder]);
+                // Use abstr_aux_sptr to correctly handle body.shift.
+                // abstr(body.core, ...) would drop the shift, producing wrong var indices.
+                self.expr_cache.abstr_cache.clear();
+                let body = self.abstr_aux_sptr(body, &[binder], 0);
                 self.mk_pi(binder_name, binder_style, SPtr::unshifted(binder_type), body)
             }
             _ => unreachable!("Cannot apply pi with non-local domain type"),
@@ -962,7 +986,8 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
     pub(crate) fn apply_lambda(&mut self, binder: ExprPtr<'t>, body: SPtr<'t>) -> SPtr<'t> {
         match self.read_expr(binder) {
             Local { binder_name, binder_style, binder_type, .. } => {
-                let body = self.abstr(body.core, &[binder]);
+                self.expr_cache.abstr_cache.clear();
+                let body = self.abstr_aux_sptr(body, &[binder], 0);
                 self.mk_lambda(binder_name, binder_style, SPtr::unshifted(binder_type), body)
             }
             _ => unreachable!("Cannot apply lambda with non-local domain type"),
@@ -1211,13 +1236,19 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
     }
 
     /// Return the number of leading `Pi` binders on this expression.
-    pub(crate) fn pi_telescope_size(&self, mut e: SPtr<'t>) -> u16 {
+    pub(crate) fn pi_telescope_size(&mut self, mut e: SPtr<'t>) -> u16 {
         let mut size = 0u16;
         loop {
             match self.read_expr(e.core) {
                 Pi { body, .. } => {
                     size += 1;
-                    e = self.sptr_shift(body, e.shift);
+                    if e.shift == 0 {
+                        e = body;
+                    } else if body.shift >= 1 {
+                        e = self.sptr_shift(body, e.shift);
+                    } else {
+                        e = self.shift_expr(body.core, e.shift, 1);
+                    }
                 }
                 _ => break,
             }
@@ -1228,11 +1259,17 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
     /// Make `Sort(Level::Zero)` (Prop).
     pub(crate) fn prop(&mut self) -> SPtr<'t> { self.mk_sort(self.zero()) }
 
-    pub fn get_nth_pi_binder(&self, mut e: SPtr<'t>, n: usize) -> Option<SPtr<'t>> {
+    pub fn get_nth_pi_binder(&mut self, mut e: SPtr<'t>, n: usize) -> Option<SPtr<'t>> {
         for _ in 0..n {
             match self.read_expr(e.core) {
                 Pi { body, .. } => {
-                    e = self.sptr_shift(body, e.shift);
+                    if e.shift == 0 {
+                        e = body;
+                    } else if body.shift >= 1 {
+                        e = self.sptr_shift(body, e.shift);
+                    } else {
+                        e = self.shift_expr(body.core, e.shift, 1);
+                    }
                 }
                 _ => return None
             }
@@ -1245,7 +1282,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
 
     /// Get the name of the inductive type which is the major premise for this recursor
     /// by finding the correct binder in the recursor's type.
-    pub fn get_major_induct(&self, rec: &crate::env::RecursorData<'t>) -> Option<NamePtr<'t>> {
+    pub fn get_major_induct(&mut self, rec: &crate::env::RecursorData<'t>) -> Option<NamePtr<'t>> {
         let binder = self.get_nth_pi_binder(SPtr::unshifted(rec.info.ty), rec.major_idx());
         match binder.map(|x| { let f = self.unfold_apps_fun(x); self.read_expr(f.core) }) {
             Some(Const { name, .. }) => Some(name),
