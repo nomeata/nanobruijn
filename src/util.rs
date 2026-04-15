@@ -1274,7 +1274,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
     }
 
     /// Shift an SPtr up by `amount`. No-op for closed expressions.
-    pub fn push_shift_up(&self, e: SPtr<'t>, amount: u16) -> SPtr<'t> {
+    pub fn sptr_shift(&self, e: SPtr<'t>, amount: u16) -> SPtr<'t> {
         if amount == 0 || self.sptr_nlbv(e) == 0 { return e; }
         e.shift_up(amount)
     }
@@ -1413,8 +1413,8 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
                 Expr::Var { dbj_idx: new_idx, hash }
             }
             Expr::App { fun, arg, has_fvars, .. } => {
-                let new_fun = self.push_shift_up(fun, amount);
-                let new_arg = self.push_shift_up(arg, amount);
+                let new_fun = self.sptr_shift(fun, amount);
+                let new_arg = self.sptr_shift(arg, amount);
                 let fun_nlbv = self.sptr_nlbv(new_fun);
                 let arg_nlbv = self.sptr_nlbv(new_arg);
                 let num_loose_bvars = fun_nlbv.max(arg_nlbv);
@@ -1422,12 +1422,12 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
                 Expr::App { fun: new_fun, arg: new_arg, num_loose_bvars, has_fvars, hash }
             }
             Expr::Pi { binder_name, binder_style, binder_type, body, has_fvars, .. } => {
-                let new_type = self.push_shift_up(binder_type, amount);
+                let new_type = self.sptr_shift(binder_type, amount);
                 // Body is under a binder (cutoff=1). Compose shift(body_sptr, amount, cutoff=1):
                 // If body.shift >= 1: all vars in body are >= 1, cutoff=1 doesn't block => add amount
                 // If body.shift == 0: need shift_expr(body.core, amount, 1)
                 let new_body = if body.shift >= 1 {
-                    self.push_shift_up(body, amount)
+                    self.sptr_shift(body, amount)
                 } else {
                     self.shift_expr(body.core, amount, 1)
                 };
@@ -1438,9 +1438,9 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
                 Expr::Pi { binder_name, binder_style, binder_type: new_type, body: new_body, num_loose_bvars, has_fvars, hash }
             }
             Expr::Lambda { binder_name, binder_style, binder_type, body, has_fvars, .. } => {
-                let new_type = self.push_shift_up(binder_type, amount);
+                let new_type = self.sptr_shift(binder_type, amount);
                 let new_body = if body.shift >= 1 {
-                    self.push_shift_up(body, amount)
+                    self.sptr_shift(body, amount)
                 } else {
                     self.shift_expr(body.core, amount, 1)
                 };
@@ -1451,10 +1451,10 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
                 Expr::Lambda { binder_name, binder_style, binder_type: new_type, body: new_body, num_loose_bvars, has_fvars, hash }
             }
             Expr::Let { binder_name, binder_type, val, body, nondep, has_fvars, .. } => {
-                let new_type = self.push_shift_up(binder_type, amount);
-                let new_val = self.push_shift_up(val, amount);
+                let new_type = self.sptr_shift(binder_type, amount);
+                let new_val = self.sptr_shift(val, amount);
                 let new_body = if body.shift >= 1 {
-                    self.push_shift_up(body, amount)
+                    self.sptr_shift(body, amount)
                 } else {
                     self.shift_expr(body.core, amount, 1)
                 };
@@ -1466,7 +1466,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
                 Expr::Let { binder_name, binder_type: new_type, val: new_val, body: new_body, num_loose_bvars, has_fvars, hash, nondep }
             }
             Expr::Proj { ty_name, idx, structure, has_fvars, .. } => {
-                let new_s = self.push_shift_up(structure, amount);
+                let new_s = self.sptr_shift(structure, amount);
                 let s_nlbv = self.sptr_nlbv(new_s);
                 let hash = hash64!(crate::expr::PROJ_HASH, ty_name, idx, new_s);
                 Expr::Proj { ty_name, idx, structure: new_s, num_loose_bvars: s_nlbv, has_fvars, hash }

@@ -935,7 +935,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         if matches!(self.ctx.read_expr(e.core), NatLit { .. } | StringLit { .. }) {
             return e
         }
-        // whnf is shift-equivariant: whnf(SPtr(ptr, k)) = push_shift_up(whnf(SPtr(ptr, 0)), k)
+        // whnf is shift-equivariant: whnf(SPtr(ptr, k)) = sptr_shift(whnf(SPtr(ptr, 0)), k)
         if e.shift > 0 {
             let depth = self.depth();
             let inner_depth = depth.saturating_sub(e.shift as usize);
@@ -1016,12 +1016,12 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             self.ctx.trace.shift_peel_frames_total += e.shift as u64;
             if inner_depth == 0 {
                 let r = self.whnf_no_unfolding_aux(SPtr::unshifted(e.core), cheap_proj);
-                return self.ctx.push_shift_up(r, e.shift);
+                return self.ctx.sptr_shift(r, e.shift);
             }
             let saved = self.tc_cache.split_off(inner_depth);
             let r = self.whnf_no_unfolding_aux(SPtr::unshifted(e.core), cheap_proj);
             self.tc_cache.extend(saved);
-            return self.ctx.push_shift_up(r, e.shift);
+            return self.ctx.sptr_shift(r, e.shift);
         }
         // e.shift == 0. Iterative version: tail-recursive calls become loop iterations.
         // We track original inputs to cache on exit.
@@ -1089,7 +1089,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                     let inner = if args.is_empty() {
                         body
                     } else {
-                        let shifted_args: AppArgs = args.into_iter().map(|a| self.ctx.push_shift_up(a, 1)).collect();
+                        let shifted_args: AppArgs = args.into_iter().map(|a| self.ctx.sptr_shift(a, 1)).collect();
                         self.ctx.foldl_apps(body, shifted_args.into_iter())
                     };
                     let reduced = self.whnf_no_unfolding_aux(inner, cheap_proj);
@@ -1896,7 +1896,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             let y_ty = self.infer_then_whnf(y, InferOnly);
             if let Pi { binder_name, binder_type, binder_style, .. } = self.ctx.view_sptr(y_ty) {
                 // Shift y up by 1 since it will be placed inside a new lambda body
-                let y_shifted = self.ctx.push_shift_up(y, 1);
+                let y_shifted = self.ctx.sptr_shift(y, 1);
                 let v0 = self.ctx.mk_var(0);
                 let new_body = self.ctx.mk_app(y_shifted, v0);
                 let new_lambda = self.ctx.mk_lambda(binder_name, binder_style, binder_type, new_body);
