@@ -1279,6 +1279,35 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         SPtr::new(inner, amount)
     }
 
+    /// Recursively find the first point where two SPtrs diverge at the DAG level.
+    pub fn find_sptr_divergence(&self, x: SPtr<'t>, y: SPtr<'t>, depth: usize) {
+        if x == y { return; }
+        if depth > 30 { eprintln!("{}...(depth limit)", "  ".repeat(depth)); return; }
+        let prefix = "  ".repeat(depth);
+        eprintln!("{}DIVERGE: x.core={:?} x.shift={} vs y.core={:?} y.shift={}",
+            prefix, x.core.dag_marker(), x.shift, y.core.dag_marker(), y.shift);
+        if x.core == y.core {
+            eprintln!("{}=> SHIFT_ONLY diff: {} vs {}", prefix, x.shift, y.shift);
+            return;
+        }
+        let xe = self.read_expr(x.core);
+        let ye = self.read_expr(y.core);
+        eprintln!("{}x_expr: {}", prefix, self.expr_desc(x.core, 3));
+        eprintln!("{}y_expr: {}", prefix, self.expr_desc(y.core, 3));
+        match (xe, ye) {
+            (Expr::App { fun: f1, arg: a1, .. }, Expr::App { fun: f2, arg: a2, .. }) => {
+                if f1 != f2 { eprintln!("{}FUN:", prefix); self.find_sptr_divergence(f1, f2, depth+1); }
+                if a1 != a2 { eprintln!("{}ARG:", prefix); self.find_sptr_divergence(a1, a2, depth+1); }
+            }
+            (Expr::Pi { binder_type: t1, body: b1, .. }, Expr::Pi { binder_type: t2, body: b2, .. })
+            | (Expr::Lambda { binder_type: t1, body: b1, .. }, Expr::Lambda { binder_type: t2, body: b2, .. }) => {
+                if t1 != t2 { eprintln!("{}TYPE:", prefix); self.find_sptr_divergence(t1, t2, depth+1); }
+                if b1 != b2 { eprintln!("{}BODY:", prefix); self.find_sptr_divergence(b1, b2, depth+1); }
+            }
+            _ => {}
+        }
+    }
+
     /// Shift an SPtr up by `amount`. No-op for closed expressions.
     pub fn sptr_shift(&self, e: SPtr<'t>, amount: u16) -> SPtr<'t> {
         if amount == 0 || self.sptr_nlbv(e) == 0 { return e; }
