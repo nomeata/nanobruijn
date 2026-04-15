@@ -283,14 +283,14 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
     /// shifted to be valid at the current depth. O(1) via SPtr.
     fn lookup_var(&mut self, dbj_idx: u16) -> SPtr<'t> {
         let ty = self.tc_cache.local_type(dbj_idx);
-        ty.shift_up(dbj_idx + 1)
+        self.ctx.sptr_shift(ty, dbj_idx + 1)
     }
 
     /// Look up the value of a let-bound Var(k), shifted to be valid at current depth.
     /// Returns None for lambda/pi binders. O(1) via SPtr.
     fn lookup_var_value(&mut self, dbj_idx: u16) -> Option<SPtr<'t>> {
         let val = self.tc_cache.local_value(dbj_idx)?;
-        Some(val.shift_up(dbj_idx + 1))
+        Some(self.ctx.sptr_shift(val, dbj_idx + 1))
     }
 
     /// Push a lambda/pi binder onto the local context.
@@ -651,23 +651,16 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
 
     fn infer_inner(&mut self, e: SPtr<'t>, flag: InferFlag) -> SPtr<'t> {
         // Handle shifted SPtrs: infer(SPtr(ptr, k)) where k > 0.
-        // Split off frames, recurse on SPtr(ptr, 0), wrap result.
+        // Invariant: shift > 0 implies core has loose bvars.
         if e.shift > 0 {
+            debug_assert!(self.ctx.num_loose_bvars(e.core) > 0,
+                "SPtr invariant violated: shift={} but nlbv=0", e.shift);
             let depth = self.depth();
             let is_check = flag == InferFlag::Check;
-            // If shift > depth, the expression is from a shallower context.
-            // For closed expressions, shift is irrelevant. For open ones, clamp to depth.
-            if (e.shift as usize) > depth {
-                // Expression shifted beyond current depth — treat as if at depth 0
-                if self.ctx.num_loose_bvars(e.core) == 0 {
-                    // Closed: just infer unshifted
-                    let r = self.infer(SPtr::unshifted(e.core), flag);
-                    return self.ctx.sptr_shift(r, e.shift);
-                }
-                // Open with shift > depth: shouldn't happen in well-typed programs.
-                // Fall through to peel with clamped depth.
-            }
-            let inner_depth = depth.saturating_sub(e.shift as usize);
+            debug_assert!((e.shift as usize) <= depth,
+                "infer peel: shift {} > depth {} for open expression (nlbv={})",
+                e.shift, depth, self.ctx.num_loose_bvars(e.core));
+            let inner_depth = depth - e.shift as usize;
             let inner_bucket = if self.ctx.num_loose_bvars(e.core) == 0 { 0 } else { inner_depth };
             if let Some(inner_cached) = self.tc_cache.infer_cache_get(inner_bucket, &e.core, true) {
                 self.ctx.trace.infer_cache_hits += 1;
@@ -937,15 +930,18 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         }
         // whnf is shift-equivariant: whnf(SPtr(ptr, k)) = sptr_shift(whnf(SPtr(ptr, 0)), k)
         if e.shift > 0 {
+            debug_assert!(self.ctx.num_loose_bvars(e.core) > 0,
+                "SPtr invariant violated in whnf: shift={} but nlbv=0", e.shift);
             let depth = self.depth();
-            let inner_depth = depth.saturating_sub(e.shift as usize);
+            debug_assert!((e.shift as usize) <= depth,
+                "whnf peel: shift {} > depth {} for open expression (nlbv={})",
+                e.shift, depth, self.ctx.num_loose_bvars(e.core));
+            let inner_depth = depth - e.shift as usize;
             // Fast path: check if inner's whnf result is already cached at the lower depth.
-            if depth > 0 && (e.shift as usize) <= depth {
-                let inner_bucket = if self.ctx.num_loose_bvars(e.core) == 0 { 0 } else { inner_depth };
-                if let Some(inner_cached) = self.tc_cache.whnf_cache_get(inner_bucket, &e.core) {
-                    self.ctx.trace.whnf_cache_hits += 1;
-                    return self.ctx.sptr_shift(inner_cached, e.shift);
-                }
+            let inner_bucket = if inner_depth == 0 { 0 } else { inner_depth };
+            if let Some(inner_cached) = self.tc_cache.whnf_cache_get(inner_bucket, &e.core) {
+                self.ctx.trace.whnf_cache_hits += 1;
+                return self.ctx.sptr_shift(inner_cached, e.shift);
             }
             if inner_depth == 0 {
                 let r = self.whnf(SPtr::unshifted(e.core));
