@@ -284,6 +284,12 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
     /// Current binding depth.
     fn depth(&self) -> usize { self.tc_cache.depth() }
 
+    /// Cache bucket for an SPtr: 0 for closed expressions, depth for open.
+    #[inline(always)]
+    fn cache_bucket(&self, e: SPtr<'t>) -> usize {
+        if self.ctx.num_loose_bvars(e.core) == 0 { 0 } else { self.depth() }
+    }
+
     /// Look up the type of Var(k) in the local context, returning an SPtr
     /// shifted to be valid at the current depth. O(1) via SPtr.
     fn lookup_var(&mut self, dbj_idx: u16) -> SPtr<'t> {
@@ -685,13 +691,8 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             self.tc_cache.extend(saved);
             return self.ctx.sptr_shift(inner_type, e.shift);
         }
-        // e.shift == 0 here. Pointer-based infer cache: bucket 0 for closed, bucket depth for open.
-        let depth = self.depth() as u16;
-        let bucket_idx = if self.ctx.num_loose_bvars(e.core) == 0 {
-            0
-        } else {
-            depth as usize
-        };
+        // e.shift == 0 here.
+        let bucket_idx = self.cache_bucket(e);
         let is_check = flag == InferFlag::Check;
         // Check cache subsumes no-check: try check first, then no-check.
         if let Some(cached_result) = self.tc_cache.infer_check_get(bucket_idx, &e.core) {
@@ -959,12 +960,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             return self.ctx.sptr_shift(r, e.shift);
         }
         // e.shift == 0. Pointer-based whnf cache: bucket 0 for closed, bucket depth for open.
-        let depth = self.depth() as u16;
-        let whnf_bucket_idx = if self.ctx.num_loose_bvars(e.core) == 0 {
-            0
-        } else {
-            depth as usize
-        };
+        let whnf_bucket_idx = self.cache_bucket(e);
         if let Some(result) = self.tc_cache.whnf_get(whnf_bucket_idx, &e.core) {
             self.ctx.trace.whnf_cache_hits += 1;
             return result;
@@ -1028,13 +1024,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         let mut cache_entries: Vec<SPtr<'t>> = Vec::new();
         let mut cur = e;
         let result = loop {
-            // Pointer-based wnu cache: bucket 0 for closed, bucket depth for open.
-            let cur_depth = self.depth() as u16;
-            let wnu_bucket_idx = if self.ctx.sptr_nlbv(cur) == 0 {
-                0
-            } else {
-                cur_depth as usize
-            };
+            let wnu_bucket_idx = self.cache_bucket(cur);
             if cur.shift == 0 {
                 if let Some(cached) = self.tc_cache.wnu_get(wnu_bucket_idx, &cur.core) {
                     self.ctx.trace.wnu_cache_hits += 1;
@@ -1140,11 +1130,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             let store_depth = self.depth() as u16;
             for entry in cache_entries {
                 if entry.shift > 0 { continue; }
-                let entry_bucket_idx = if self.ctx.num_loose_bvars(entry.core) == 0 {
-                    0
-                } else {
-                    store_depth as usize
-                };
+                let entry_bucket_idx = self.cache_bucket(entry);
                 self.tc_cache.wnu_insert(entry_bucket_idx, entry.core, result);
             }
         }
