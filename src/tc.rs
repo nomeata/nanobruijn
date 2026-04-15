@@ -1381,6 +1381,9 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         let x_n = self.whnf_no_unfolding_cheap_proj(x);
         let y_n = self.whnf_no_unfolding_cheap_proj(y);
 
+        // No shift materialization needed — def_eq_app/def_eq_binder_aux handle
+        // shift differences by recursively comparing children via def_eq.
+
         if (self.ctx.sptr_nlbv(x_n) == 0 || self.ctx.eager_mode) && Some(y_n) == self.ctx.c_bool_true() {
             let x_nn = self.whnf(x_n);
             if Some(x_nn) == self.ctx.c_bool_true() {

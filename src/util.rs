@@ -1279,6 +1279,28 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         e.shift_up(amount)
     }
 
+    /// Materialize an SPtr to shift=0 by rebuilding the expression,
+    /// baking the shift into the OSNF children. This produces a canonical
+    /// representation where the SPtr shift is 0.
+    pub fn materialize_sptr(&mut self, e: SPtr<'t>) -> SPtr<'t> {
+        if e.shift == 0 { return e; }
+        if self.sptr_nlbv(e) == 0 { return SPtr::unshifted(e.core); }
+        // View the expression (which pushes shift into children) and rebuild
+        match self.view_sptr(e) {
+            Expr::Var { dbj_idx, .. } => self.mk_var(dbj_idx),
+            Expr::App { fun, arg, .. } => self.mk_app(fun, arg),
+            Expr::Pi { binder_name, binder_style, binder_type, body, .. } =>
+                self.mk_pi(binder_name, binder_style, binder_type, body),
+            Expr::Lambda { binder_name, binder_style, binder_type, body, .. } =>
+                self.mk_lambda(binder_name, binder_style, binder_type, body),
+            Expr::Let { binder_name, binder_type, val, body, nondep, .. } =>
+                self.mk_let(binder_name, binder_type, val, body, nondep),
+            Expr::Proj { ty_name, idx, structure, .. } =>
+                self.mk_proj(ty_name, idx, structure),
+            _ => SPtr::unshifted(e.core), // closed
+        }
+    }
+
     /// Shift down: subtract `amount` from all free variable indices in the core expression.
     pub fn push_shift_down(&mut self, e: ExprPtr<'t>, amount: u16) -> ExprPtr<'t> {
         self.push_shift_down_cutoff(e, amount, 0)
