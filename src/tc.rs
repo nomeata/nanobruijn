@@ -754,13 +754,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                         if self.ctx.is_eager_reduce_app(arg.core) {
                             self.ctx.eager_mode = true;
                         }
-                        if !self.def_eq(binder_type_instd, arg_type) {
-                            eprintln!("INFER_APP_FAIL: binder_type_instd={} (s={}) arg_type={} (s={}) depth={}",
-                                self.ctx.expr_desc(binder_type_instd.core, 5), binder_type_instd.shift,
-                                self.ctx.expr_desc(arg_type.core, 5), arg_type.shift, self.depth());
-                            self.ctx.find_sptr_divergence(binder_type_instd, arg_type, 0);
-                            self.assert_def_eq(binder_type_instd, arg_type);
-                        }
+                        self.assert_def_eq(binder_type_instd, arg_type);
                         // replace the outer scope's setting before next iteration
                         self.ctx.eager_mode = outer_scope_eager_setting;
                     }

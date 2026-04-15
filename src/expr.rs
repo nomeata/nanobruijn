@@ -221,11 +221,27 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         if child.shift == 0 {
             return self.inst_aux_quick(child.core, substs, offset, shift_down, sh_amt, sh_cut);
         }
-        // If child's core is closed, substitution doesn't affect it.
-        // Return child unchanged — preserving its shift for OSNF consistency.
-        // (In the old code, Shift(closed, k) had nlbv=k and wouldn't be dropped.)
+        // If child's core is closed, inst/subst doesn't affect it.
+        // But we must still apply (sh_amt, sh_cut) to the shift itself.
+        // In the old code, Shift(closed, k) had nlbv = k, so it went through
+        // the normal inst_aux path which would compute shift(k, sh_amt, sh_cut)
+        // and then shift_down if needed.
         if self.num_loose_bvars(child.core) == 0 {
-            return child;
+            // child represents shift(closed_expr, child.shift).
+            // Apply (sh_amt, sh_cut): if child.shift >= sh_cut, result shift = child.shift + sh_amt
+            // Then shift_down: result shift -= n_substs (if shift_down and result shift >= offset)
+            let effective_shift = if sh_amt != 0 && child.shift >= sh_cut {
+                (child.shift as i16 + sh_amt) as u16
+            } else {
+                child.shift
+            };
+            let final_shift = if shift_down && effective_shift >= offset {
+                let n_substs = substs.len() as u16;
+                effective_shift - n_substs
+            } else {
+                effective_shift
+            };
+            return SPtr::new(child.core, final_shift);
         }
         if sh_cut == 0 || child.shift >= sh_cut {
             let new_sh_amt = sh_amt + child.shift as i16;
