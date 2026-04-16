@@ -953,7 +953,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         }
         let e = self.whnf(e);
         if let Some(cached) = self.tc_cache.strong_cache.get(&(e.core, reduce_types, reduce_proofs)).copied() {
-            return self.ctx.sptr_shift(SPtr::closed(cached), e.shift)
+            return self.ctx.sptr_shift(SPtr::from_nlbv(cached, self.ctx.num_loose_bvars(cached)), e.shift)
         }
 
         let out = match self.ctx.view_sptr(e) {

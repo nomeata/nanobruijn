@@ -115,6 +115,7 @@ impl<'a> SPtr<'a> {
 
     /// Create an unshifted SPtr from a CorePtr. The expression MUST be open (nlbv > 0).
     /// For closed expressions, use `SPtr::closed(core)` instead.
+    /// For uncertain closedness, use `SPtr::from_nlbv(core, nlbv)`.
     #[inline(always)]
     pub fn unshifted(core: CorePtr<'a>) -> Self { Self { core, shift: 0 } }
 

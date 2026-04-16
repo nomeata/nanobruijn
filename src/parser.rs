@@ -496,7 +496,8 @@ impl<'a, R: BufRead> Parser<'a, R> {
 
     fn get_expr_sptr(&self, idx: u32) -> SPtr<'a> {
         let (dag_idx, shift) = self.expr_remap[idx as usize];
-        SPtr::new(crate::util::Ptr::from(DagMarker::ExportFile, dag_idx), shift)
+        let core = crate::util::Ptr::from(DagMarker::ExportFile, dag_idx);
+        if shift == SPtr::CLOSED_SHIFT { SPtr::closed(core) } else { SPtr::new(core, shift) }
     }
 
     /// Get the ExprPtr for a declaration type/value (must be closed, shift == CLOSED_SHIFT).
