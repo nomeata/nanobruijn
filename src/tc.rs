@@ -1380,8 +1380,8 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
     }
 
     fn def_eq_tagged(&mut self, x: SPtr<'t>, y: SPtr<'t>, tag: &str) -> bool {
+        if x == y { return true; }
         self.ctx.trace.def_eq_calls += 1;
-        if x == y { self.ctx.trace.defeq_ptr_eq += 1; }
         if self.ctx.trace.trace_defeq {
             eprintln!("  DEQ#{} [{}] d={} x=(s={} {}) y=(s={} {}) eq={}",
                 self.ctx.trace.def_eq_calls, tag, self.depth(),
