@@ -513,11 +513,14 @@ cascading cache misses → repeated whnf/infer → more expression creation → 
 
 - **Lazy frame invalidation**: DONE. On `pop_local`, frames are hidden (depth counter
   decremented) rather than destroyed. On `push_local`, if a hidden frame exists with
-  matching binder type, it is reused with all its caches intact. This gives the same
-  cache reuse as nanoda's flat DbjLevel cache for the common pop-all/push-all-same
-  pattern (e.g., checking a declaration's type then its value traverses the same binders).
-  Verified on `instHPow`: frame reuse enables the exact same infer cache hit that
-  nanoda gets with its flat cache.
+  matching binder type, it is reused with all its caches intact. This catches the
+  pop-all/push-all-same pattern (e.g., checking a declaration's type then its value
+  traverses the same binders). Limitation vs nanoda's flat DbjLevel cache: we only
+  get reuse when (a) the contexts match exactly and (b) the pop+push are consecutive
+  (no intervening push of a different type at the same depth). Nanoda's flat cache
+  gets hits even when contexts differ in the middle or when other work happens between
+  the two identical contexts. Closing this gap would require a fundamentally different
+  cache architecture (e.g., context-indexed flat cache).
 
 - **MAXINT shift for closed expressions**: Use `u16::MAX` as the SPtr shift to indicate
   "closed expression". This makes closed detection O(1) from the shift alone (check
