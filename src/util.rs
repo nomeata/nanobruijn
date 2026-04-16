@@ -1078,9 +1078,8 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
             else if arg_nlbv == 0 { fun.shift }
             else { fun.shift.min(arg.shift) };
         // Adjust children by subtracting min_shift (only for open children)
-        // Closed children keep CLOSED_SHIFT
-        let adj_fun = if fun.is_closed() { fun } else { SPtr::new(fun.core, fun.shift - min_shift) };
-        let adj_arg = if arg.is_closed() { arg } else { SPtr::new(arg.core, arg.shift - min_shift) };
+        let adj_fun = if fun_nlbv == 0 { SPtr::closed(fun.core) } else { SPtr::new(fun.core, fun.shift - min_shift) };
+        let adj_arg = if arg_nlbv == 0 { SPtr::closed(arg.core) } else { SPtr::new(arg.core, arg.shift - min_shift) };
         // Compute core nlbv and has_fvars
         let adj_fun_nlbv = self.sptr_nlbv(adj_fun);
         let adj_arg_nlbv = self.sptr_nlbv(adj_arg);
@@ -1090,8 +1089,8 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         let app_expr = Expr::App { fun: adj_fun, arg: adj_arg, num_loose_bvars: core_nlbv, has_fvars, hash };
         // OSNF check: min_shift of adjusted open children should be 0
         debug_assert!({
-            let f_s = if adj_fun.is_closed() || self.sptr_nlbv(adj_fun) == 0 { SPtr::CLOSED_SHIFT } else { adj_fun.shift };
-            let a_s = if adj_arg.is_closed() || self.sptr_nlbv(adj_arg) == 0 { SPtr::CLOSED_SHIFT } else { adj_arg.shift };
+            let f_s = if adj_fun.is_closed() { SPtr::CLOSED_SHIFT } else { adj_fun.shift };
+            let a_s = if adj_arg.is_closed() { SPtr::CLOSED_SHIFT } else { adj_arg.shift };
             f_s.min(a_s) == 0 || (f_s == SPtr::CLOSED_SHIFT && a_s == SPtr::CLOSED_SHIFT)
         }, "mk_app OSNF violation: adj_fun.shift={} adj_arg.shift={}", adj_fun.shift, adj_arg.shift);
         let core = self.alloc_expr(app_expr);
@@ -1132,14 +1131,13 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         // (body_nlbv == 1 means only bvar 0, which is bound by this lambda)
         // CLOSED_SHIFT means all-closed → result is closed
         let min_shift = self.binder_min_shift(ty_nlbv, binder_type.shift, body_nlbv, body.shift);
-        // Adjust children: closed children keep CLOSED_SHIFT
-        let adj_ty = if binder_type.is_closed() { binder_type } else { SPtr::new(binder_type.core, binder_type.shift - min_shift) };
+        // Adjust children: use nlbv checks (robust against invariant violations)
+        let adj_ty = if ty_nlbv == 0 { SPtr::closed(binder_type.core) } else { SPtr::new(binder_type.core, binder_type.shift - min_shift) };
         // Body adjustment: only adjust if body contributes (body_nlbv > 1).
-        // When body_nlbv <= 1 (only Var(0) or closed), body is unaffected by outer shift extraction.
         let adj_body = if body_nlbv > 1 {
             SPtr::new(body.core, body.shift - min_shift)
-        } else if body.is_closed() {
-            body // closed, keep CLOSED_SHIFT
+        } else if body_nlbv == 0 {
+            SPtr::closed(body.core)
         } else {
             body // body_nlbv == 1: only Var(0), shift should be 0 already
         };
@@ -1170,11 +1168,11 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         let ty_nlbv = self.sptr_nlbv(binder_type);
         let body_nlbv = self.sptr_nlbv(body);
         let min_shift = self.binder_min_shift(ty_nlbv, binder_type.shift, body_nlbv, body.shift);
-        let adj_ty = if binder_type.is_closed() { binder_type } else { SPtr::new(binder_type.core, binder_type.shift - min_shift) };
+        let adj_ty = if ty_nlbv == 0 { SPtr::closed(binder_type.core) } else { SPtr::new(binder_type.core, binder_type.shift - min_shift) };
         let adj_body = if body_nlbv > 1 {
             SPtr::new(body.core, body.shift - min_shift)
-        } else if body.is_closed() {
-            body // closed, keep CLOSED_SHIFT
+        } else if body_nlbv == 0 {
+            SPtr::closed(body.core)
         } else {
             body // body_nlbv == 1: only Var(0), shift should be 0 already
         };
@@ -1212,13 +1210,13 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
             min_shift = min_shift.min(body.shift.saturating_sub(1));
         }
         // min_shift == CLOSED_SHIFT means all children are closed
-        let adj_ty = if binder_type.is_closed() { binder_type } else { SPtr::new(binder_type.core, binder_type.shift - min_shift) };
-        let adj_val = if val.is_closed() { val } else { SPtr::new(val.core, val.shift - min_shift) };
+        let adj_ty = if ty_nlbv == 0 { SPtr::closed(binder_type.core) } else { SPtr::new(binder_type.core, binder_type.shift - min_shift) };
+        let adj_val = if val_nlbv == 0 { SPtr::closed(val.core) } else { SPtr::new(val.core, val.shift - min_shift) };
         // Body: adjust only when it contributes (body_nlbv > 1)
         let adj_body = if body_nlbv > 1 {
             SPtr::new(body.core, body.shift - min_shift)
-        } else if body.is_closed() {
-            body // closed, keep CLOSED_SHIFT
+        } else if body_nlbv == 0 {
+            SPtr::closed(body.core)
         } else {
             body // body_nlbv == 1: only Var(0), shift should be 0 already
         };
