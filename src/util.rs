@@ -151,6 +151,21 @@ impl<'a> SPtr<'a> {
         if amount == 0 || self.is_closed() { return self; }
         Self { core: self.core, shift: self.shift + amount }
     }
+
+    /// Adjust an SPtr valid at `from_depth` to be valid at `to_depth`.
+    /// Closed expressions are depth-independent and returned unchanged.
+    /// For open expressions, the shift is adjusted by the depth difference.
+    #[inline(always)]
+    pub fn adjust_depth(self, from_depth: usize, to_depth: usize) -> Self {
+        if self.is_closed() || from_depth == to_depth { return self; }
+        if to_depth > from_depth {
+            Self { core: self.core, shift: self.shift + (to_depth - from_depth) as u16 }
+        } else {
+            debug_assert!(self.shift as usize >= from_depth - to_depth,
+                "adjust_depth underflow: shift={} from={} to={}", self.shift, from_depth, to_depth);
+            Self::new(self.core, self.shift - (from_depth - to_depth) as u16)
+        }
+    }
 }
 
 pub type AppArgs<'a> = SmallVec<[SPtr<'a>; 8]>;
@@ -1335,6 +1350,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
     /// Pure value construction — no DAG allocation. Collapses Var(0) shifts.
     #[inline(always)]
     pub fn mk_shift(&self, inner: ExprPtr<'t>, amount: u16) -> SPtr<'t> {
+        if self.num_loose_bvars(inner) == 0 { return SPtr::closed(inner); }
         SPtr::new(inner, amount)
     }
 

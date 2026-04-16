@@ -304,10 +304,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
     /// This is the depth at which the core's variables are anchored.
     #[inline(always)]
     fn cache_bucket(&self, e: SPtr<'t>) -> usize {
-        if e.is_closed() { return 0; }
-        let nlbv = self.ctx.num_loose_bvars(e.core);
-        if nlbv == 0 { return 0; }
-        self.depth() - e.shift as usize
+        if e.is_closed() { 0 } else { self.depth() - e.shift as usize }
     }
 
     /// Cross-shift depth-stacked UF: find representative SPtr at current depth.
@@ -339,18 +336,20 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         let rx = self.uf_find(x);
         let ry = self.uf_find(y);
         if rx == ry { return; }
+        let depth = self.depth();
         let bx = self.cache_bucket(rx);
         let by = self.cache_bucket(ry);
         // Store non-rep at its bucket, pointing to rep.
         // Rep = lower bucket (survives more pops).
-        // delta: shift difference so that find recovers the rep's shift.
+        // adjust_depth handles closed reps transparently.
         if bx <= by {
-            // rx is rep. Store ry.core → SPtr(rx.core, rx.shift - ry.shift) at by.
-            let delta = rx.shift.wrapping_sub(ry.shift);
-            self.tc_cache.uf_insert(by, ry.core, SPtr::new(rx.core, delta));
+            // rx is rep. Adjust rx from current depth to ry's bucket depth.
+            let stored = rx.adjust_depth(depth, by);
+            self.tc_cache.uf_insert(by, ry.core, stored);
         } else {
-            let delta = ry.shift.wrapping_sub(rx.shift);
-            self.tc_cache.uf_insert(bx, rx.core, SPtr::new(ry.core, delta));
+            // ry is rep. Adjust ry from current depth to rx's bucket depth.
+            let stored = ry.adjust_depth(depth, bx);
+            self.tc_cache.uf_insert(bx, rx.core, stored);
         }
     }
 
