@@ -304,7 +304,10 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
     /// This is the depth at which the core's variables are anchored.
     #[inline(always)]
     fn cache_bucket(&self, e: SPtr<'t>) -> usize {
-        if e.is_closed() { 0 } else { self.depth() - e.shift as usize }
+        if e.is_closed() { return 0; }
+        let nlbv = self.ctx.num_loose_bvars(e.core);
+        if nlbv == 0 { return 0; }
+        self.depth() - e.shift as usize
     }
 
     /// Cross-shift depth-stacked UF: find representative SPtr at current depth.
