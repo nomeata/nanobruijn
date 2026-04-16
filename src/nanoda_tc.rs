@@ -904,6 +904,13 @@ impl<'x, 't: 'x, 'p: 't> NanodaTypeChecker<'x, 't, 'p> {
     pub fn def_eq(&mut self, x: SPtr<'t>, y: SPtr<'t>) -> bool {
         self.ctx.trace.def_eq_calls += 1;
         if x == y { self.ctx.trace.defeq_ptr_eq += 1; }
+        if self.ctx.trace.trace_defeq {
+            eprintln!("  DEQ#{} d={} x=(s={} {}) y=(s={} {}) eq={}",
+                self.ctx.trace.def_eq_calls, 0,
+                x.shift, self.ctx.expr_desc(x.core, 8),
+                y.shift, self.ctx.expr_desc(y.core, 8),
+                x == y);
+        }
         if let Some(easy) = self.def_eq_quick_check(x, y) {
             return easy
         }

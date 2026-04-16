@@ -558,6 +558,7 @@ pub struct TcTrace {
     pub defeq_peel_calls: u64,
     pub defeq_shadow_would_hit: u64,
     pub defeq_ptr_eq: u64,
+    pub trace_defeq: bool,
     pub def_eq_inner_calls: u64,
     pub def_eq_deep_calls: u64,  // survived both quick_checks, entering lazy_delta
     // wnu cache miss breakdown

@@ -103,7 +103,9 @@ impl<'p> ExportFile<'p> {
             Inductive(..) => { self.check_inductive_declar(d); (crate::util::TcTrace::default(), dag) },
             Quot { .. } => { self.with_ctx(|ctx| crate::quot::check_quot(ctx, d)); (crate::util::TcTrace::default(), dag) },
             Definition { val, .. } | Theorem { val, .. } | Opaque { val, .. } => {
+                let tdf = self.config.declaration_filter.is_some();
                 let (r, dag) = self.with_tc_and_declar_reusing(*d.info(), dag, |tc| {
+                    tc.ctx.trace.trace_defeq = tdf;
                     tc.check_declar_info(d).unwrap();
                     let inferred_type = tc.infer(SPtr::unshifted(*val), crate::tc::InferFlag::Check);
                     tc.assert_def_eq(inferred_type, SPtr::unshifted(d.info().ty));
@@ -136,7 +138,9 @@ impl<'p> ExportFile<'p> {
             Inductive(..) => { self.check_inductive_declar(d); (crate::util::TcTrace::default(), dag) },
             Quot { .. } => { self.with_ctx(|ctx| crate::quot::check_quot(ctx, d)); (crate::util::TcTrace::default(), dag) },
             Definition { val, .. } | Theorem { val, .. } | Opaque { val, .. } => {
+                let tdf = self.config.declaration_filter.is_some();
                 let (r, dag) = self.with_nanoda_tc_and_declar_reusing(*d.info(), dag, |tc| {
+                    tc.ctx.trace.trace_defeq = tdf;
                     tc.check_declar_info(d).unwrap();
                     let inferred_type = tc.infer(SPtr::unshifted(*val), crate::nanoda_tc::InferFlag::Check);
                     tc.assert_def_eq(inferred_type, SPtr::unshifted(d.info().ty));
@@ -179,6 +183,7 @@ impl<'p> ExportFile<'p> {
                 let name = self.with_ctx(|ctx| ctx.name_to_string(declar.info().name));
                 if !name.contains(filter.as_str()) { continue; }
             }
+            let trace_defeq_flag = self.config.declaration_filter.is_some();
             let decl_start = std::time::Instant::now();
             if i % 1000 == 0 || (skip_decl > 0 && i == skip_decl) {
                 let elapsed = decl_start.duration_since(start).as_millis();
@@ -1226,7 +1231,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             Lambda { binder_type: t2, body: body2, .. },
         ) = self.ctx.view_sptr_pair(x, y)
         {
-            if self.def_eq(t1, t2) {
+            if self.def_eq_tagged(t1, t2, "bnd_ty") {
                 self.push_local(t1);
                 x = body1;
                 y = body2;
@@ -1236,7 +1241,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             }
         }
 
-        let r = self.def_eq(x, y);
+        let r = self.def_eq_tagged(x, y, "bnd_body");
         self.restore_depth(depth0);
         Some(r)
     }
@@ -1320,21 +1325,21 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         }
 
         let args_eq = args1.into_iter().zip(args2).all(|(xx, yy)| {
-            self.def_eq(xx, yy)
+            self.def_eq_tagged(xx, yy, "app_arg")
         });
 
         if !args_eq {
             return false
         }
 
-        if !self.def_eq(f1, f2) {
+        if !self.def_eq_tagged(f1, f2, "app_fun") {
             return false
         }
         true
     }
 
     pub fn assert_def_eq(&mut self, u: SPtr<'t>, v: SPtr<'t>) {
-        if !self.def_eq(u, v) {
+        if !self.def_eq_tagged(u, v, "assert") {
             eprintln!("  assert_def_eq FAILED at depth {}:", self.depth());
             eprintln!("    u = {} (shift={} nlbv={})", self.ctx.expr_desc(u.core, 20), u.shift, self.ctx.num_loose_bvars(u.core));
             eprintln!("    v = {} (shift={} nlbv={})", self.ctx.expr_desc(v.core, 20), v.shift, self.ctx.num_loose_bvars(v.core));
@@ -1371,10 +1376,19 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         }
     }
     pub fn def_eq(&mut self, x: SPtr<'t>, y: SPtr<'t>) -> bool {
+        self.def_eq_tagged(x, y, "")
+    }
+
+    fn def_eq_tagged(&mut self, x: SPtr<'t>, y: SPtr<'t>, tag: &str) -> bool {
         self.ctx.trace.def_eq_calls += 1;
-        // Count quick resolutions
-        let resolved_quick = x == y;
-        if resolved_quick { self.ctx.trace.defeq_ptr_eq += 1; }
+        if x == y { self.ctx.trace.defeq_ptr_eq += 1; }
+        if self.ctx.trace.trace_defeq {
+            eprintln!("  DEQ#{} [{}] d={} x=(s={} {}) y=(s={} {}) eq={}",
+                self.ctx.trace.def_eq_calls, tag, self.depth(),
+                x.shift, self.ctx.expr_desc(x.core, 8),
+                y.shift, self.ctx.expr_desc(y.core, 8),
+                x == y);
+        }
         self.ctx.check_heartbeat();
         stacker::maybe_grow(64 * 1024, 2 * 1024 * 1024, || self.def_eq_inner(x, y))
     }
@@ -1398,7 +1412,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                 debug_assert!((common as usize) <= depth);
                 let inner_depth = depth - common as usize;
                 let saved = self.tc_cache.split_off(inner_depth);
-                let r = self.def_eq(nx, ny);
+                let r = self.def_eq_tagged(nx, ny, "peel");
                 self.tc_cache.extend(saved);
                 return r;
             }
