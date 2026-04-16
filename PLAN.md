@@ -522,10 +522,12 @@ cascading cache misses → repeated whnf/infer → more expression creation → 
   the two identical contexts. Closing this gap would require a fundamentally different
   cache architecture (e.g., context-indexed flat cache).
 
-- **MAXINT shift for closed expressions**: Use `u16::MAX` as the SPtr shift to indicate
-  "closed expression". This makes closed detection O(1) from the shift alone (check
-  `shift == u16::MAX`), and `min` operations naturally work (`min(MAX, k) = k`).
-  Requires careful handling in shift arithmetic to avoid overflow.
+- **CLOSED_SHIFT (u16::MAX) for closed expressions**: DONE. `SPtr::CLOSED_SHIFT = u16::MAX`
+  indicates a closed expression (nlbv=0). O(1) closedness check via `is_closed()` instead
+  of DAG lookup. Acts as +infinity in min calculations. Eliminates DAG lookups in
+  sptr_nlbv, sptr_shift, cache_bucket, unfold_apps peel guards.
+  Strict invariant: shift=0 means OPEN at current depth, CLOSED_SHIFT means closed.
+  Init: 237B instructions (improved from 245B pre-CLOSED_SHIFT).
 
 - **Fill in Theory.lean sorry's**: OSNF uniqueness, erase preservation
 - **Remove remaining dead code**: thread_local profiling counters, dead locally-nameless
