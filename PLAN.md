@@ -23,34 +23,31 @@ We use a local context array with `push_local`/`pop_local` (zero allocation).
 - `lookup_var` retrieves types from `local_ctx[depth - 1 - idx]` and shifts to current depth
 - `inductive.rs`/`quot.rs` still use old Local approach (works correctly)
 
-### Shift nodes (delayed shifting)
+### SPtr: Shift-in-pointer (replacing Shift DAG nodes)
 
-`Shift { inner, amount: u16 }` expression variant wraps expressions for O(1) shifting.
-OSNF invariant: `inner.fvar_lb == 0`, `amount > 0`. No cutoff field, no negative amounts.
-Nested shifts are impossible (inner can't be Shift since inner.fvar_lb == 0).
+No `Shift` variant in the Expr enum. Instead, `SPtr = (CorePtr, u16)` carries the shift
+inline. The DAG only stores core expressions. `SPtr(ptr, k)` represents `shift(dag[ptr], k, 0)`.
 
-- `mk_shift(inner, amount: u16)`: creates wrappers, collapses nested Shifts, elides on
-  closed expressions, eagerly forces `Var(k)` → `Var(k+amount)`. Enforces OSNF: if inner
-  has fvar_lb > 0, normalizes to core first.
-- `push_shift_up(e, amount)`: pushes Shift one level into constructor (cutoff=0).
-  Non-binder children: `mk_shift(child, amount)` (O(1)).
-  Binder bodies: `shift_expr(body, amount, 1)` (traversal, cached).
-  App: recurses into `fun`, Shift-wraps `arg`. Allocates directly (bypasses mk_app OSNF).
-  Pi/Lambda: delegates to `mk_pi`/`mk_lambda` which enforce OSNF — result may be Shift-wrapped.
-- `view_expr(e)`: transparently sees through Shift nodes via `view_expr_shifted`.
-  Never returns `Shift` variant; children may be Shift-wrapped. Used throughout TC, inductive
-  checking, and def_eq for all pattern matches on compound constructors.
-- `shift_expr(e, amount, cutoff)`: full traversal for cutoff > 0. Cached via shift_cache.
-  Rebuilds via mk_* constructors, producing OSNF results.
-- **fvar_lb optimization**: In `shift_expr_aux` and `push_shift_down_cutoff`, when
-  `fvar_lb >= cutoff`, all free bvars are above the cutoff, so the cutoff is irrelevant.
-  Converts to O(1) cutoff=0 path (mk_shift or Shift adjustment) instead of full traversal.
-  Critical for avoiding O(depth) recursion on deeply nested binder chains.
+- `SPtr::CLOSED_SHIFT = u16::MAX`: Sentinel for closed expressions (nlbv=0). Acts as
+  +infinity in min calculations. Strict invariant: shift=0 means OPEN at depth 0,
+  CLOSED_SHIFT means closed. Enforced by `osnf_adj` (panics on violation).
+- `SPtr::closed(core)`, `SPtr::unshifted(core)`, `SPtr::new(core, k)`, `SPtr::from_nlbv(core, nlbv)`:
+  Constructors for different cases. `from_nlbv` checks nlbv to pick closed vs open.
+- `sptr_shift(e, amount)`: O(1) shift composition. No-op for closed (is_closed() check).
+- `view_sptr(e)`: if shift=0 or closed, returns read_expr directly. Otherwise adjusts
+  children by composing shifts. Non-binder children: O(1). Binder bodies: full traversal via
+  shift_expr_aux_sptr (cached).
+- `osnf_adj(nlbv, amount)`: OSNF child adjustment. Normalizes closed children (nlbv=0) to
+  CLOSED_SHIFT. Panics if invariant violated. Used in all mk_* constructors.
+- `adjust_depth(from, to)`: Depth-aware shift adjustment for UF and cache operations.
+  Handles closed expressions transparently.
+- `mk_shift(inner, amount)`: Returns SPtr::closed for closed cores, SPtr::new otherwise.
+- `unfold_apps`: Checks is_closed()/shift==0 per-iteration to avoid unnecessary sptr_shift.
+- **OSNF for cores**: min(open_child.shift) == 0. CLOSED_SHIFT children act as infinity in min.
 
-**Shift composition in inst_aux**: When `inst_aux` carries pending shift `(sh_amt, sh_cut)`
-and encounters `Shift(inner, amount, cutoff)`, it composes the shifts directly when
-`cutoff < sh_cut && amount >= (sh_cut - cutoff)`, avoiding intermediate Shift creation.
-This captures ~100% of first-level binder mismatches and repeats at every binder depth.
+**Shift composition in inst_aux**: `inst_aux` carries pending shift `(sh_amt, sh_cut)`.
+SPtr children's shifts compose with the pending shift: if `child.shift >= sh_cut`,
+clean composition. Otherwise, view_sptr fallback.
 
 ### Pointer equality (replacing sem_eq)
 
@@ -527,7 +524,16 @@ cascading cache misses → repeated whnf/infer → more expression creation → 
   of DAG lookup. Acts as +infinity in min calculations. Eliminates DAG lookups in
   sptr_nlbv, sptr_shift, cache_bucket, unfold_apps peel guards.
   Strict invariant: shift=0 means OPEN at current depth, CLOSED_SHIFT means closed.
-  Init: 237B instructions (improved from 245B pre-CLOSED_SHIFT).
+  Enforced by `osnf_adj` (panics on violation). Invariant violation root-caused and fixed
+  (nested inductive types with no params to abstract).
+
+## Current performance
+
+| | Init | Mathlib |
+|---|---|---|
+| **nanoda (baseline)** | 227B | ~19.2T |
+| **nanobruijn (current)** | 237B | 11.5T |
+| **speedup** | 0.96x | **1.67x** |
 
 - **Fill in Theory.lean sorry's**: OSNF uniqueness, erase preservation
 - **Remove remaining dead code**: thread_local profiling counters, dead locally-nameless
