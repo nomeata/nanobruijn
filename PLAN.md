@@ -507,11 +507,17 @@ cascading cache misses → repeated whnf/infer → more expression creation → 
   - Core compound → fvar_lb = 0
   So fvar_lb could be removed as a stored field, shrinking Expr.
 
-- **Depth-stacked UF for def_eq**: The union-find in def_eq is currently restricted to
-  closed expressions only (non-depth-stacked UF is unsound for open expressions — unions
-  from one depth are invalid at another). Investigate a depth-stacked UF where unions are
-  associated with a depth and invalidated on pop. This would recover the performance
-  benefit of transitive equality for open expressions while staying correct.
+- **Depth-stacked UF for def_eq**: DONE. Cross-shift weighted UF with per-depth buckets
+  in DepthFrame. Unions for closed expressions go to bucket 0; open expressions to
+  `depth - shift`. The `uf_find` method follows chains across buckets via `sptr_shift`.
+
+- **Lazy frame invalidation**: DONE. On `pop_local`, frames are hidden (depth counter
+  decremented) rather than destroyed. On `push_local`, if a hidden frame exists with
+  matching binder type, it is reused with all its caches intact. This gives the same
+  cache reuse as nanoda's flat DbjLevel cache for the common pop-all/push-all-same
+  pattern (e.g., checking a declaration's type then its value traverses the same binders).
+  Verified on `instHPow`: frame reuse enables the exact same infer cache hit that
+  nanoda gets with its flat cache.
 
 - **MAXINT shift for closed expressions**: Use `u16::MAX` as the SPtr shift to indicate
   "closed expression". This makes closed detection O(1) from the shift alone (check
