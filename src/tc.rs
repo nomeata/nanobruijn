@@ -1383,10 +1383,19 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         if x == y { return true; }
         self.ctx.trace.def_eq_calls += 1;
         if self.ctx.trace.trace_defeq {
+            if let (Expr::Sort { level: lx, .. }, Expr::Sort { level: ly, .. }) = (self.ctx.read_expr(x.core), self.ctx.read_expr(y.core)) {
+                if lx == ly {
+                    eprintln!("  SORT-SAME-LEVEL but diff core! x.core={:?}@{} y.core={:?}@{} level={:?}@{}",
+                        x.core.dag_marker(), x.core.idx(), y.core.dag_marker(), y.core.idx(),
+                        lx.dag_marker(), lx.idx());
+                }
+            }
+        }
+        if self.ctx.trace.trace_defeq {
             eprintln!("  DEQ#{} [{}] d={} x=(s={} {}) y=(s={} {}) eq={}",
                 self.ctx.trace.def_eq_calls, tag, self.depth(),
-                x.shift, self.ctx.expr_desc(x.core, 8),
-                y.shift, self.ctx.expr_desc(y.core, 8),
+                x.shift, self.ctx.expr_desc(x.core, 15),
+                y.shift, self.ctx.expr_desc(y.core, 15),
                 x == y);
         }
         self.ctx.check_heartbeat();
@@ -1698,9 +1707,11 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             return Some(true)
         }
         if let Some(r) = self.def_eq_sort(x, y) {
+            if r { self.eq_cache_insert(x, y); self.uf_union(x, y); }
             return Some(r)
         }
         if let Some(r) = self.def_eq_binder_multi(x, y) {
+            if r { self.eq_cache_insert(x, y); self.uf_union(x, y); }
             return Some(r)
         }
         None

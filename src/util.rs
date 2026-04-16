@@ -847,7 +847,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         if max_depth == 0 { return "...".to_string(); }
         match self.read_expr(e) {
             Expr::Var { dbj_idx, .. } => format!("V{}", dbj_idx),
-            Expr::Sort { .. } => "Sort".to_string(),
+            Expr::Sort { level, .. } => format!("Sort({:?}@{})", level.dag_marker(), level.idx()),
             Expr::Const { name, .. } => {
                 let n = self.name_to_string(name);
                 let short = n.rsplit('.').next().unwrap_or(&n);

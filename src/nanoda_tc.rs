@@ -1139,9 +1139,11 @@ impl<'x, 't: 'x, 'p: 't> NanodaTypeChecker<'x, 't, 'p> {
             return Some(true)
         }
         if let Some(r) = self.def_eq_sort(x, y) {
+            if r { self.tc_cache.eq_cache.union(x.core, y.core); }
             return Some(r)
         }
         if let Some(r) = self.def_eq_binder_multi(x, y) {
+            if r { self.tc_cache.eq_cache.union(x.core, y.core); }
             return Some(r)
         }
         None
