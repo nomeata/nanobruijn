@@ -456,6 +456,9 @@ impl<'x, 't: 'x, 'p: 't> NanodaTypeChecker<'x, 't, 'p> {
 
     pub(crate) fn infer(&mut self, e: SPtr<'t>, flag: InferFlag) -> SPtr<'t> {
         self.ctx.trace.infer_calls += 1;
+        if self.ctx.trace.trace_defeq {
+            eprintln!("  INF#{} s={} {:?}@{} {}", self.ctx.trace.infer_calls, e.shift, e.core.dag_marker(), e.core.idx(), self.ctx.expr_desc(e.core, 12));
+        }
         if let Some(cached) = self.tc_cache.infer_cache_check.get(&e.core).copied() {
             self.ctx.trace.infer_cache_hits += 1;
             return cached
