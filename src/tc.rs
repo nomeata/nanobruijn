@@ -368,12 +368,20 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
     /// Push a lambda/pi binder onto the local context.
     /// Takes SPtr because types carry their shift context.
     fn push_local(&mut self, ty: SPtr<'t>) {
-        self.tc_cache.push_local(ty);
+        if self.tc_cache.push_local(ty) {
+            self.ctx.trace.frame_reuse += 1;
+        } else {
+            self.ctx.trace.frame_new += 1;
+        }
     }
 
     /// Push a let-binding onto the local context (type + value).
     fn push_local_let(&mut self, ty: SPtr<'t>, val: SPtr<'t>) {
-        self.tc_cache.push_local_let(ty, val);
+        if self.tc_cache.push_local_let(ty, val) {
+            self.ctx.trace.frame_reuse += 1;
+        } else {
+            self.ctx.trace.frame_new += 1;
+        }
     }
 
     /// Pop a binder from the local context (exiting a binder).
@@ -718,6 +726,9 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
 
     pub(crate) fn infer(&mut self, e: SPtr<'t>, flag: InferFlag) -> SPtr<'t> {
         self.ctx.trace.infer_calls += 1;
+        if self.ctx.trace.trace_defeq {
+            eprintln!("  INF#{} d={} s={} {:?}@{} {}", self.ctx.trace.infer_calls, self.depth(), e.shift, e.core.dag_marker(), e.core.idx(), self.ctx.expr_desc(e.core, 8));
+        }
         stacker::maybe_grow(64 * 1024, 2 * 1024 * 1024, || self.infer_inner(e, flag))
     }
 

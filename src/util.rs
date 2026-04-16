@@ -558,6 +558,8 @@ pub struct TcTrace {
     pub defeq_peel_calls: u64,
     pub defeq_shadow_would_hit: u64,
     pub defeq_ptr_eq: u64,
+    pub frame_reuse: u64,
+    pub frame_new: u64,
     pub trace_defeq: bool,
     pub def_eq_inner_calls: u64,
     pub def_eq_deep_calls: u64,  // survived both quick_checks, entering lazy_delta
@@ -625,10 +627,11 @@ impl std::fmt::Display for TcTrace {
                 self.eq_cache_cross_depth_hits)?;
         }
         write!(f, " | wnu_st={}/{}/{}/{}", self.wnu_cache_new_inserts, self.wnu_cache_update_lower, self.wnu_cache_update_higher, self.wnu_cache_update_skip)?;
-        write!(f, " | mka={}/{} mkp={} mkl={} mklt={} mkv={} mkpr={} mko={}",
+        write!(f, " | mka={}/{} mkp={} mkl={} mklt={} mkv={} mkpr={} mko={} fr={}/{}",
             self.alloc_mk_app, self.alloc_mk_app_cache_hit,
             self.alloc_mk_pi, self.alloc_mk_lambda, self.alloc_mk_let,
-            self.alloc_mk_var, self.alloc_mk_proj, self.alloc_mk_other)?;
+            self.alloc_mk_var, self.alloc_mk_proj, self.alloc_mk_other,
+            self.frame_reuse, self.frame_new)?;
         Ok(())
     }
 }
@@ -870,7 +873,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
                 let short = n.rsplit('.').next().unwrap_or(&n);
                 format!("Proj({}.{},{}+{})", short, idx, self.expr_desc(structure.core, max_depth - 1), structure.shift)
             }
-            Expr::Local { .. } => "Local".to_string(),
+            Expr::Local { id, .. } => format!("L{}", match id { crate::expr::FVarId::Unique(n) => format!("u{}", n), crate::expr::FVarId::DbjLevel(n) => format!("d{}", n) }),
             Expr::NatLit { ptr, .. } => format!("NatLit({})", self.read_bignum(ptr).map(|n| n.to_string()).unwrap_or("?".into())),
             Expr::StringLit { .. } => "Str".to_string(),
         }
@@ -1760,7 +1763,11 @@ pub(crate) struct TcCache<'t> {
     /// Per-depth frames: local bindings + open-expression caches.
     /// Frame at index i corresponds to binder depth i+1.
     /// Cache bucket k>0 maps to frames[k-1].
+    /// frames[0..depth] are active; frames[depth..] are hidden (lazy invalidation).
     pub(crate) frames: Vec<DepthFrame<'t>>,
+    /// Active depth: number of currently active frames. May be < frames.len()
+    /// when frames are kept around for potential reuse after pop.
+    depth: usize,
 }
 
 impl<'t> TcCache<'t> {
@@ -1772,6 +1779,7 @@ impl<'t> TcCache<'t> {
             uf_base: LazyMap::new(),
             strong_cache: new_unique_hash_map(),
             frames: Vec::new(),
+            depth: 0,
         }
     }
 
@@ -1779,41 +1787,77 @@ impl<'t> TcCache<'t> {
         *self = Self::new();
     }
 
-    /// Current binding depth (number of binders entered).
-    pub(crate) fn depth(&self) -> usize { self.frames.len() }
+    /// Current binding depth (number of active frames).
+    pub(crate) fn depth(&self) -> usize { self.depth }
 
-    pub(crate) fn push_local(&mut self, ty: SPtr<'t>) {
-        self.frames.push(DepthFrame::new(ty, None));
+    /// Push a new binder. If a hidden frame exists with a matching type,
+    /// reuse it (preserving its caches). Otherwise, create a fresh frame.
+    /// Returns true if frame was reused.
+    pub(crate) fn push_local(&mut self, ty: SPtr<'t>) -> bool {
+        if self.frames.len() > self.depth
+            && self.frames[self.depth].local.0 == ty
+            && self.frames[self.depth].local.1.is_none()
+        {
+            self.depth += 1;
+            true
+        } else {
+            self.frames.truncate(self.depth);
+            self.frames.push(DepthFrame::new(ty, None));
+            self.depth += 1;
+            false
+        }
     }
 
-    pub(crate) fn push_local_let(&mut self, ty: SPtr<'t>, val: SPtr<'t>) {
-        self.frames.push(DepthFrame::new(ty, Some(val)));
+    /// Returns true if frame was reused.
+    pub(crate) fn push_local_let(&mut self, ty: SPtr<'t>, val: SPtr<'t>) -> bool {
+        if self.frames.len() > self.depth
+            && self.frames[self.depth].local.0 == ty
+            && self.frames[self.depth].local.1 == Some(val)
+        {
+            self.depth += 1;
+            true
+        } else {
+            self.frames.truncate(self.depth);
+            self.frames.push(DepthFrame::new(ty, Some(val)));
+            self.depth += 1;
+            false
+        }
     }
 
+    /// Pop a binder. The frame is hidden (kept for potential reuse), not destroyed.
     pub(crate) fn pop_local(&mut self) {
-        self.frames.pop().expect("pop_local: empty context");
+        assert!(self.depth > 0, "pop_local: empty context");
+        self.depth -= 1;
     }
 
     pub(crate) fn restore_depth(&mut self, depth: usize) {
-        self.frames.truncate(depth);
+        self.depth = depth;
     }
 
+    /// Split off active frames above new_depth (for peel mechanism).
+    /// Hidden frames above current depth are truncated first.
     pub(crate) fn split_off(&mut self, new_depth: usize) -> Vec<DepthFrame<'t>> {
+        self.frames.truncate(self.depth);
+        self.depth = new_depth;
         self.frames.split_off(new_depth)
     }
 
+    /// Restore frames saved by split_off. Hidden frames accumulated
+    /// during the split are truncated first.
     pub(crate) fn extend(&mut self, saved: Vec<DepthFrame<'t>>) {
+        self.frames.truncate(self.depth);
         self.frames.extend(saved);
+        self.depth = self.frames.len();
     }
 
     pub(crate) fn local_type(&self, dbj_idx: u16) -> SPtr<'t> {
-        let depth = self.frames.len();
+        let depth = self.depth;
         assert!(dbj_idx < depth as u16, "local_type: dbj_idx={} >= depth={}", dbj_idx, depth);
         self.frames[depth - 1 - dbj_idx as usize].local.0
     }
 
     pub(crate) fn local_value(&self, dbj_idx: u16) -> Option<SPtr<'t>> {
-        let depth = self.frames.len();
+        let depth = self.depth;
         if dbj_idx >= depth as u16 { return None; }
         self.frames[depth - 1 - dbj_idx as usize].local.1
     }
