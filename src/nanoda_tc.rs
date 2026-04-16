@@ -138,7 +138,7 @@ impl<'x, 't: 'x, 'p: 't> NanodaTypeChecker<'x, 't, 'p> {
         let info = d.info();
         assert!(self.ctx.no_dupes_all_params(info.uparams));
         assert!(!self.ctx.has_fvars(info.ty));
-        let inferred_type = self.infer(SPtr::unshifted(info.ty), Check);
+        let inferred_type = self.infer(SPtr::closed(info.ty), Check);
         let sort = self.ensure_sort(inferred_type);
 
         // This is sort of a "soft" check in terms of soundness, but for theorems, ensure 
@@ -470,7 +470,7 @@ impl<'x, 't: 'x, 'p: 't> NanodaTypeChecker<'x, 't, 'p> {
             }
         }
         let r = match self.ctx.view_sptr(e) {
-            Local { binder_type, .. } => SPtr::unshifted(binder_type),
+            Local { binder_type, .. } => SPtr::closed(binder_type),
             Var { .. } => panic!("no loose bvars allowed in infer"),
             Sort { level, .. } => self.infer_sort(level, flag),
             App { .. } => self.infer_app(e, flag),
@@ -863,7 +863,7 @@ impl<'x, 't: 'x, 'p: 't> NanodaTypeChecker<'x, 't, 'p> {
     fn def_eq_local(&mut self, x: SPtr<'t>, y: SPtr<'t>) -> bool {
         match (self.ctx.read_expr(x.core), self.ctx.read_expr(y.core)) {
             (Local { id: x_id, binder_type: tx, .. }, Local { id: y_id, binder_type: ty, .. }) =>
-                x_id == y_id && self.def_eq(SPtr::unshifted(tx), SPtr::unshifted(ty)),
+                x_id == y_id && self.def_eq(SPtr::closed(tx), SPtr::closed(ty)),
             _ => false,
         }
     }

@@ -117,7 +117,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
             for (idx, ctor) in inductive.ctors.iter().copied().enumerate() {
                 let info = DeclarInfo { name: ctor.name, ty: ctor.ty, uparams: nest_st.uparams };
                 let num_params = u16::try_from(nest_st.local_params.len()).unwrap();
-                let num_fields = self.pi_telescope_size(SPtr::unshifted(ctor.ty)) - num_params;
+                let num_fields = self.pi_telescope_size(SPtr::closed(ctor.ty)) - num_params;
                 let d = Declar::Constructor(ConstructorData {
                     info,
                     inductive_name: inductive.name,
@@ -340,7 +340,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
     /// inductive type's parameters, also returning the end of the telescope instantiated
     /// with the parameters.
     fn get_local_params(&mut self, e: ExprPtr<'t>, num_params: u16) -> (Vec<ExprPtr<'t>>, SPtr<'t>) {
-        let mut cursor = SPtr::unshifted(e);
+        let mut cursor = SPtr::closed(e);
         let mut param_locals = Vec::with_capacity(num_params as usize);
         for _ in 0..num_params {
             match self.ctx.view_sptr(cursor) {
@@ -362,7 +362,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
     fn check_inductive_spec_0th(&mut self, uparams: LevelsPtr<'t>, st: &mut InductiveCheckState<'t>) {
         self.tc_cache.clear();
         let (ind_name, ind_ty_cursor_ptr) = st.all_inductives_incl_specialized.get(0).map(|x| (x.name, x.ty)).unwrap();
-        let mut ind_ty_cursor = self.whnf(SPtr::unshifted(ind_ty_cursor_ptr));
+        let mut ind_ty_cursor = self.whnf(SPtr::closed(ind_ty_cursor_ptr));
         let mut indices_locals = Vec::new();
         let mut i = 0;
         while let Pi { binder_name, binder_style, binder_type, body, .. } = self.ctx.view_sptr(ind_ty_cursor) {
@@ -371,11 +371,11 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                 match self.ctx.read_expr(local_) {
                     Local { binder_type: t2, .. } => {
                         self.tc_cache.clear();
-                        self.assert_def_eq(binder_type, SPtr::unshifted(t2));
+                        self.assert_def_eq(binder_type, SPtr::closed(t2));
                     }
                     _ => panic!(),
                 }
-                ind_ty_cursor = self.ctx.inst(body, &[SPtr::unshifted(st.local_params[i])]);
+                ind_ty_cursor = self.ctx.inst(body, &[SPtr::closed(st.local_params[i])]);
                 ind_ty_cursor = self.whnf(ind_ty_cursor);
             } else {
                 let local_ = self.ctx.mk_unique(binder_name, binder_style, binder_type.core);
@@ -400,12 +400,12 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
     /// Check the rest of the types in a mutual block, ensuring they agree with the base type.
     fn check_inductive_specs_mutual1(&mut self, st: &mut InductiveCheckState<'t>, ind: IndTyHeader<'t>) {
         self.tc_cache.clear();
-        let mut ind_ty_cursor = self.whnf(SPtr::unshifted(ind.ty));
+        let mut ind_ty_cursor = self.whnf(SPtr::closed(ind.ty));
         let mut indices_locals = Vec::new();
         let mut i = 0;
         while let Pi { binder_name, binder_style, binder_type, body, .. } = self.ctx.view_sptr(ind_ty_cursor) {
             if i < st.local_params.len() {
-                ind_ty_cursor = self.ctx.inst(body, &[SPtr::unshifted(st.local_params[i])]);
+                ind_ty_cursor = self.ctx.inst(body, &[SPtr::closed(st.local_params[i])]);
                 ind_ty_cursor = self.whnf(ind_ty_cursor);
             } else {
                 let local_ = self.ctx.mk_unique(binder_name, binder_style, binder_type.core);
@@ -550,7 +550,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             st.nested_to_unspecialized_ty_wfvars.iter().find(|(_name, expr)| **expr == i_params)
         {
             let f = self.ctx.mk_const(*aux_i_name, st.uparams);
-            let f = self.ctx.foldl_apps(f, outgoing_param_locals.iter().copied().map(SPtr::unshifted));
+            let f = self.ctx.foldl_apps(f, outgoing_param_locals.iter().copied().map(SPtr::closed));
             let f =
                 self.ctx.foldl_apps(f, (args[(nested_container_ty.num_params as usize)..args.len()]).iter().copied());
             Some(f)
@@ -587,7 +587,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                 st.nested_to_unspecialized_ty_wfvars.insert(aux_nested_container_name, jsprime);
                 if nested_container_name == i_name {
                     let f = self.ctx.mk_const(aux_nested_container_name, st.uparams);
-                    let f = self.ctx.foldl_apps(f, outgoing_param_locals.iter().copied().map(SPtr::unshifted));
+                    let f = self.ctx.foldl_apps(f, outgoing_param_locals.iter().copied().map(SPtr::closed));
                     let args = &args[nested_container_ty.num_params as usize..args.len()];
                     let f = self.ctx.foldl_apps(f, args.iter().copied());
                     result = Some(f);
@@ -804,13 +804,13 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         ctor_type: ExprPtr<'t>,
     ) {
         self.tc_cache.clear();
-        let mut ctor_type_cursor = SPtr::unshifted(ctor_type);
+        let mut ctor_type_cursor = SPtr::closed(ctor_type);
         for i in 0..st.local_params.len() {
             let local_param = st.local_params[i];
             match (self.ctx.view_sptr(ctor_type_cursor), self.ctx.read_expr(local_param)) {
                 (Pi { binder_type, body, .. }, Local { binder_type: local_type, .. }) => {
-                    self.assert_def_eq(binder_type, SPtr::unshifted(local_type));
-                    ctor_type_cursor = self.ctx.inst(body, &[SPtr::unshifted(local_param)]);
+                    self.assert_def_eq(binder_type, SPtr::closed(local_type));
+                    ctor_type_cursor = self.ctx.inst(body, &[SPtr::closed(local_param)]);
                 }
                 _ => panic!(),
             }
@@ -856,7 +856,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
     //```
     fn large_elim_test_aux(&mut self, ctor_type: ExprPtr<'t>, mut rem_params: usize) -> bool {
         self.tc_cache.clear();
-        let mut ctor_type_cursor = SPtr::unshifted(ctor_type);
+        let mut ctor_type_cursor = SPtr::closed(ctor_type);
         let mut non_prop_ctor_telescope_elems = Vec::new();
         loop {
             match self.ctx.view_sptr(ctor_type_cursor) {
@@ -961,7 +961,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         let is_k_target = st.is_zero.unwrap()
             && st.all_inductives_incl_specialized.len() == 1
             && match st.all_inductives_incl_specialized[0].ctors.as_slice() {
-                [only_ctor] => self.ctx.pi_telescope_size(SPtr::unshifted(only_ctor.ty)) as usize == st.local_params.len(),
+                [only_ctor] => self.ctx.pi_telescope_size(SPtr::closed(only_ctor.ty)) as usize == st.local_params.len(),
                 _ => false,
             };
         st.k_target = Some(is_k_target);
@@ -969,8 +969,8 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
 
     fn mk_majors(&mut self, st: &mut InductiveCheckState<'t>) {
         for (idx, ind_const) in st.ind_consts.iter().copied().enumerate() {
-            let mut ty = self.ctx.foldl_apps(SPtr::unshifted(ind_const), st.local_params.iter().copied().map(SPtr::unshifted));
-            ty = self.ctx.foldl_apps(ty, st.local_indices[idx].iter().copied().map(SPtr::unshifted));
+            let mut ty = self.ctx.foldl_apps(SPtr::closed(ind_const), st.local_params.iter().copied().map(SPtr::closed));
+            ty = self.ctx.foldl_apps(ty, st.local_indices[idx].iter().copied().map(SPtr::closed));
             let t = self.ctx.str1("t");
             // ty is an application of closed consts/locals, so shift is 0; mk_unique always returns shift=0
             st.majors.push(self.ctx.mk_unique(t, BinderStyle::Default, ty.core).core);
@@ -1034,11 +1034,11 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         let mut all_args = Vec::new();
         let mut rec_args = Vec::new();
         self.tc_cache.clear();
-        let mut ctor_type_cursor = SPtr::unshifted(ctor_type);
+        let mut ctor_type_cursor = SPtr::closed(ctor_type);
         for i in 0..st.local_params.len() {
             match (self.ctx.view_sptr(ctor_type_cursor), rem_params[i]) {
                 (Pi { body, .. }, local_param) => {
-                    ctor_type_cursor = self.ctx.inst(body, &[SPtr::unshifted(local_param)]);
+                    ctor_type_cursor = self.ctx.inst(body, &[SPtr::closed(local_param)]);
                 }
                 _ => panic!(),
             }
@@ -1063,13 +1063,13 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         let mut out = Vec::new();
         for (i, rec_arg) in rec_args.iter().copied().enumerate() {
             self.tc_cache.clear();
-            let u_i_ty = self.infer_then_whnf(SPtr::unshifted(rec_arg), crate::tc::InferFlag::InferOnly);
+            let u_i_ty = self.infer_then_whnf(SPtr::closed(rec_arg), crate::tc::InferFlag::InferOnly);
             let (arg_ty, xs) = self.handle_rec_args_aux(u_i_ty);
             let (ind_ty_idx, applied_indices) = self.get_i_indices(st, arg_ty);
             let motive = st.motives.get(ind_ty_idx).copied().expect("Failed to get specified motive");
             let motive_base = {
-                let lhs = self.ctx.foldl_apps(SPtr::unshifted(motive), applied_indices.into_iter().rev());
-                let u_app = self.ctx.foldl_apps(SPtr::unshifted(rec_arg), xs.iter().copied().map(SPtr::unshifted));
+                let lhs = self.ctx.foldl_apps(SPtr::closed(motive), applied_indices.into_iter().rev());
+                let u_app = self.ctx.foldl_apps(SPtr::closed(rec_arg), xs.iter().copied().map(SPtr::closed));
                 self.ctx.mk_app(lhs, u_app)
             };
             let v_i_ty = self.ctx.abstr_pis(xs.iter().copied(), motive_base).core;
@@ -1092,10 +1092,10 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             let motive = st.motives.get(ind_ty_idx).copied().expect("Failed to get specified motive");
             let c_app0 = {
                 let rhs = self.ctx.mk_const(ctor.name, st.uparams);
-                let rhs = self.ctx.foldl_apps(rhs, st.local_params.iter().copied().map(SPtr::unshifted));
-                self.ctx.foldl_apps(rhs, all_ctor_args.iter().copied().map(SPtr::unshifted))
+                let rhs = self.ctx.foldl_apps(rhs, st.local_params.iter().copied().map(SPtr::closed));
+                self.ctx.foldl_apps(rhs, all_ctor_args.iter().copied().map(SPtr::closed))
             };
-            let c_app = self.ctx.foldl_apps(SPtr::unshifted(motive), applied_indices.into_iter().rev());
+            let c_app = self.ctx.foldl_apps(SPtr::closed(motive), applied_indices.into_iter().rev());
             let c_app = self.ctx.mk_app(c_app, c_app0);
             let v = self.handle_rec_args_minor(st, ctor_idx, rec_ctor_args.as_slice());
 
@@ -1133,17 +1133,17 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         let flat_mapped_minors = st.minors.iter().flat_map(|v| v.iter().copied()).collect::<Vec<ExprPtr>>();
         for rec_ctor_arg in rec_ctor_args.iter().copied() {
             self.tc_cache.clear();
-            let u_i_ty = self.infer_then_whnf(SPtr::unshifted(rec_ctor_arg), InferFlag::InferOnly);
+            let u_i_ty = self.infer_then_whnf(SPtr::closed(rec_ctor_arg), InferFlag::InferOnly);
             let (u_i_ty, xs) = self.handle_rec_args_aux(u_i_ty);
             let (it_idx, applied_indices) = self.get_i_indices(st, u_i_ty);
             let it_name = st.all_inductives_incl_specialized.get(it_idx).map(|x| x.name).unwrap();
             let rec_name = self.ctx.str(it_name, rec_str_ptr);
             let rec_app = self.ctx.mk_const(rec_name, st.rec_uparams.unwrap());
-            let app = self.ctx.foldl_apps(rec_app, st.local_params.iter().copied().map(SPtr::unshifted));
-            let app = self.ctx.foldl_apps(app, st.motives.iter().copied().map(SPtr::unshifted));
-            let app = self.ctx.foldl_apps(app, flat_mapped_minors.iter().copied().map(SPtr::unshifted));
+            let app = self.ctx.foldl_apps(rec_app, st.local_params.iter().copied().map(SPtr::closed));
+            let app = self.ctx.foldl_apps(app, st.motives.iter().copied().map(SPtr::closed));
+            let app = self.ctx.foldl_apps(app, flat_mapped_minors.iter().copied().map(SPtr::closed));
             let app = self.ctx.foldl_apps(app, applied_indices.iter().copied().rev());
-            let app_rhs = self.ctx.foldl_apps(SPtr::unshifted(rec_ctor_arg), xs.iter().copied().map(SPtr::unshifted));
+            let app_rhs = self.ctx.foldl_apps(SPtr::closed(rec_ctor_arg), xs.iter().copied().map(SPtr::closed));
             let app = self.ctx.mk_app(app, app_rhs);
             let v_hd = self.ctx.abstr_lambda_telescope(xs.as_slice(), app).core;
             out.push(v_hd);
@@ -1160,15 +1160,15 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
     ) -> RecRule<'t> {
         let (_, all_ctor_args, rec_ctor_args) = self.sep_nonrec_rec_ctor_args(st, ctor.ty, st.local_params.as_slice());
         let handled_rec_args = self.handle_rec_ctor_args_rec_rule(st, rec_ctor_args.as_slice());
-        let comp_rhs = self.ctx.foldl_apps(SPtr::unshifted(this_minor), all_ctor_args.iter().copied().map(SPtr::unshifted));
-        let comp_rhs = self.ctx.foldl_apps(comp_rhs, handled_rec_args.iter().copied().map(SPtr::unshifted));
+        let comp_rhs = self.ctx.foldl_apps(SPtr::closed(this_minor), all_ctor_args.iter().copied().map(SPtr::closed));
+        let comp_rhs = self.ctx.foldl_apps(comp_rhs, handled_rec_args.iter().copied().map(SPtr::closed));
         let comp_rhs = self.ctx.abstr_lambda_telescope(all_ctor_args.as_slice(), comp_rhs);
         let comp_rhs = self.ctx.abstr_lambda_telescope(flat_mapped_minors, comp_rhs);
         let comp_rhs = self.ctx.abstr_lambda_telescope(st.motives.as_slice(), comp_rhs);
         let comp_rhs = self.ctx.abstr_lambda_telescope(st.local_params.as_slice(), comp_rhs);
         debug_assert!(comp_rhs.shift == 0, "mk_rec_rule1: comp_rhs has shift={}", comp_rhs.shift);
         let comp_rhs = comp_rhs.core;
-        let num_fields = self.ctx.pi_telescope_size(SPtr::unshifted(ctor.ty)) as usize - st.local_params.len();
+        let num_fields = self.ctx.pi_telescope_size(SPtr::closed(ctor.ty)) as usize - st.local_params.len();
         RecRule {
             ctor_name: ctor.name,
             ctor_telescope_size_wo_params: u16::try_from(num_fields).unwrap(),
@@ -1202,7 +1202,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                 (Some(Declar::Inductive(old)), Some(Declar::Inductive(new))) => {
                     debug_assert!(!std::ptr::eq(old, new));
                     self.tc_cache.clear();
-                    self.assert_def_eq(SPtr::unshifted(old.info.ty), SPtr::unshifted(new.info.ty));
+                    self.assert_def_eq(SPtr::closed(old.info.ty), SPtr::closed(new.info.ty));
                 }
                 _ => panic!(),
             }
@@ -1217,7 +1217,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                     (Some(Declar::Constructor(old)), Some(Declar::Constructor(new))) => {
                         debug_assert!(!std::ptr::eq(old, new));
                         self.tc_cache.clear();
-                        self.assert_def_eq(SPtr::unshifted(old.info.ty), SPtr::unshifted(new.info.ty));
+                        self.assert_def_eq(SPtr::closed(old.info.ty), SPtr::closed(new.info.ty));
                     }
                     _ => panic!(),
                 }
@@ -1240,7 +1240,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         assert_eq!(imported_rr.ctor_name, constructed_rr.ctor_name);
         assert_eq!(imported_rr.ctor_telescope_size_wo_params, constructed_rr.ctor_telescope_size_wo_params);
         let rr_made_val = self.ctx.subst_expr_levels(constructed_rr.val, st.rec_uparams.unwrap(), old);
-        self.assert_def_eq(SPtr::unshifted(imported_rr.val), rr_made_val);
+        self.assert_def_eq(SPtr::closed(imported_rr.val), rr_made_val);
     }
 
     fn assert_nonnested_recursors_def_eq(&mut self, st: &InductiveCheckState<'t>, recursors: &Vec<Declar<'t>>) {
@@ -1256,7 +1256,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                     // Should be structurally != because they come from different envs.
                     assert_ne!(old, new);
                     let imported_w_new_uparams = self.ctx.subst_expr_levels(old.info().ty, old.info().uparams, st.rec_uparams.unwrap());
-                    self.assert_def_eq(imported_w_new_uparams, SPtr::unshifted(new.info().ty));
+                    self.assert_def_eq(imported_w_new_uparams, SPtr::closed(new.info().ty));
                     assert_eq!(old_rec_rules.len(), new_rec_rules.len());
                     for (r_old, r_new) in old_rec_rules.iter().zip(new_rec_rules.iter()) {
                         self.assert_nonnested_rec_rule_def_eq(st, old.info().uparams, r_old, r_new)
@@ -1277,8 +1277,8 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         flat_mapped_minors: &[ExprPtr<'t>],
         rec_rules: &[RecRule<'t>],
     ) -> Declar<'t> {
-        let motive_app_base = self.ctx.foldl_apps(SPtr::unshifted(motive), local_indices.iter().copied().map(SPtr::unshifted));
-        let motive_app = self.ctx.mk_app(motive_app_base, SPtr::unshifted(major));
+        let motive_app_base = self.ctx.foldl_apps(SPtr::closed(motive), local_indices.iter().copied().map(SPtr::closed));
+        let motive_app = self.ctx.mk_app(motive_app_base, SPtr::closed(major));
 
         let rec_ty = self.ctx.abstr_pi(major, motive_app);
         let rec_ty = self.ctx.abstr_pi_telescope(local_indices, rec_ty);
@@ -1393,7 +1393,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         // from `_nested_Array_1.mk`, retrieve `(Array Lean.Syntax, _nested.Array_1)`
         let (unspecialized_ty, base_ind_name) = self.get_nested_if_aux_ctor(st, ctor_name).unwrap();
         // Now get just `Const(Array, [])`
-        let unspecialized_f = self.ctx.unfold_apps_fun(SPtr::unshifted(unspecialized_ty));
+        let unspecialized_f = self.ctx.unfold_apps_fun(SPtr::closed(unspecialized_ty));
         // Get just the name for `Array`
         let (unspecialized_ty_name, ..) = self.ctx.try_const_info(unspecialized_f.core).unwrap();
         // Replace ctor_name[specialized_name |-> unspecialized_name]
@@ -1506,14 +1506,14 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         // aux2nested elem := (_nested.List_2, (List.[0] Lean.Syntax.[]))
         if let Some(nested) = st.nested_to_unspecialized_ty_nofvars.get(&c_name) {
             debug_assert!(e_args.len() >= st.num_params as usize);
-            let inner = self.ctx.inst(SPtr::unshifted(*nested), &local_params.iter().copied().map(SPtr::unshifted).collect::<SmallVec<[SPtr; 8]>>());
+            let inner = self.ctx.inst(SPtr::closed(*nested), &local_params.iter().copied().map(SPtr::closed).collect::<SmallVec<[SPtr; 8]>>());
             let outer = self.ctx.foldl_apps(inner, e_args.iter().copied().skip(st.num_params as usize));
             return Some(outer)
         }
         let (nested_no_inst, aux_i_name) = self.get_nested_if_aux_ctor(st, c_name)?;
 
         debug_assert!(e_args.len() >= st.num_params as usize);
-        let nested_inst = self.ctx.inst(SPtr::unshifted(nested_no_inst), &local_params.iter().copied().map(SPtr::unshifted).collect::<SmallVec<[SPtr; 8]>>());
+        let nested_inst = self.ctx.inst(SPtr::closed(nested_no_inst), &local_params.iter().copied().map(SPtr::closed).collect::<SmallVec<[SPtr; 8]>>());
         let (nested_f, i_args) = self.ctx.unfold_apps(nested_inst);
         // Replace one of the nested constructor applications with a regular ctor application.
         //
@@ -1538,7 +1538,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         e: ExprPtr<'t>,
         nested_rec_name_to_rec_name: &FxIndexMap<NamePtr<'t>, NamePtr<'t>>,
     ) -> ExprPtr<'t> {
-        let mut cursor = SPtr::unshifted(e);
+        let mut cursor = SPtr::closed(e);
         let is_pi = matches!(self.ctx.view_sptr(cursor), Pi { .. });
         let mut locals = Vec::new();
         for _ in 0..st.local_params.len() {
@@ -1611,7 +1611,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         match self.env.get_old_declar(&resolved_rec_name) {
             Some(Declar::Recursor(original @ RecursorData { .. })) => {
                 self.tc_cache.clear();
-                self.assert_def_eq(SPtr::unshifted(original.info.ty), SPtr::unshifted(restored.info.ty));
+                self.assert_def_eq(SPtr::closed(original.info.ty), SPtr::closed(restored.info.ty));
                 // have to do the rec rules as well.
                 assert_eq!(original.rec_rules.len(), restored.rec_rules.len());
                 for i in 0..original.rec_rules.len() {
@@ -1619,7 +1619,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                     let new = restored.rec_rules[i];
                     assert_eq!(old.ctor_name, new.ctor_name);
                     self.tc_cache.clear();
-                    self.assert_def_eq(SPtr::unshifted(old.val), SPtr::unshifted(new.val));
+                    self.assert_def_eq(SPtr::closed(old.val), SPtr::closed(new.val));
                 }
             }
             _ => {}
@@ -1662,7 +1662,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         let new_ctor @ ConstructorData { .. } = self.env.get_constructor(&old_ctor.info.name).unwrap();
         let new_ty = self.restore_e(st, new_ctor.info.ty, rec_name_map);
         self.tc_cache.clear();
-        self.assert_def_eq(SPtr::unshifted(old_ctor.info.ty), SPtr::unshifted(new_ty));
+        self.assert_def_eq(SPtr::closed(old_ctor.info.ty), SPtr::closed(new_ty));
     }
 
     fn restore_and_check(
@@ -1680,7 +1680,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                 (Some(Declar::Inductive(old)), Some(Declar::Inductive(new))) => {
                     debug_assert!(!std::ptr::eq(old, new));
                     self.tc_cache.clear();
-                    self.assert_def_eq(SPtr::unshifted(old.info.ty), SPtr::unshifted(new.info.ty));
+                    self.assert_def_eq(SPtr::closed(old.info.ty), SPtr::closed(new.info.ty));
                 }
                 _ => panic!(),
             }

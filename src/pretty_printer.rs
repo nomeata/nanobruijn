@@ -540,7 +540,7 @@ impl<'x, 't, 'p> PrettyPrinter<'x, 't, 'p> {
             binder_tys.push(local);
             e = body.core;
         }
-        let instd = self.ctx.inst(SPtr::unshifted(e), binder_tys.as_slice());
+        let instd = self.ctx.inst(SPtr::closed(e), binder_tys.as_slice());
         (binders, instd.core)
     }
 
@@ -613,7 +613,7 @@ impl<'x, 't, 'p> PrettyPrinter<'x, 't, 'p> {
     /// Does this expression infer as a `Pi` with any binder style other than `Default`
     fn is_implicit_fun(&mut self, fun: ExprPtr<'t>) -> bool {
         self.ctx.with_tc(crate::env::EnvLimit::PpUnlimited, |tc| {
-            let ty = tc.infer_then_whnf(SPtr::unshifted(fun), crate::tc::InferFlag::InferOnly);
+            let ty = tc.infer_then_whnf(SPtr::closed(fun), crate::tc::InferFlag::InferOnly);
             match tc.ctx.read_expr(ty.core) {
                 Pi { binder_style, .. } => binder_style != BinderStyle::Default,
                 _ => false,
@@ -718,7 +718,7 @@ impl<'x, 't, 'p> PrettyPrinter<'x, 't, 'p> {
             _ => panic!(),
         };
 
-        let instd = self.ctx.inst(SPtr::unshifted(body), &[SPtr::unshifted(swapped_lc)]);
+        let instd = self.ctx.inst(SPtr::closed(body), &[SPtr::closed(swapped_lc)]);
         let binder = self.pp_bare_binder(n, t).group();
         let val = self.pp_expr_aux(val).parens(0).group();
         let body = self.pp_expr_aux(instd.core).parens(0);
@@ -734,7 +734,7 @@ impl<'x, 't, 'p> PrettyPrinter<'x, 't, 'p> {
     }
 
     fn pp_expr_aux(&mut self, e: ExprPtr<'t>) -> Parenable {
-        if !self.options().proofs && self.ctx.with_tc(crate::env::EnvLimit::PpUnlimited, |tc| tc.is_proof(crate::util::SPtr::unshifted(e)).0) {
+        if !self.options().proofs && self.ctx.with_tc(crate::env::EnvLimit::PpUnlimited, |tc| tc.is_proof(crate::util::SPtr::closed(e)).0) {
             DocPtr::from("_").as_unparenable()
         } else {
             match self.ctx.read_expr(e) {
@@ -806,11 +806,11 @@ impl<'x, 't, 'p> PrettyPrinter<'x, 't, 'p> {
             }
         }
         let (named_binders, rest_binders) = binders.split_at(slice_split_idx);
-        let named_binder_tys: Vec<SPtr> = named_binders.iter().map(|x| SPtr::unshifted(x.local_const)).collect();
+        let named_binder_tys: Vec<SPtr> = named_binders.iter().map(|x| SPtr::closed(x.local_const)).collect();
 
-        let instd = self.ctx.inst(SPtr::unshifted(val), named_binder_tys.as_slice());
+        let instd = self.ctx.inst(SPtr::closed(val), named_binder_tys.as_slice());
         let pp_val = {
-            let is_prop = self.ctx.with_tc(crate::env::EnvLimit::PpUnlimited, |tc| tc.is_proposition(SPtr::unshifted(declar.info().ty)).0);
+            let is_prop = self.ctx.with_tc(crate::env::EnvLimit::PpUnlimited, |tc| tc.is_proposition(SPtr::closed(declar.info().ty)).0);
             line()
                 .concat(if is_prop && !self.options().proofs {
                     DocPtr::from("_")

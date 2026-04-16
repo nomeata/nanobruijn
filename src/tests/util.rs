@@ -34,6 +34,7 @@ pub(crate) fn test_get_export_file<'p>(config_path: Option<&Path>) -> Result<(Ex
             skip_declarations: 0,
             declaration_timeout_secs: 0,
             use_nanoda_tc: false,
+            declaration_filter: None,
         },
         Some(config_path) => Config::try_from(config_path)?,
     };
@@ -68,8 +69,8 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
     #[cfg(test)]
     #[allow(dead_code)]
     pub(crate) fn mk_succ_app(&mut self, n: usize) -> SPtr<'t> {
-        let mut out = SPtr::unshifted(self.c_nat_zero().unwrap());
-        let succ = SPtr::unshifted(self.c_nat_succ().unwrap());
+        let mut out = SPtr::closed(self.c_nat_zero().unwrap());
+        let succ = SPtr::closed(self.c_nat_succ().unwrap());
         for _ in 0..n {
             out = self.mk_app(succ, out);
         }

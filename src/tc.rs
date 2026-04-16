@@ -107,8 +107,8 @@ impl<'p> ExportFile<'p> {
                 let (r, dag) = self.with_tc_and_declar_reusing(*d.info(), dag, |tc| {
                     tc.ctx.trace.trace_defeq = tdf;
                     tc.check_declar_info(d).unwrap();
-                    let inferred_type = tc.infer(SPtr::unshifted(*val), crate::tc::InferFlag::Check);
-                    tc.assert_def_eq(inferred_type, SPtr::unshifted(d.info().ty));
+                    let inferred_type = tc.infer(SPtr::closed(*val), crate::tc::InferFlag::Check);
+                    tc.assert_def_eq(inferred_type, SPtr::closed(d.info().ty));
                 });
                 (r.1, dag)
             }
@@ -142,8 +142,8 @@ impl<'p> ExportFile<'p> {
                 let (r, dag) = self.with_nanoda_tc_and_declar_reusing(*d.info(), dag, |tc| {
                     tc.ctx.trace.trace_defeq = tdf;
                     tc.check_declar_info(d).unwrap();
-                    let inferred_type = tc.infer(SPtr::unshifted(*val), crate::nanoda_tc::InferFlag::Check);
-                    tc.assert_def_eq(inferred_type, SPtr::unshifted(d.info().ty));
+                    let inferred_type = tc.infer(SPtr::closed(*val), crate::nanoda_tc::InferFlag::Check);
+                    tc.assert_def_eq(inferred_type, SPtr::closed(d.info().ty));
                 });
                 (r.1, dag)
             }
@@ -304,21 +304,21 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
     /// This is the depth at which the core's variables are anchored.
     #[inline(always)]
     fn cache_bucket(&self, e: SPtr<'t>) -> usize {
-        if self.ctx.num_loose_bvars(e.core) == 0 { 0 } else { self.depth() - e.shift as usize }
+        if e.is_closed() { 0 } else { self.depth() - e.shift as usize }
     }
 
     /// Cross-shift depth-stacked UF: find representative SPtr at current depth.
     /// Stored entry: core → SPtr(rep, delta). On find(SPtr(A, s)):
     /// look up A at cache_bucket(A), get SPtr(R, d), follow with SPtr(R, d+s).
-    /// Closed cores always return SPtr::unshifted (shift irrelevant).
+    /// Closed cores always return SPtr::closed.
     fn uf_find(&self, x: SPtr<'t>) -> SPtr<'t> {
-        if self.ctx.num_loose_bvars(x.core) == 0 {
+        if x.is_closed() {
             // Closed: look up in base bucket, shift is irrelevant
             let mut cur = x.core;
             loop {
                 match self.tc_cache.uf_get(0, &cur) {
                     Some(rep) => cur = rep.core,
-                    None => return SPtr::unshifted(cur),
+                    None => return SPtr::closed(cur),
                 }
             }
         }
@@ -402,7 +402,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         let info = d.info();
         assert!(self.ctx.no_dupes_all_params(info.uparams));
         assert!(self.ctx.num_loose_bvars(info.ty) == 0);
-        let inferred_type = self.infer(SPtr::unshifted(info.ty), Check);
+        let inferred_type = self.infer(SPtr::closed(info.ty), Check);
         let sort = self.ensure_sort(inferred_type);
 
         // This is sort of a "soft" check in terms of soundness, but for theorems, ensure 
@@ -733,9 +733,8 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
     }
 
     fn infer_inner(&mut self, e: SPtr<'t>, flag: InferFlag) -> SPtr<'t> {
-        // Handle shifted SPtrs: infer(SPtr(ptr, k)) where k > 0.
-        // Invariant: shift > 0 implies core has loose bvars.
-        if e.shift > 0 {
+        // Handle shifted SPtrs: infer(SPtr(ptr, k)) where k > 0 and not closed.
+        if e.shift > 0 && !e.is_closed() {
             debug_assert!(self.ctx.num_loose_bvars(e.core) > 0,
                 "SPtr invariant violated: shift={} but nlbv=0", e.shift);
             let depth = self.depth();
@@ -744,7 +743,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                 "infer peel: shift {} > depth {} for open expression (nlbv={})",
                 e.shift, depth, self.ctx.num_loose_bvars(e.core));
             let inner_depth = depth - e.shift as usize;
-            let inner_bucket = if self.ctx.num_loose_bvars(e.core) == 0 { 0 } else { inner_depth };
+            let inner_bucket = inner_depth; // e is open (not closed) here
             if let Some(inner_cached) = self.tc_cache.infer_check_get(inner_bucket, &e.core) {
                 self.ctx.trace.infer_cache_hits += 1;
                 return self.ctx.sptr_shift(inner_cached, e.shift);
@@ -778,7 +777,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             }
         }
         let r = match self.ctx.view_sptr(e) {
-            Local { binder_type, .. } => SPtr::unshifted(binder_type),
+            Local { binder_type, .. } => SPtr::closed(binder_type), // binder_type is ExprPtr in Local, declaration-level
             Var { dbj_idx, .. } => {
                 self.lookup_var(dbj_idx)
             },
@@ -954,7 +953,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         }
         let e = self.whnf(e);
         if let Some(cached) = self.tc_cache.strong_cache.get(&(e.core, reduce_types, reduce_proofs)).copied() {
-            return self.ctx.sptr_shift(SPtr::unshifted(cached), e.shift)
+            return self.ctx.sptr_shift(SPtr::closed(cached), e.shift)
         }
 
         let out = match self.ctx.view_sptr(e) {
@@ -1006,7 +1005,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             return e
         }
         // whnf is shift-equivariant: whnf(SPtr(ptr, k)) = sptr_shift(whnf(SPtr(ptr, 0)), k)
-        if e.shift > 0 {
+        if e.shift > 0 && !e.is_closed() {
             debug_assert!(self.ctx.num_loose_bvars(e.core) > 0,
                 "SPtr invariant violated in whnf: shift={} but nlbv=0", e.shift);
             let depth = self.depth();
@@ -1039,9 +1038,9 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         }
         let mut cursor = e;
         loop {
-            // If cursor has shift > 0, recursively whnf the unshifted core
+            // If cursor has shift > 0 (and is open), recursively whnf the unshifted core
             // and compose. This prevents unbounded shift accumulation in the loop.
-            if cursor.shift > 0 {
+            if cursor.shift > 0 && !cursor.is_closed() {
                 let r = self.whnf(cursor);
                 self.tc_cache.whnf_insert(whnf_bucket_idx, e.core, r);
                 return r;
@@ -1069,12 +1068,12 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
     fn whnf_no_unfolding_aux(&mut self, e: SPtr<'t>, cheap_proj: bool) -> SPtr<'t> {
         self.ctx.trace.wnu_calls += 1;
         // whnf_no_unfolding is shift-equivariant: peel SPtr shifts.
-        if e.shift > 0 {
+        if e.shift > 0 && !e.is_closed() {
             let depth = self.depth();
             let inner_depth = depth.saturating_sub(e.shift as usize);
             // Fast path: check if inner's wnu result is already cached at the lower depth.
             if depth > 0 && (e.shift as usize) <= depth {
-                let inner_bucket = if self.ctx.num_loose_bvars(e.core) == 0 { 0 } else { inner_depth };
+                let inner_bucket = inner_depth; // e is open (not closed) here
                 if let Some(inner_cached) = self.tc_cache.wnu_get(inner_bucket, &e.core) {
                     self.ctx.trace.wnu_cache_hits += 1;
                     return self.ctx.sptr_shift(inner_cached, e.shift);
@@ -1097,7 +1096,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         let mut cur = e;
         let result = loop {
             let wnu_bucket_idx = self.cache_bucket(cur);
-            if cur.shift == 0 {
+            if cur.shift == 0 || cur.is_closed() {
                 if let Some(cached) = self.tc_cache.wnu_get(wnu_bucket_idx, &cur.core) {
                     self.ctx.trace.wnu_cache_hits += 1;
                     break cached;
@@ -1200,7 +1199,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         // Cache intermediate inputs (non-cheap_proj only).
         if !cheap_proj {
             for entry in cache_entries {
-                if entry.shift > 0 { continue; }
+                if entry.shift > 0 && !entry.is_closed() { continue; }
                 let entry_bucket_idx = self.cache_bucket(entry);
                 self.tc_cache.wnu_insert(entry_bucket_idx, entry.core, result);
             }
@@ -1272,7 +1271,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             (Var { dbj_idx: x_idx, .. }, Var { dbj_idx: y_idx, .. }) =>
                 x_idx == y_idx,
             (Local { id: x_id, binder_type: tx, .. }, Local { id: y_id, binder_type: ty, .. }) =>
-                x_id == y_id && self.def_eq(SPtr::unshifted(tx), SPtr::unshifted(ty)),
+                x_id == y_id && self.def_eq(SPtr::closed(tx), SPtr::closed(ty)),
             _ => false,
         }
     }
