@@ -173,9 +173,10 @@ impl<'a> SPtr<'a> {
     #[inline(always)]
     pub fn osnf_adj(self, nlbv: u16, amount: u16) -> Self {
         if nlbv == 0 {
-            // Normalize: enforce CLOSED_SHIFT invariant. This auto-corrects
-            // children from view_sptr that may have shift=0 for closed cores.
-            Self::closed(self.core)
+            assert!(self.is_closed(),
+                "CLOSED_SHIFT invariant violated in osnf_adj: shift={} core={:?}@{} amount={}",
+                self.shift, self.core.dag_marker(), self.core.idx(), amount);
+            self
         } else {
             Self::new(self.core, self.shift - amount)
         }

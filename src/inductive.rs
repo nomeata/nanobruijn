@@ -1393,7 +1393,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         // from `_nested_Array_1.mk`, retrieve `(Array Lean.Syntax, _nested.Array_1)`
         let (unspecialized_ty, base_ind_name) = self.get_nested_if_aux_ctor(st, ctor_name).unwrap();
         // Now get just `Const(Array, [])`
-        let unspecialized_f = self.ctx.unfold_apps_fun(SPtr::unshifted(unspecialized_ty));
+        let unspecialized_f = self.ctx.unfold_apps_fun(SPtr::from_nlbv(unspecialized_ty, self.ctx.num_loose_bvars(unspecialized_ty)));
         // Get just the name for `Array`
         let (unspecialized_ty_name, ..) = self.ctx.try_const_info(unspecialized_f.core).unwrap();
         // Replace ctor_name[specialized_name |-> unspecialized_name]
@@ -1506,14 +1506,16 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         // aux2nested elem := (_nested.List_2, (List.[0] Lean.Syntax.[]))
         if let Some(nested) = st.nested_to_unspecialized_ty_nofvars.get(&c_name) {
             debug_assert!(e_args.len() >= st.num_params as usize);
-            let inner = self.ctx.inst(SPtr::unshifted(*nested), &local_params.iter().copied().map(SPtr::closed).collect::<SmallVec<[SPtr; 8]>>());
+            let nested_sptr = SPtr::from_nlbv(*nested, self.ctx.num_loose_bvars(*nested));
+            let inner = self.ctx.inst(nested_sptr, &local_params.iter().copied().map(SPtr::closed).collect::<SmallVec<[SPtr; 8]>>());
             let outer = self.ctx.foldl_apps(inner, e_args.iter().copied().skip(st.num_params as usize));
             return Some(outer)
         }
         let (nested_no_inst, aux_i_name) = self.get_nested_if_aux_ctor(st, c_name)?;
 
         debug_assert!(e_args.len() >= st.num_params as usize);
-        let nested_inst = self.ctx.inst(SPtr::unshifted(nested_no_inst), &local_params.iter().copied().map(SPtr::closed).collect::<SmallVec<[SPtr; 8]>>());
+        let nested_sptr2 = SPtr::from_nlbv(nested_no_inst, self.ctx.num_loose_bvars(nested_no_inst));
+        let nested_inst = self.ctx.inst(nested_sptr2, &local_params.iter().copied().map(SPtr::closed).collect::<SmallVec<[SPtr; 8]>>());
         let (nested_f, i_args) = self.ctx.unfold_apps(nested_inst);
         // Replace one of the nested constructor applications with a regular ctor application.
         //
