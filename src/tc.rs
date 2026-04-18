@@ -1072,14 +1072,15 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         // whnf_no_unfolding is shift-equivariant: peel ExprPtr shifts.
         if e.shift > 0 && !e.is_closed() {
             let depth = self.depth();
-            let inner_depth = depth.saturating_sub(e.shift as usize);
+            debug_assert!((e.shift as usize) <= depth,
+                "wnu peel: shift {} > depth {} for open expression (nlbv={})",
+                e.shift, depth, self.ctx.num_loose_bvars(e.core));
+            let inner_depth = depth - e.shift as usize;
             // Fast path: check if inner's wnu result is already cached at the lower depth.
-            if depth > 0 && (e.shift as usize) <= depth {
-                let inner_bucket = inner_depth; // e is open (not closed) here
-                if let Some(inner_cached) = self.tc_cache.wnu_get(inner_bucket, &e.core) {
-                    self.ctx.trace.wnu_cache_hits += 1;
-                    return inner_cached.shift_up(e.shift);
-                }
+            let inner_bucket = inner_depth; // e is open (not closed) here
+            if let Some(inner_cached) = self.tc_cache.wnu_get(inner_bucket, &e.core) {
+                self.ctx.trace.wnu_cache_hits += 1;
+                return inner_cached.shift_up(e.shift);
             }
             self.ctx.trace.wnu_shift_peel += 1;
             self.ctx.trace.shift_peel_frames_total += e.shift as u64;
@@ -1435,8 +1436,9 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         // at the reduced depth. This handles the case where the same expression has
         // different ExprPtr representations (shift baked-in vs shift outside).
         {
-            let x_s = if self.ctx.num_loose_bvars(x.core) > 0 { x.shift } else { 0 };
-            let y_s = if self.ctx.num_loose_bvars(y.core) > 0 { y.shift } else { 0 };
+            // Use is_closed() for closed detection — consistent with rest of codebase.
+            let x_s = if x.is_closed() { 0 } else { x.shift };
+            let y_s = if y.is_closed() { 0 } else { y.shift };
             let common = x_s.min(y_s);
             if common > 0 {
                 self.ctx.trace.defeq_peel_calls += 1;
@@ -1778,6 +1780,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         let x_lb = if x_nlbv > 0 { x.shift } else { u16::MAX };
         let y_lb = if y_nlbv > 0 { y.shift } else { u16::MAX };
         let min_lb = x_lb.min(y_lb);
+        debug_assert!(min_lb <= depth, "defeq_normalize_pair: min_lb {} > depth {}", min_lb, depth);
         let bucket = (depth - min_lb) as usize; // bucket > 0 for open expressions
         // Subtract min_lb from both shifts (normalize)
         let nx = if x_nlbv == 0 { x } else { ExprPtr::new(x.core, x.shift - min_lb) };
