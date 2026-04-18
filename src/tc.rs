@@ -881,7 +881,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
     fn infer_lambda(&mut self, mut e: ExprPtr<'t>, flag: InferFlag) -> ExprPtr<'t> {
         // Collect binder info while descending into nested lambdas
         let mut binders: Vec<(NamePtr<'t>, crate::expr::BinderStyle, ExprPtr<'t>)> = Vec::new();
-        while let Lambda { binder_name, binder_style, binder_type, body, .. } = self.ctx.view_expr(e) {
+        while let Some((binder_name, binder_style, binder_type, body)) = self.ctx.unfold_lambda_step(e) {
             if let Check = flag {
                 self.infer_sort_of(binder_type, flag);
             }
@@ -905,7 +905,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
     fn infer_pi(&mut self, mut e: ExprPtr<'t>, flag: InferFlag) -> ExprPtr<'t> {
         let mut universes = Vec::new();
         let depth0 = self.depth();
-        while let Pi { binder_type, body, .. } = self.ctx.view_expr(e) {
+        while let Some((_, _, binder_type, body)) = self.ctx.unfold_pi_step(e) {
             let dom_univ = self.infer_sort_of(binder_type, flag);
             universes.push(dom_univ);
             self.push_local(binder_type);

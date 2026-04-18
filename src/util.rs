@@ -1598,6 +1598,41 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         }
     }
 
+    /// Take one step through a Pi-telescope. Returns (binder_name, binder_style,
+    /// binder_type, body) if `s` views as a Pi; binder_type and body are fully
+    /// shift-composed. Avoids the Expr construction done by view_expr. Uses the
+    /// O(1) fast-path for body when body.shift >= 1 or body.is_closed().
+    pub fn unfold_pi_step(&mut self, s: ExprPtr<'t>) -> Option<(NamePtr<'t>, BinderStyle, ExprPtr<'t>, ExprPtr<'t>)> {
+        match self.read_expr(s.core) {
+            Expr::Pi { binder_name, binder_style, binder_type, body, .. } => {
+                if s.shift == 0 || s.is_closed() {
+                    Some((binder_name, binder_style, binder_type, body))
+                } else {
+                    let bt = binder_type.shift_up(s.shift);
+                    let b = self.shift_expr_aux(body, s.shift, 1);
+                    Some((binder_name, binder_style, bt, b))
+                }
+            }
+            _ => None,
+        }
+    }
+
+    /// Take one step through a Lambda-telescope. Same as unfold_pi_step but for Lambda.
+    pub fn unfold_lambda_step(&mut self, s: ExprPtr<'t>) -> Option<(NamePtr<'t>, BinderStyle, ExprPtr<'t>, ExprPtr<'t>)> {
+        match self.read_expr(s.core) {
+            Expr::Lambda { binder_name, binder_style, binder_type, body, .. } => {
+                if s.shift == 0 || s.is_closed() {
+                    Some((binder_name, binder_style, binder_type, body))
+                } else {
+                    let bt = binder_type.shift_up(s.shift);
+                    let b = self.shift_expr_aux(body, s.shift, 1);
+                    Some((binder_name, binder_style, bt, b))
+                }
+            }
+            _ => None,
+        }
+    }
+
     /// View an ExprPtr as a materialized Expr.
     /// If shift==0, returns read_expr(ptr) directly.
     /// If shift>0, adjusts children by composing shifts.

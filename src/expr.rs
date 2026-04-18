@@ -1270,22 +1270,9 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
     /// Return the number of leading `Pi` binders on this expression.
     pub(crate) fn pi_telescope_size(&mut self, mut e: ExprPtr<'t>) -> u16 {
         let mut size = 0u16;
-        loop {
-            match self.read_expr(e.core) {
-                Pi { body, .. } => {
-                    size += 1;
-                    if e.shift == 0 || e.is_closed() {
-                        e = body;
-                    } else if body.shift >= 1 && !body.is_closed() {
-                        e = body.shift_up(e.shift);
-                    } else if body.is_closed() {
-                        e = body;
-                    } else {
-                        e = self.shift_expr(body.core, e.shift, 1);
-                    }
-                }
-                _ => break,
-            }
+        while let Some((_, _, _, body)) = self.unfold_pi_step(e) {
+            size += 1;
+            e = body;
         }
         size
     }
@@ -1295,20 +1282,8 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
 
     pub fn get_nth_pi_binder(&mut self, mut e: ExprPtr<'t>, n: usize) -> Option<ExprPtr<'t>> {
         for _ in 0..n {
-            match self.read_expr(e.core) {
-                Pi { body, .. } => {
-                    if e.shift == 0 || e.is_closed() {
-                        e = body;
-                    } else if body.shift >= 1 && !body.is_closed() {
-                        e = body.shift_up(e.shift);
-                    } else if body.is_closed() {
-                        e = body;
-                    } else {
-                        e = self.shift_expr(body.core, e.shift, 1);
-                    }
-                }
-                _ => return None
-            }
+            let (_, _, _, body) = self.unfold_pi_step(e)?;
+            e = body;
         }
         match self.read_expr(e.core) {
             Pi { binder_type, .. } => Some(binder_type.shift_up(e.shift)),
