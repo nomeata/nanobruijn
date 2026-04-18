@@ -494,16 +494,16 @@ impl<'a, R: BufRead> Parser<'a, R> {
         result
     }
 
-    fn get_expr_sptr(&self, idx: u32) -> ExprPtr<'a> {
+    fn get_expr_ptr(&self, idx: u32) -> ExprPtr<'a> {
         let (dag_idx, shift) = self.expr_remap[idx as usize];
         let core = crate::util::Ptr::from(DagMarker::ExportFile, dag_idx);
         if shift == ExprPtr::CLOSED_SHIFT { ExprPtr::closed(core) } else { ExprPtr::new(core, shift) }
     }
 
     /// Get the CorePtr for a declaration type/value (must be closed, shift == CLOSED_SHIFT).
-    fn get_expr_ptr(&self, idx: u32) -> CorePtr<'a> {
+    fn get_core_ptr(&self, idx: u32) -> CorePtr<'a> {
         let (dag_idx, shift) = self.expr_remap[idx as usize];
-        debug_assert!(shift == ExprPtr::CLOSED_SHIFT, "get_expr_ptr: expected CLOSED_SHIFT for declaration expr, got shift={}", shift);
+        debug_assert!(shift == ExprPtr::CLOSED_SHIFT, "get_core_ptr: expected CLOSED_SHIFT for declaration expr, got shift={}", shift);
         crate::util::Ptr::from(DagMarker::ExportFile, dag_idx)
     }
 
@@ -652,27 +652,27 @@ impl<'a, R: BufRead> Parser<'a, R> {
                 self.record_expr(dag_idx, ExprPtr::CLOSED_SHIFT);
             }
             ExprApp {fun, arg} => {
-                let fun_sptr = self.get_expr_sptr(fun);
-                let arg_sptr = self.get_expr_sptr(arg);
+                let fun_e = self.get_expr_ptr(fun);
+                let arg_e = self.get_expr_ptr(arg);
                 // Effective nlbv for an ExprPtr child:
                 // if core nlbv == 0 then 0, else core_nlbv + shift
-                let fun_core_nlbv = self.num_loose_bvars(fun_sptr.core);
-                let arg_core_nlbv = self.num_loose_bvars(arg_sptr.core);
-                let fun_eff_nlbv = if fun_core_nlbv == 0 { 0 } else { fun_core_nlbv + fun_sptr.shift };
-                let arg_eff_nlbv = if arg_core_nlbv == 0 { 0 } else { arg_core_nlbv + arg_sptr.shift };
+                let fun_core_nlbv = self.num_loose_bvars(fun_e.core);
+                let arg_core_nlbv = self.num_loose_bvars(arg_e.core);
+                let fun_eff_nlbv = if fun_core_nlbv == 0 { 0 } else { fun_core_nlbv + fun_e.shift };
+                let arg_eff_nlbv = if arg_core_nlbv == 0 { 0 } else { arg_core_nlbv + arg_e.shift };
                 // Compute min_shift from open children for OSNF. CLOSED_SHIFT = all closed.
                 let min_shift = if fun_eff_nlbv == 0 && arg_eff_nlbv == 0 { ExprPtr::CLOSED_SHIFT }
-                    else if fun_eff_nlbv == 0 { arg_sptr.shift }
-                    else if arg_eff_nlbv == 0 { fun_sptr.shift }
-                    else { fun_sptr.shift.min(arg_sptr.shift) };
+                    else if fun_eff_nlbv == 0 { arg_e.shift }
+                    else if arg_eff_nlbv == 0 { fun_e.shift }
+                    else { fun_e.shift.min(arg_e.shift) };
                 if min_shift > 0 && min_shift != ExprPtr::CLOSED_SHIFT { self.osnf_count += 1; }
                 // Build core children with min_shift subtracted (only for open children)
-                let core_fun = if fun_eff_nlbv == 0 { fun_sptr } else { ExprPtr::new(fun_sptr.core, fun_sptr.shift - min_shift) };
-                let core_arg = if arg_eff_nlbv == 0 { arg_sptr } else { ExprPtr::new(arg_sptr.core, arg_sptr.shift - min_shift) };
+                let core_fun = if fun_eff_nlbv == 0 { fun_e } else { ExprPtr::new(fun_e.core, fun_e.shift - min_shift) };
+                let core_arg = if arg_eff_nlbv == 0 { arg_e } else { ExprPtr::new(arg_e.core, arg_e.shift - min_shift) };
                 let core_fun_nlbv = if fun_core_nlbv == 0 { 0 } else { fun_core_nlbv + core_fun.shift };
                 let core_arg_nlbv = if arg_core_nlbv == 0 { 0 } else { arg_core_nlbv + core_arg.shift };
                 let core_nlbv = core_fun_nlbv.max(core_arg_nlbv);
-                let locals = self.has_fvars_ptr(fun_sptr.core) || self.has_fvars_ptr(arg_sptr.core);
+                let locals = self.has_fvars_ptr(fun_e.core) || self.has_fvars_ptr(arg_e.core);
                 let hash = hash64!(crate::expr::APP_HASH, core_fun, core_arg);
                 let (core_idx, _) = self.insert_expr(Expr::App {
                     fun: core_fun, arg: core_arg, num_loose_bvars: core_nlbv,
@@ -687,36 +687,36 @@ impl<'a, R: BufRead> Parser<'a, R> {
             }
             ExprLambda {binder_name, binder_type, binder_info, body} => {
                 let binder_name = self.get_name_ptr(binder_name);
-                let ty_sptr = self.get_expr_sptr(binder_type);
-                let body_sptr = self.get_expr_sptr(body);
-                let ty_core_nlbv = self.num_loose_bvars(ty_sptr.core);
-                let body_core_nlbv = self.num_loose_bvars(body_sptr.core);
-                let ty_eff_nlbv = if ty_core_nlbv == 0 { 0 } else { ty_core_nlbv + ty_sptr.shift };
-                let body_eff_nlbv = if body_core_nlbv == 0 { 0 } else { body_core_nlbv + body_sptr.shift };
+                let ty_e = self.get_expr_ptr(binder_type);
+                let body_e = self.get_expr_ptr(body);
+                let ty_core_nlbv = self.num_loose_bvars(ty_e.core);
+                let body_core_nlbv = self.num_loose_bvars(body_e.core);
+                let ty_eff_nlbv = if ty_core_nlbv == 0 { 0 } else { ty_core_nlbv + ty_e.shift };
+                let body_eff_nlbv = if body_core_nlbv == 0 { 0 } else { body_core_nlbv + body_e.shift };
                 // For binder body: outer contribution is body_eff_nlbv.saturating_sub(1)
                 // min_shift from open children: ty's shift vs body's shift.saturating_sub(1)
                 // But we need to be careful: the body is under a binder, so its shift
                 // contributes (shift - 1) to the outer expression's fvar_lb.
                 // For OSNF, we want min_shift = min of effective fvar_lb contributions.
-                // ty contribution: ty_sptr.shift (if ty is open)
-                // body contribution: body_sptr.shift.saturating_sub(1) (if body has nlbv > 1,
-                //   or body_sptr.shift > 0 when body has nlbv == 1)
+                // ty contribution: ty_e.shift (if ty is open)
+                // body contribution: body_e.shift.saturating_sub(1) (if body has nlbv > 1,
+                //   or body_e.shift > 0 when body has nlbv == 1)
                 let body_outer_shift = if body_eff_nlbv <= 1 { None }
-                    else { Some(body_sptr.shift.saturating_sub(1)) };
+                    else { Some(body_e.shift.saturating_sub(1)) };
                 let min_shift = match (ty_eff_nlbv > 0, body_outer_shift) {
                     (false, None) => ExprPtr::CLOSED_SHIFT,
-                    (true, None) => ty_sptr.shift,
+                    (true, None) => ty_e.shift,
                     (false, Some(bs)) => bs,
-                    (true, Some(bs)) => ty_sptr.shift.min(bs),
+                    (true, Some(bs)) => ty_e.shift.min(bs),
                 };
                 if min_shift > 0 && min_shift != ExprPtr::CLOSED_SHIFT { self.osnf_count += 1; }
                 // Build core children: only adjust shifts for open children that contributed
-                let core_ty = if ty_eff_nlbv == 0 { ty_sptr } else { ExprPtr::new(ty_sptr.core, ty_sptr.shift - min_shift) };
-                let core_body = if body_eff_nlbv > 1 { ExprPtr::new(body_sptr.core, body_sptr.shift - min_shift) } else { body_sptr };
+                let core_ty = if ty_eff_nlbv == 0 { ty_e } else { ExprPtr::new(ty_e.core, ty_e.shift - min_shift) };
+                let core_body = if body_eff_nlbv > 1 { ExprPtr::new(body_e.core, body_e.shift - min_shift) } else { body_e };
                 let core_ty_nlbv = if ty_core_nlbv == 0 { 0 } else { ty_core_nlbv + core_ty.shift };
                 let core_body_nlbv = if body_core_nlbv == 0 { 0 } else { body_core_nlbv + core_body.shift };
                 let core_nlbv = core_ty_nlbv.max(core_body_nlbv.saturating_sub(1));
-                let locals = self.has_fvars_ptr(ty_sptr.core) || self.has_fvars_ptr(body_sptr.core);
+                let locals = self.has_fvars_ptr(ty_e.core) || self.has_fvars_ptr(body_e.core);
                 let hash = hash64!(crate::expr::LAMBDA_HASH, binder_name, binder_info, core_ty, core_body);
                 let (core_idx, _) = self.insert_expr(Expr::Lambda {
                     binder_name, binder_style: binder_info, binder_type: core_ty, body: core_body,
@@ -726,27 +726,27 @@ impl<'a, R: BufRead> Parser<'a, R> {
             }
             ExprPi {binder_name, binder_type, binder_info, body} => {
                 let binder_name = self.get_name_ptr(binder_name);
-                let ty_sptr = self.get_expr_sptr(binder_type);
-                let body_sptr = self.get_expr_sptr(body);
-                let ty_core_nlbv = self.num_loose_bvars(ty_sptr.core);
-                let body_core_nlbv = self.num_loose_bvars(body_sptr.core);
-                let ty_eff_nlbv = if ty_core_nlbv == 0 { 0 } else { ty_core_nlbv + ty_sptr.shift };
-                let body_eff_nlbv = if body_core_nlbv == 0 { 0 } else { body_core_nlbv + body_sptr.shift };
+                let ty_e = self.get_expr_ptr(binder_type);
+                let body_e = self.get_expr_ptr(body);
+                let ty_core_nlbv = self.num_loose_bvars(ty_e.core);
+                let body_core_nlbv = self.num_loose_bvars(body_e.core);
+                let ty_eff_nlbv = if ty_core_nlbv == 0 { 0 } else { ty_core_nlbv + ty_e.shift };
+                let body_eff_nlbv = if body_core_nlbv == 0 { 0 } else { body_core_nlbv + body_e.shift };
                 let body_outer_shift = if body_eff_nlbv <= 1 { None }
-                    else { Some(body_sptr.shift.saturating_sub(1)) };
+                    else { Some(body_e.shift.saturating_sub(1)) };
                 let min_shift = match (ty_eff_nlbv > 0, body_outer_shift) {
                     (false, None) => ExprPtr::CLOSED_SHIFT,
-                    (true, None) => ty_sptr.shift,
+                    (true, None) => ty_e.shift,
                     (false, Some(bs)) => bs,
-                    (true, Some(bs)) => ty_sptr.shift.min(bs),
+                    (true, Some(bs)) => ty_e.shift.min(bs),
                 };
                 if min_shift > 0 && min_shift != ExprPtr::CLOSED_SHIFT { self.osnf_count += 1; }
-                let core_ty = if ty_eff_nlbv == 0 { ty_sptr } else { ExprPtr::new(ty_sptr.core, ty_sptr.shift - min_shift) };
-                let core_body = if body_eff_nlbv > 1 { ExprPtr::new(body_sptr.core, body_sptr.shift - min_shift) } else { body_sptr };
+                let core_ty = if ty_eff_nlbv == 0 { ty_e } else { ExprPtr::new(ty_e.core, ty_e.shift - min_shift) };
+                let core_body = if body_eff_nlbv > 1 { ExprPtr::new(body_e.core, body_e.shift - min_shift) } else { body_e };
                 let core_ty_nlbv = if ty_core_nlbv == 0 { 0 } else { ty_core_nlbv + core_ty.shift };
                 let core_body_nlbv = if body_core_nlbv == 0 { 0 } else { body_core_nlbv + core_body.shift };
                 let core_nlbv = core_ty_nlbv.max(core_body_nlbv.saturating_sub(1));
-                let locals = self.has_fvars_ptr(ty_sptr.core) || self.has_fvars_ptr(body_sptr.core);
+                let locals = self.has_fvars_ptr(ty_e.core) || self.has_fvars_ptr(body_e.core);
                 let hash = hash64!(crate::expr::PI_HASH, binder_name, binder_info, core_ty, core_body);
                 let (core_idx, _) = self.insert_expr(Expr::Pi {
                     binder_name, binder_style: binder_info, binder_type: core_ty, body: core_body,
@@ -756,33 +756,33 @@ impl<'a, R: BufRead> Parser<'a, R> {
             }
             ExprLet {name, ty, value, body, nondep} => {
                 let binder_name = self.get_name_ptr(name);
-                let ty_sptr = self.get_expr_sptr(ty);
-                let val_sptr = self.get_expr_sptr(value);
-                let body_sptr = self.get_expr_sptr(body);
-                let ty_core_nlbv = self.num_loose_bvars(ty_sptr.core);
-                let val_core_nlbv = self.num_loose_bvars(val_sptr.core);
-                let body_core_nlbv = self.num_loose_bvars(body_sptr.core);
-                let ty_eff_nlbv = if ty_core_nlbv == 0 { 0 } else { ty_core_nlbv + ty_sptr.shift };
-                let val_eff_nlbv = if val_core_nlbv == 0 { 0 } else { val_core_nlbv + val_sptr.shift };
-                let body_eff_nlbv = if body_core_nlbv == 0 { 0 } else { body_core_nlbv + body_sptr.shift };
+                let ty_e = self.get_expr_ptr(ty);
+                let val_e = self.get_expr_ptr(value);
+                let body_e = self.get_expr_ptr(body);
+                let ty_core_nlbv = self.num_loose_bvars(ty_e.core);
+                let val_core_nlbv = self.num_loose_bvars(val_e.core);
+                let body_core_nlbv = self.num_loose_bvars(body_e.core);
+                let ty_eff_nlbv = if ty_core_nlbv == 0 { 0 } else { ty_core_nlbv + ty_e.shift };
+                let val_eff_nlbv = if val_core_nlbv == 0 { 0 } else { val_core_nlbv + val_e.shift };
+                let body_eff_nlbv = if body_core_nlbv == 0 { 0 } else { body_core_nlbv + body_e.shift };
                 // Body is under a binder; its outer contribution is body_eff_nlbv.saturating_sub(1)
                 let body_outer_shift = if body_eff_nlbv <= 1 { None }
-                    else { Some(body_sptr.shift.saturating_sub(1)) };
+                    else { Some(body_e.shift.saturating_sub(1)) };
                 // min_shift = min of all open children's effective shifts
                 let mut min_shift = u16::MAX;
-                if ty_eff_nlbv > 0 { min_shift = min_shift.min(ty_sptr.shift); }
-                if val_eff_nlbv > 0 { min_shift = min_shift.min(val_sptr.shift); }
+                if ty_eff_nlbv > 0 { min_shift = min_shift.min(ty_e.shift); }
+                if val_eff_nlbv > 0 { min_shift = min_shift.min(val_e.shift); }
                 if let Some(bs) = body_outer_shift { min_shift = min_shift.min(bs); }
                 // min_shift == CLOSED_SHIFT means all children are closed
                 if min_shift > 0 && min_shift != ExprPtr::CLOSED_SHIFT { self.osnf_count += 1; }
-                let core_ty = if ty_eff_nlbv == 0 { ty_sptr } else { ExprPtr::new(ty_sptr.core, ty_sptr.shift - min_shift) };
-                let core_val = if val_eff_nlbv == 0 { val_sptr } else { ExprPtr::new(val_sptr.core, val_sptr.shift - min_shift) };
-                let core_body = if body_eff_nlbv > 1 { ExprPtr::new(body_sptr.core, body_sptr.shift - min_shift) } else { body_sptr };
+                let core_ty = if ty_eff_nlbv == 0 { ty_e } else { ExprPtr::new(ty_e.core, ty_e.shift - min_shift) };
+                let core_val = if val_eff_nlbv == 0 { val_e } else { ExprPtr::new(val_e.core, val_e.shift - min_shift) };
+                let core_body = if body_eff_nlbv > 1 { ExprPtr::new(body_e.core, body_e.shift - min_shift) } else { body_e };
                 let core_ty_nlbv = if ty_core_nlbv == 0 { 0 } else { ty_core_nlbv + core_ty.shift };
                 let core_val_nlbv = if val_core_nlbv == 0 { 0 } else { val_core_nlbv + core_val.shift };
                 let core_body_nlbv = if body_core_nlbv == 0 { 0 } else { body_core_nlbv + core_body.shift };
                 let core_nlbv = core_ty_nlbv.max(core_val_nlbv.max(core_body_nlbv.saturating_sub(1)));
-                let locals = self.has_fvars_ptr(ty_sptr.core) || self.has_fvars_ptr(val_sptr.core) || self.has_fvars_ptr(body_sptr.core);
+                let locals = self.has_fvars_ptr(ty_e.core) || self.has_fvars_ptr(val_e.core) || self.has_fvars_ptr(body_e.core);
                 let hash = hash64!(crate::expr::LET_HASH, binder_name, core_ty, core_val, core_body, nondep);
                 let (core_idx, _) = self.insert_expr(Expr::Let {
                     binder_name,
@@ -798,14 +798,14 @@ impl<'a, R: BufRead> Parser<'a, R> {
             }
             ExprProj {type_name, idx, structure: struct_} => {
                 let ty_name = self.get_name_ptr(type_name);
-                let struct_sptr = self.get_expr_sptr(struct_);
-                let struct_core_nlbv = self.num_loose_bvars(struct_sptr.core);
-                let struct_eff_nlbv = if struct_core_nlbv == 0 { 0 } else { struct_core_nlbv + struct_sptr.shift };
-                let min_shift = if struct_eff_nlbv == 0 { ExprPtr::CLOSED_SHIFT } else { struct_sptr.shift };
+                let struct_e = self.get_expr_ptr(struct_);
+                let struct_core_nlbv = self.num_loose_bvars(struct_e.core);
+                let struct_eff_nlbv = if struct_core_nlbv == 0 { 0 } else { struct_core_nlbv + struct_e.shift };
+                let min_shift = if struct_eff_nlbv == 0 { ExprPtr::CLOSED_SHIFT } else { struct_e.shift };
                 if min_shift > 0 && min_shift != ExprPtr::CLOSED_SHIFT { self.osnf_count += 1; }
-                let core_struct = if struct_eff_nlbv == 0 { struct_sptr } else { ExprPtr::new(struct_sptr.core, struct_sptr.shift - min_shift) };
+                let core_struct = if struct_eff_nlbv == 0 { struct_e } else { ExprPtr::new(struct_e.core, struct_e.shift - min_shift) };
                 let core_struct_nlbv = if struct_core_nlbv == 0 { 0 } else { struct_core_nlbv + core_struct.shift };
-                let locals = self.has_fvars_ptr(struct_sptr.core);
+                let locals = self.has_fvars_ptr(struct_e.core);
                 let hash = hash64!(crate::expr::PROJ_HASH, ty_name, idx, core_struct);
                 let (core_idx, _) = self.insert_expr(Expr::Proj {
                     ty_name,
@@ -821,7 +821,7 @@ impl<'a, R: BufRead> Parser<'a, R> {
                 assert!(!is_unsafe);
                 let name = self.get_name_ptr(name);
                 let uparams = self.get_uparams_ptr(&uparams);
-                let ty = self.get_expr_ptr(ty);
+                let ty = self.get_core_ptr(ty);
                 let info = DeclarInfo { name, ty, uparams };
                 let axiom = Declar::Axiom { info };
                 if self.axiom_permitted(name) {
@@ -838,8 +838,8 @@ impl<'a, R: BufRead> Parser<'a, R> {
             Defn {name, ty, uparams, value, hint, safety} => {
                 assert!(!matches!(safety, DefinitionSafety::Unsafe | DefinitionSafety::Partial));
                 let name = self.get_name_ptr(name);
-                let ty = self.get_expr_ptr(ty);
-                let val = self.get_expr_ptr(value);
+                let ty = self.get_core_ptr(ty);
+                let val = self.get_core_ptr(value);
                 let uparams = self.get_uparams_ptr(&uparams);
                 let info = DeclarInfo { name, ty, uparams };
                 let definition = Declar::Definition { info, val, hint };
@@ -847,8 +847,8 @@ impl<'a, R: BufRead> Parser<'a, R> {
             }
             Thm {name, ty, uparams, value} => {
                 let name = self.get_name_ptr(name);
-                let ty = self.get_expr_ptr(ty);
-                let val = self.get_expr_ptr(value);
+                let ty = self.get_core_ptr(ty);
+                let val = self.get_core_ptr(value);
                 let uparams = self.get_uparams_ptr(&uparams);
                 let info = DeclarInfo { name, ty, uparams };
                 let theorem = Declar::Theorem { info, val };
@@ -857,8 +857,8 @@ impl<'a, R: BufRead> Parser<'a, R> {
             Opaque {name, ty, uparams, value, is_unsafe} => {
                 assert!(!is_unsafe);
                 let name = self.get_name_ptr(name);
-                let ty = self.get_expr_ptr(ty);
-                let val = self.get_expr_ptr(value);
+                let ty = self.get_core_ptr(ty);
+                let val = self.get_core_ptr(value);
                 let uparams = self.get_uparams_ptr(&uparams);
                 let info = DeclarInfo { name, ty, uparams };
                 let definition = Declar::Opaque { info, val };
@@ -866,7 +866,7 @@ impl<'a, R: BufRead> Parser<'a, R> {
             }
             Quot {name, ty, uparams, ..} => {
                 let name = self.get_name_ptr(name);
-                let ty = self.get_expr_ptr(ty);
+                let ty = self.get_core_ptr(ty);
                 let uparams = self.get_uparams_ptr(&uparams);
                 let info = DeclarInfo { name, ty, uparams };
                 let quot = Declar::Quot { info };
@@ -880,7 +880,7 @@ impl<'a, R: BufRead> Parser<'a, R> {
                     let name = self.get_name_ptr(name);
                     self.mutual_block_sizes.insert(name, (block_start, block_size));
                     let uparams = self.get_uparams_ptr(&uparams);
-                    let ty = self.get_expr_ptr(ty);
+                    let ty = self.get_core_ptr(ty);
                     let all_ind_names =  Arc::from(self.get_names(&all)); 
                     let all_ctor_names = Arc::from(self.get_names(&ctors)); 
                     let inductive = Declar::Inductive(InductiveData {
@@ -897,7 +897,7 @@ impl<'a, R: BufRead> Parser<'a, R> {
                 for Constructor {name, uparams, ty, is_unsafe, induct, cidx, num_params, num_fields, ..}  in ctor_vals {
                     assert!(!is_unsafe);
                     let name = self.get_name_ptr(name);
-                    let ty = self.get_expr_ptr(ty);
+                    let ty = self.get_core_ptr(ty);
                     let uparams = self.get_uparams_ptr(&uparams);
                     let info = DeclarInfo { name, ty, uparams };
                     let parent_inductive = self.get_name_ptr(induct);
@@ -914,12 +914,12 @@ impl<'a, R: BufRead> Parser<'a, R> {
                 for Recursor {name, uparams, ty, rules, is_unsafe, num_params, num_indices, num_motives, num_minors, k, all, ..} in rec_vals {
                     assert!(!is_unsafe);
                     let name = self.get_name_ptr(name);
-                    let ty = self.get_expr_ptr(ty);
+                    let ty = self.get_core_ptr(ty);
                     let uparams = self.get_uparams_ptr(&uparams);
                     let info = DeclarInfo { name, ty, uparams };
                     let rules = rules.into_iter().map(|RecursorRule {rhs, ctor, nfields}| 
                         crate::env::RecRule {
-                            val: self.get_expr_ptr(rhs),
+                            val: self.get_core_ptr(rhs),
                             ctor_name: self.get_name_ptr(ctor),
                             ctor_telescope_size_wo_params: nfields
                         }

@@ -343,7 +343,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         let mut cursor = ExprPtr::closed(e);
         let mut param_locals = Vec::with_capacity(num_params as usize);
         for _ in 0..num_params {
-            match self.ctx.view_sptr(cursor) {
+            match self.ctx.view_expr(cursor) {
                 Pi { binder_name, binder_style, binder_type, body, .. } => {
                     let local_ = self.ctx.mk_unique(binder_name, binder_style, binder_type.core);
                     cursor = self.ctx.inst(body, &[local_]);
@@ -365,7 +365,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         let mut ind_ty_cursor = self.whnf(ExprPtr::closed(ind_ty_cursor_ptr));
         let mut indices_locals = Vec::new();
         let mut i = 0;
-        while let Pi { binder_name, binder_style, binder_type, body, .. } = self.ctx.view_sptr(ind_ty_cursor) {
+        while let Pi { binder_name, binder_style, binder_type, body, .. } = self.ctx.view_expr(ind_ty_cursor) {
             if i < st.local_params.len() {
                 let local_ = st.local_params[i];
                 match self.ctx.read_expr(local_) {
@@ -403,7 +403,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         let mut ind_ty_cursor = self.whnf(ExprPtr::closed(ind.ty));
         let mut indices_locals = Vec::new();
         let mut i = 0;
-        while let Pi { binder_name, binder_style, binder_type, body, .. } = self.ctx.view_sptr(ind_ty_cursor) {
+        while let Pi { binder_name, binder_style, binder_type, body, .. } = self.ctx.view_expr(ind_ty_cursor) {
             if i < st.local_params.len() {
                 ind_ty_cursor = self.ctx.inst(body, &[ExprPtr::closed(st.local_params[i])]);
                 ind_ty_cursor = self.whnf(ind_ty_cursor);
@@ -627,7 +627,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         if let Some(eprime) = self.replace_if_nested(e, st, outgoing_params) {
             eprime
         } else {
-            match self.ctx.view_sptr(e) {
+            match self.ctx.view_expr(e) {
                 Var { .. } | Sort { .. } | Const { .. } | Local { .. } | NatLit { .. } | StringLit { .. } => e,
                 Pi { binder_name, binder_style, binder_type, body, .. } => {
                     let new_type = self.replace_all_nested(binder_type, st, outgoing_params);
@@ -678,7 +678,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         let mut cursor = ctor_type_cursor;
         loop {
             cursor = self.whnf(cursor);
-            match self.ctx.view_sptr(cursor) {
+            match self.ctx.view_expr(cursor) {
                 _any if !self.has_ind_occ(cursor.core, st.ind_consts.as_ref()) => return,
                 Pi { binder_name, binder_style, binder_type, body, .. } => {
                     if self.has_ind_occ(binder_type.core, st.ind_consts.as_ref()) {
@@ -807,7 +807,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         let mut ctor_type_cursor = ExprPtr::closed(ctor_type);
         for i in 0..st.local_params.len() {
             let local_param = st.local_params[i];
-            match (self.ctx.view_sptr(ctor_type_cursor), self.ctx.read_expr(local_param)) {
+            match (self.ctx.view_expr(ctor_type_cursor), self.ctx.read_expr(local_param)) {
                 (Pi { binder_type, body, .. }, Local { binder_type: local_type, .. }) => {
                     self.assert_def_eq(binder_type, ExprPtr::closed(local_type));
                     ctor_type_cursor = self.ctx.inst(body, &[ExprPtr::closed(local_param)]);
@@ -816,7 +816,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             }
         }
         // Non-param constructor args.
-        while let Pi { binder_name, binder_type, binder_style, body, .. } = self.ctx.view_sptr(ctor_type_cursor) {
+        while let Pi { binder_name, binder_type, binder_style, body, .. } = self.ctx.view_expr(ctor_type_cursor) {
             let s = self.ensure_infers_as_sort(binder_type);
             // The inductive being constructed either has to be a `Prop`,
             // or the constructor argument's type has to be <= the inductive's
@@ -859,7 +859,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         let mut ctor_type_cursor = ExprPtr::closed(ctor_type);
         let mut non_prop_ctor_telescope_elems = Vec::new();
         loop {
-            match self.ctx.view_sptr(ctor_type_cursor) {
+            match self.ctx.view_expr(ctor_type_cursor) {
                 Pi { binder_name, binder_style, binder_type, body, .. } if rem_params != 0 => {
                     let local = self.ctx.mk_unique(binder_name, binder_style, binder_type.core);
                     ctor_type_cursor = self.ctx.inst(body, &[local]);
@@ -1004,7 +1004,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
 
     fn is_rec_argument(&mut self, st: &InductiveCheckState<'t>, ctor_btype_cursor: ExprPtr<'t>) -> Option<usize> {
         let cursor = self.whnf(ctor_btype_cursor);
-        if let Pi { binder_name, binder_style, binder_type, body, .. } = self.ctx.view_sptr(cursor) {
+        if let Pi { binder_name, binder_style, binder_type, body, .. } = self.ctx.view_expr(cursor) {
             let local = self.ctx.mk_unique(binder_name, binder_style, binder_type.core);
             let next = self.ctx.inst(body, &[local]);
             self.is_rec_argument(st, next)
@@ -1016,7 +1016,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
     fn handle_rec_args_aux(&mut self, rec_arg_cursor: ExprPtr<'t>) -> (ExprPtr<'t>, Vec<CorePtr<'t>>) {
         let mut xs = Vec::new();
         let mut cursor = rec_arg_cursor;
-        while let Pi { binder_name, binder_style, binder_type, body, .. } = self.ctx.view_sptr(cursor) {
+        while let Pi { binder_name, binder_style, binder_type, body, .. } = self.ctx.view_expr(cursor) {
             let local = self.ctx.mk_unique(binder_name, binder_style, binder_type.core);
             cursor = self.ctx.inst(body, &[local]);
             cursor = self.whnf(cursor);
@@ -1036,14 +1036,14 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         self.tc_cache.clear();
         let mut ctor_type_cursor = ExprPtr::closed(ctor_type);
         for i in 0..st.local_params.len() {
-            match (self.ctx.view_sptr(ctor_type_cursor), rem_params[i]) {
+            match (self.ctx.view_expr(ctor_type_cursor), rem_params[i]) {
                 (Pi { body, .. }, local_param) => {
                     ctor_type_cursor = self.ctx.inst(body, &[ExprPtr::closed(local_param)]);
                 }
                 _ => panic!(),
             }
         }
-        while let Pi { binder_name, binder_style, binder_type, body, .. } = self.ctx.view_sptr(ctor_type_cursor) {
+        while let Pi { binder_name, binder_style, binder_type, body, .. } = self.ctx.view_expr(ctor_type_cursor) {
             let local = self.ctx.mk_unique(binder_name, binder_style, binder_type.core);
             ctor_type_cursor = self.ctx.inst(body, &[local]);
             all_args.push(local.core);
@@ -1410,7 +1410,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
     ) -> ExprPtr<'t> {
         match self.replace_f(e, local_params, st, specialized_rec_names_to_unspecialized_rec_names) {
             Some(out) => out,
-            None => match self.ctx.view_sptr(e) {
+            None => match self.ctx.view_expr(e) {
                 Var { .. } | Sort { .. } | Const { .. } | Local { .. } | StringLit { .. } | NatLit { .. } => e,
                 Lambda { binder_name, binder_style, binder_type, body, .. } => {
                     let binder_type = self.restore_replace(
@@ -1506,22 +1506,22 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         // aux2nested elem := (_nested.List_2, (List.[0] Lean.Syntax.[]))
         if let Some(nested) = st.nested_to_unspecialized_ty_nofvars.get(&c_name) {
             debug_assert!(e_args.len() >= st.num_params as usize);
-            let nested_sptr = ExprPtr::from_nlbv(*nested, self.ctx.num_loose_bvars(*nested));
-            let inner = self.ctx.inst(nested_sptr, &local_params.iter().copied().map(ExprPtr::closed).collect::<SmallVec<[ExprPtr; 8]>>());
+            let nested_e = ExprPtr::from_nlbv(*nested, self.ctx.num_loose_bvars(*nested));
+            let inner = self.ctx.inst(nested_e, &local_params.iter().copied().map(ExprPtr::closed).collect::<SmallVec<[ExprPtr; 8]>>());
             let outer = self.ctx.foldl_apps(inner, e_args.iter().copied().skip(st.num_params as usize));
             return Some(outer)
         }
         let (nested_no_inst, aux_i_name) = self.get_nested_if_aux_ctor(st, c_name)?;
 
         debug_assert!(e_args.len() >= st.num_params as usize);
-        let nested_sptr2 = ExprPtr::from_nlbv(nested_no_inst, self.ctx.num_loose_bvars(nested_no_inst));
-        let nested_inst = self.ctx.inst(nested_sptr2, &local_params.iter().copied().map(ExprPtr::closed).collect::<SmallVec<[ExprPtr; 8]>>());
+        let nested_e2 = ExprPtr::from_nlbv(nested_no_inst, self.ctx.num_loose_bvars(nested_no_inst));
+        let nested_inst = self.ctx.inst(nested_e2, &local_params.iter().copied().map(ExprPtr::closed).collect::<SmallVec<[ExprPtr; 8]>>());
         let (nested_f, i_args) = self.ctx.unfold_apps(nested_inst);
         // Replace one of the nested constructor applications with a regular ctor application.
         //
         // replacing(3) c := _nested.Array_3.mk, auxI_name := _nested.Array_3, I_c := Array, c' := Array.mk.{0}
         // replacing(3) c := _nested.List_4.nil, auxI_name := _nested.List_4, I_c := List, c' := List.nil.{0}
-        match self.ctx.view_sptr(nested_f) {
+        match self.ctx.view_expr(nested_f) {
             Const { name: i_name, levels, .. } => {
                 let cprime_name = self.ctx.replace_pfx(c_name, aux_i_name, i_name);
                 let cprime = self.ctx.mk_const(cprime_name, levels);
@@ -1544,7 +1544,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         let is_pi = self.ctx.is_pi(cursor);
         let mut locals = Vec::new();
         for _ in 0..st.local_params.len() {
-            match self.ctx.view_sptr(cursor) {
+            match self.ctx.view_expr(cursor) {
                 // Also match on Lambda for restoring recursor rules.
                 Pi { binder_name, binder_style, binder_type, body, .. }
                 | Lambda { binder_name, binder_style, binder_type, body, .. } => {

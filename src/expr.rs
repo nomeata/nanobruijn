@@ -220,24 +220,24 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
     /// Inlined fast path for inst_aux on ExprPtr children.
     /// Composes the child's ExprPtr shift (cutoff=0) with the pending (sh_amt, sh_cut).
     #[inline(always)]
-    fn inst_aux_quick_sptr(&mut self, child: ExprPtr<'t>, substs: &[ExprPtr<'t>], offset: u16, shift_down: bool, sh_amt: i16, sh_cut: u16) -> ExprPtr<'t> {
+    fn inst_aux_quick(&mut self, child: ExprPtr<'t>, substs: &[ExprPtr<'t>], offset: u16, shift_down: bool, sh_amt: i16, sh_cut: u16) -> ExprPtr<'t> {
         if child.is_closed() { return child; }
         if child.shift == 0 {
-            return self.inst_aux_quick(child.core, substs, offset, shift_down, sh_amt, sh_cut);
+            return self.inst_aux_quick_core(child.core, substs, offset, shift_down, sh_amt, sh_cut);
         }
         // By the closed-no-shift invariant, child.shift > 0 (and not CLOSED) implies nlbv(core) > 0.
         debug_assert!(self.num_loose_bvars(child.core) > 0,
-            "closed-no-shift invariant violated in inst_aux_quick_sptr: shift={} nlbv=0", child.shift);
+            "closed-no-shift invariant violated in inst_aux_quick: shift={} nlbv=0", child.shift);
         // Compose child.shift with (sh_amt, sh_cut):
         // If sh_cut == 0, or child.shift >= sh_cut, clean composition possible.
         if sh_cut == 0 || child.shift >= sh_cut {
             let new_sh_amt = sh_amt + child.shift as i16;
-            return self.inst_aux_quick(child.core, substs, offset, shift_down, new_sh_amt, 0);
+            return self.inst_aux_quick_core(child.core, substs, offset, shift_down, new_sh_amt, 0);
         }
         // Mismatch: 0 < child.shift < sh_cut. Can't compose into a single (sh_amt, sh_cut).
         // Materialize the child's view, then process each child of the viewed expression.
         // For now, use a simpler approach: view the ExprPtr and recurse.
-        let viewed = self.view_sptr(child);
+        let viewed = self.view_expr(child);
         // Process the viewed expression (which has adjusted ExprPtr children)
         // We need to process it as if it were at the current (sh_amt, sh_cut) level.
         // The viewed expression is a temporary Expr, not in the DAG. We need to process its children.
@@ -265,28 +265,28 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
                 }
             }
             App { fun, arg, .. } => {
-                let new_fun = self.inst_aux_quick_sptr(fun, substs, offset, shift_down, sh_amt, sh_cut);
-                let new_arg = self.inst_aux_quick_sptr(arg, substs, offset, shift_down, sh_amt, sh_cut);
+                let new_fun = self.inst_aux_quick(fun, substs, offset, shift_down, sh_amt, sh_cut);
+                let new_arg = self.inst_aux_quick(arg, substs, offset, shift_down, sh_amt, sh_cut);
                 self.mk_app(new_fun, new_arg)
             }
             Pi { binder_name, binder_style, binder_type, body, .. } => {
-                let new_type = self.inst_aux_quick_sptr(binder_type, substs, offset, shift_down, sh_amt, sh_cut);
-                let new_body = self.inst_aux_quick_sptr(body, substs, offset + 1, shift_down, sh_amt, sh_cut + 1);
+                let new_type = self.inst_aux_quick(binder_type, substs, offset, shift_down, sh_amt, sh_cut);
+                let new_body = self.inst_aux_quick(body, substs, offset + 1, shift_down, sh_amt, sh_cut + 1);
                 self.mk_pi(binder_name, binder_style, new_type, new_body)
             }
             Lambda { binder_name, binder_style, binder_type, body, .. } => {
-                let new_type = self.inst_aux_quick_sptr(binder_type, substs, offset, shift_down, sh_amt, sh_cut);
-                let new_body = self.inst_aux_quick_sptr(body, substs, offset + 1, shift_down, sh_amt, sh_cut + 1);
+                let new_type = self.inst_aux_quick(binder_type, substs, offset, shift_down, sh_amt, sh_cut);
+                let new_body = self.inst_aux_quick(body, substs, offset + 1, shift_down, sh_amt, sh_cut + 1);
                 self.mk_lambda(binder_name, binder_style, new_type, new_body)
             }
             Let { binder_name, binder_type, val, body, nondep, .. } => {
-                let new_type = self.inst_aux_quick_sptr(binder_type, substs, offset, shift_down, sh_amt, sh_cut);
-                let new_val = self.inst_aux_quick_sptr(val, substs, offset, shift_down, sh_amt, sh_cut);
-                let new_body = self.inst_aux_quick_sptr(body, substs, offset + 1, shift_down, sh_amt, sh_cut + 1);
+                let new_type = self.inst_aux_quick(binder_type, substs, offset, shift_down, sh_amt, sh_cut);
+                let new_val = self.inst_aux_quick(val, substs, offset, shift_down, sh_amt, sh_cut);
+                let new_body = self.inst_aux_quick(body, substs, offset + 1, shift_down, sh_amt, sh_cut + 1);
                 self.mk_let(binder_name, new_type, new_val, new_body, nondep)
             }
             Proj { ty_name, idx, structure, .. } => {
-                let new_structure = self.inst_aux_quick_sptr(structure, substs, offset, shift_down, sh_amt, sh_cut);
+                let new_structure = self.inst_aux_quick(structure, substs, offset, shift_down, sh_amt, sh_cut);
                 self.mk_proj(ty_name, idx, new_structure)
             }
         }
@@ -295,7 +295,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
     /// Inlined fast path for inst_aux on children: avoids function call + stacker overhead
     /// for the common early-exit cases (closed expressions, nlbv below offset).
     #[inline(always)]
-    fn inst_aux_quick(&mut self, e: CorePtr<'t>, substs: &[ExprPtr<'t>], offset: u16, shift_down: bool, sh_amt: i16, sh_cut: u16) -> ExprPtr<'t> {
+    fn inst_aux_quick_core(&mut self, e: CorePtr<'t>, substs: &[ExprPtr<'t>], offset: u16, shift_down: bool, sh_amt: i16, sh_cut: u16) -> ExprPtr<'t> {
         let nlbv = self.num_loose_bvars(e);
         let n_substs = substs.len() as u16;
         if sh_amt == 0 {
@@ -467,28 +467,28 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
                 }
             }
             App { fun, arg, .. } => {
-                let new_fun = self.inst_aux_quick_sptr(fun, substs, offset, shift_down, sh_amt, sh_cut);
-                let new_arg = self.inst_aux_quick_sptr(arg, substs, offset, shift_down, sh_amt, sh_cut);
+                let new_fun = self.inst_aux_quick(fun, substs, offset, shift_down, sh_amt, sh_cut);
+                let new_arg = self.inst_aux_quick(arg, substs, offset, shift_down, sh_amt, sh_cut);
                 self.mk_app(new_fun, new_arg)
             }
             Pi { binder_name, binder_style, binder_type, body, .. } => {
-                let new_type = self.inst_aux_quick_sptr(binder_type, substs, offset, shift_down, sh_amt, sh_cut);
-                let new_body = self.inst_aux_quick_sptr(body, substs, offset + 1, shift_down, sh_amt, sh_cut + 1);
+                let new_type = self.inst_aux_quick(binder_type, substs, offset, shift_down, sh_amt, sh_cut);
+                let new_body = self.inst_aux_quick(body, substs, offset + 1, shift_down, sh_amt, sh_cut + 1);
                 self.mk_pi(binder_name, binder_style, new_type, new_body)
             }
             Lambda { binder_name, binder_style, binder_type, body, .. } => {
-                let new_type = self.inst_aux_quick_sptr(binder_type, substs, offset, shift_down, sh_amt, sh_cut);
-                let new_body = self.inst_aux_quick_sptr(body, substs, offset + 1, shift_down, sh_amt, sh_cut + 1);
+                let new_type = self.inst_aux_quick(binder_type, substs, offset, shift_down, sh_amt, sh_cut);
+                let new_body = self.inst_aux_quick(body, substs, offset + 1, shift_down, sh_amt, sh_cut + 1);
                 self.mk_lambda(binder_name, binder_style, new_type, new_body)
             }
             Let { binder_name, binder_type, val, body, nondep, .. } => {
-                let new_type = self.inst_aux_quick_sptr(binder_type, substs, offset, shift_down, sh_amt, sh_cut);
-                let new_val = self.inst_aux_quick_sptr(val, substs, offset, shift_down, sh_amt, sh_cut);
-                let new_body = self.inst_aux_quick_sptr(body, substs, offset + 1, shift_down, sh_amt, sh_cut + 1);
+                let new_type = self.inst_aux_quick(binder_type, substs, offset, shift_down, sh_amt, sh_cut);
+                let new_val = self.inst_aux_quick(val, substs, offset, shift_down, sh_amt, sh_cut);
+                let new_body = self.inst_aux_quick(body, substs, offset + 1, shift_down, sh_amt, sh_cut + 1);
                 self.mk_let(binder_name, new_type, new_val, new_body, nondep)
             }
             Proj { ty_name, idx, structure, .. } => {
-                let new_structure = self.inst_aux_quick_sptr(structure, substs, offset, shift_down, sh_amt, sh_cut);
+                let new_structure = self.inst_aux_quick(structure, substs, offset, shift_down, sh_amt, sh_cut);
                 self.mk_proj(ty_name, idx, new_structure)
             }
         };
@@ -507,10 +507,10 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         if cutoff == 0 {
             return self.mk_shift(e, amount);
         }
-        self.shift_expr_aux(e, amount, cutoff)
+        self.shift_core_aux(e, amount, cutoff)
     }
 
-    fn shift_expr_aux(&mut self, e: CorePtr<'t>, amount: u16, cutoff: u16) -> ExprPtr<'t> {
+    fn shift_core_aux(&mut self, e: CorePtr<'t>, amount: u16, cutoff: u16) -> ExprPtr<'t> {
         let nlbv = self.num_loose_bvars(e);
         if nlbv <= cutoff {
             return ExprPtr::from_nlbv(e, nlbv)
@@ -533,28 +533,28 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
                 }
             }
             App { fun, arg, .. } => {
-                let new_fun = self.shift_expr_aux_sptr(fun, amount, cutoff);
-                let new_arg = self.shift_expr_aux_sptr(arg, amount, cutoff);
+                let new_fun = self.shift_expr_aux(fun, amount, cutoff);
+                let new_arg = self.shift_expr_aux(arg, amount, cutoff);
                 self.mk_app(new_fun, new_arg)
             }
             Pi { binder_name, binder_style, binder_type, body, .. } => {
-                let new_type = self.shift_expr_aux_sptr(binder_type, amount, cutoff);
-                let new_body = self.shift_expr_aux_sptr(body, amount, cutoff + 1);
+                let new_type = self.shift_expr_aux(binder_type, amount, cutoff);
+                let new_body = self.shift_expr_aux(body, amount, cutoff + 1);
                 self.mk_pi(binder_name, binder_style, new_type, new_body)
             }
             Lambda { binder_name, binder_style, binder_type, body, .. } => {
-                let new_type = self.shift_expr_aux_sptr(binder_type, amount, cutoff);
-                let new_body = self.shift_expr_aux_sptr(body, amount, cutoff + 1);
+                let new_type = self.shift_expr_aux(binder_type, amount, cutoff);
+                let new_body = self.shift_expr_aux(body, amount, cutoff + 1);
                 self.mk_lambda(binder_name, binder_style, new_type, new_body)
             }
             Let { binder_name, binder_type, val, body, nondep, .. } => {
-                let new_type = self.shift_expr_aux_sptr(binder_type, amount, cutoff);
-                let new_val = self.shift_expr_aux_sptr(val, amount, cutoff);
-                let new_body = self.shift_expr_aux_sptr(body, amount, cutoff + 1);
+                let new_type = self.shift_expr_aux(binder_type, amount, cutoff);
+                let new_val = self.shift_expr_aux(val, amount, cutoff);
+                let new_body = self.shift_expr_aux(body, amount, cutoff + 1);
                 self.mk_let(binder_name, new_type, new_val, new_body, nondep)
             }
             Proj { ty_name, idx, structure, .. } => {
-                let new_structure = self.shift_expr_aux_sptr(structure, amount, cutoff);
+                let new_structure = self.shift_expr_aux(structure, amount, cutoff);
                 self.mk_proj(ty_name, idx, new_structure)
             }
         };
@@ -564,7 +564,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
 
     /// Helper: shift an ExprPtr child. The child's own shift composes with the operation.
     /// Returns an ExprPtr (as the mk_* functions now expect ExprPtr children).
-    pub(crate) fn shift_expr_aux_sptr(&mut self, child: ExprPtr<'t>, amount: u16, cutoff: u16) -> ExprPtr<'t> {
+    pub(crate) fn shift_expr_aux(&mut self, child: ExprPtr<'t>, amount: u16, cutoff: u16) -> ExprPtr<'t> {
         if child.is_closed() { return child; }
         // If the child has a shift, vars in child.core at index >= 0 become >= child.shift.
         // If child.shift >= cutoff, the cutoff is irrelevant for child.core's vars —
@@ -574,7 +574,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         }
         // Otherwise, we need to traverse child.core with adjusted cutoff.
         let new_cutoff = cutoff - child.shift;
-        let result = self.shift_expr_aux(child.core, amount, new_cutoff);
+        let result = self.shift_core_aux(child.core, amount, new_cutoff);
         ExprPtr::new(result.core, result.shift + child.shift)
     }
 
@@ -586,11 +586,11 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         outgoing: &[CorePtr<'t>],
     ) -> ExprPtr<'t> {
         let e = self.abstr(e, outgoing);
-        let ingoing_sptrs: AppArgs<'t> = ingoing.iter().map(|&p| ExprPtr::closed(p)).collect(); // Locals are always closed
-        self.inst(e, &ingoing_sptrs)
+        let ingoing_exprs: AppArgs<'t> = ingoing.iter().map(|&p| ExprPtr::closed(p)).collect(); // Locals are always closed
+        self.inst(e, &ingoing_exprs)
     }
 
-    fn abstr_aux(&mut self, e: CorePtr<'t>, locals: &[CorePtr<'t>], offset: u16) -> ExprPtr<'t> {
+    fn abstr_aux_core(&mut self, e: CorePtr<'t>, locals: &[CorePtr<'t>], offset: u16) -> ExprPtr<'t> {
         stacker::maybe_grow(64 * 1024, 2 * 1024 * 1024, || self.abstr_aux_body(e, locals, offset))
     }
 
@@ -608,29 +608,29 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
                         .unwrap_or(ExprPtr::closed(e)) // Local is always closed
                 }
                 App { fun, arg, .. } => {
-                    let new_fun = self.abstr_aux_sptr(fun, locals, offset);
-                    let new_arg = self.abstr_aux_sptr(arg, locals, offset);
+                    let new_fun = self.abstr_aux(fun, locals, offset);
+                    let new_arg = self.abstr_aux(arg, locals, offset);
                     self.mk_app(new_fun, new_arg)
                 }
                 Pi { binder_name, binder_style, binder_type, body, .. } => {
-                    let new_type = self.abstr_aux_sptr(binder_type, locals, offset);
-                    let new_body = self.abstr_aux_sptr(body, locals, offset + 1);
+                    let new_type = self.abstr_aux(binder_type, locals, offset);
+                    let new_body = self.abstr_aux(body, locals, offset + 1);
                     self.mk_pi(binder_name, binder_style, new_type, new_body)
                 }
                 Lambda { binder_name, binder_style, binder_type, body, .. } => {
-                    let new_type = self.abstr_aux_sptr(binder_type, locals, offset);
-                    let new_body = self.abstr_aux_sptr(body, locals, offset + 1);
+                    let new_type = self.abstr_aux(binder_type, locals, offset);
+                    let new_body = self.abstr_aux(body, locals, offset + 1);
                     self.mk_lambda(binder_name, binder_style, new_type, new_body)
                 }
                 Let { binder_name, binder_type, val, body, nondep, .. } => {
-                    let new_type = self.abstr_aux_sptr(binder_type, locals, offset);
-                    let new_val = self.abstr_aux_sptr(val, locals, offset);
-                    let new_body = self.abstr_aux_sptr(body, locals, offset + 1);
+                    let new_type = self.abstr_aux(binder_type, locals, offset);
+                    let new_val = self.abstr_aux(val, locals, offset);
+                    let new_body = self.abstr_aux(body, locals, offset + 1);
                     self.mk_let(binder_name, new_type, new_val, new_body, nondep)
                 }
                 StringLit { .. } | NatLit { .. } => panic!(),
                 Proj { ty_name, idx, structure, .. } => {
-                    let new_structure = self.abstr_aux_sptr(structure, locals, offset);
+                    let new_structure = self.abstr_aux(structure, locals, offset);
                     self.mk_proj(ty_name, idx, new_structure)
                 }
                 Var { .. } | Sort { .. } | Const { .. } => panic!("should flag as no locals"),
@@ -645,23 +645,23 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
     /// Locals have nlbv=0 so they can't appear under a shift.
     /// We recurse on child.core and re-wrap with child.shift.
     /// Abstract locals in an ExprPtr child. Adjusts offset to account for child's shift.
-    fn abstr_aux_sptr(&mut self, child: ExprPtr<'t>, locals: &[CorePtr<'t>], offset: u16) -> ExprPtr<'t> {
+    fn abstr_aux(&mut self, child: ExprPtr<'t>, locals: &[CorePtr<'t>], offset: u16) -> ExprPtr<'t> {
         if child.is_closed() {
             if !self.has_fvars(child.core) { return child; }
             // Closed (Local) with fvars — must check for abstraction
-            return self.abstr_aux(child.core, locals, offset);
+            return self.abstr_aux_core(child.core, locals, offset);
         }
         if child.shift == 0 {
-            return self.abstr_aux(child.core, locals, offset);
+            return self.abstr_aux_core(child.core, locals, offset);
         }
         // child.shift > 0: the core is at a lower depth.
         // Adjust offset down to compensate, then reapply child.shift to result.
         if offset >= child.shift {
-            let result = self.abstr_aux(child.core, locals, offset - child.shift);
+            let result = self.abstr_aux_core(child.core, locals, offset - child.shift);
             result.shift_up(child.shift)
         } else {
-            // offset < child.shift: materialize via view_sptr and recurse
-            let viewed = self.view_sptr(child);
+            // offset < child.shift: materialize via view_expr and recurse
+            let viewed = self.view_expr(child);
             match viewed {
                 Local { .. } => {
                     locals.iter().rev().position(|x| *x == child.core)
@@ -669,28 +669,28 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
                         .unwrap_or(ExprPtr::closed(child.core))
                 }
                 App { fun, arg, .. } => {
-                    let f = self.abstr_aux_sptr(fun, locals, offset);
-                    let a = self.abstr_aux_sptr(arg, locals, offset);
+                    let f = self.abstr_aux(fun, locals, offset);
+                    let a = self.abstr_aux(arg, locals, offset);
                     self.mk_app(f, a)
                 }
                 Pi { binder_name, binder_style, binder_type, body, .. } => {
-                    let t = self.abstr_aux_sptr(binder_type, locals, offset);
-                    let b = self.abstr_aux_sptr(body, locals, offset + 1);
+                    let t = self.abstr_aux(binder_type, locals, offset);
+                    let b = self.abstr_aux(body, locals, offset + 1);
                     self.mk_pi(binder_name, binder_style, t, b)
                 }
                 Lambda { binder_name, binder_style, binder_type, body, .. } => {
-                    let t = self.abstr_aux_sptr(binder_type, locals, offset);
-                    let b = self.abstr_aux_sptr(body, locals, offset + 1);
+                    let t = self.abstr_aux(binder_type, locals, offset);
+                    let b = self.abstr_aux(body, locals, offset + 1);
                     self.mk_lambda(binder_name, binder_style, t, b)
                 }
                 Let { binder_name, binder_type, val, body, nondep, .. } => {
-                    let t = self.abstr_aux_sptr(binder_type, locals, offset);
-                    let v = self.abstr_aux_sptr(val, locals, offset);
-                    let b = self.abstr_aux_sptr(body, locals, offset + 1);
+                    let t = self.abstr_aux(binder_type, locals, offset);
+                    let v = self.abstr_aux(val, locals, offset);
+                    let b = self.abstr_aux(body, locals, offset + 1);
                     self.mk_let(binder_name, t, v, b, nondep)
                 }
                 Proj { ty_name, idx, structure, .. } => {
-                    let s = self.abstr_aux_sptr(structure, locals, offset);
+                    let s = self.abstr_aux(structure, locals, offset);
                     self.mk_proj(ty_name, idx, s)
                 }
                 _ => ExprPtr::closed(child.core), // closed
@@ -702,12 +702,12 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
     /// bound variable, if the free variable is in `locals`.
     pub fn abstr(&mut self, e: CorePtr<'t>, locals: &[CorePtr<'t>]) -> ExprPtr<'t> {
         self.expr_cache.abstr_cache.clear();
-        self.abstr_aux(e, locals, 0u16)
+        self.abstr_aux_core(e, locals, 0u16)
     }
 
     /// Abstraction by deBruijn level: converts DbjLevel locals back to Var.
     /// Used by nanoda's locally-nameless TC.
-    fn abstr_aux_levels(&mut self, e: CorePtr<'t>, start_pos: u16, num_open_binders: u16) -> ExprPtr<'t> {
+    fn abstr_aux_levels_core(&mut self, e: CorePtr<'t>, start_pos: u16, num_open_binders: u16) -> ExprPtr<'t> {
         stacker::maybe_grow(64 * 1024, 2 * 1024 * 1024, || self.abstr_aux_levels_body(e, start_pos, num_open_binders))
     }
 
@@ -727,29 +727,29 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
                     },
                 Local { id: FVarId::Unique(..), .. } => ExprPtr::closed(e),
                 App { fun, arg, .. } => {
-                    let new_fun = self.abstr_aux_levels_sptr(fun, start_pos, num_open_binders);
-                    let new_arg = self.abstr_aux_levels_sptr(arg, start_pos, num_open_binders);
+                    let new_fun = self.abstr_aux_levels(fun, start_pos, num_open_binders);
+                    let new_arg = self.abstr_aux_levels(arg, start_pos, num_open_binders);
                     self.mk_app(new_fun, new_arg)
                 }
                 Pi { binder_name, binder_style, binder_type, body, .. } => {
-                    let new_type = self.abstr_aux_levels_sptr(binder_type, start_pos, num_open_binders);
-                    let new_body = self.abstr_aux_levels_sptr(body, start_pos, num_open_binders + 1);
+                    let new_type = self.abstr_aux_levels(binder_type, start_pos, num_open_binders);
+                    let new_body = self.abstr_aux_levels(body, start_pos, num_open_binders + 1);
                     self.mk_pi(binder_name, binder_style, new_type, new_body)
                 }
                 Lambda { binder_name, binder_style, binder_type, body, .. } => {
-                    let new_type = self.abstr_aux_levels_sptr(binder_type, start_pos, num_open_binders);
-                    let new_body = self.abstr_aux_levels_sptr(body, start_pos, num_open_binders + 1);
+                    let new_type = self.abstr_aux_levels(binder_type, start_pos, num_open_binders);
+                    let new_body = self.abstr_aux_levels(body, start_pos, num_open_binders + 1);
                     self.mk_lambda(binder_name, binder_style, new_type, new_body)
                 }
                 Let { binder_name, binder_type, val, body, nondep, .. } => {
-                    let new_type = self.abstr_aux_levels_sptr(binder_type, start_pos, num_open_binders);
-                    let new_val = self.abstr_aux_levels_sptr(val, start_pos, num_open_binders);
-                    let new_body = self.abstr_aux_levels_sptr(body, start_pos, num_open_binders + 1);
+                    let new_type = self.abstr_aux_levels(binder_type, start_pos, num_open_binders);
+                    let new_val = self.abstr_aux_levels(val, start_pos, num_open_binders);
+                    let new_body = self.abstr_aux_levels(body, start_pos, num_open_binders + 1);
                     self.mk_let(binder_name, new_type, new_val, new_body, nondep)
                 }
                 StringLit { .. } | NatLit { .. } => panic!(),
                 Proj { ty_name, idx, structure, .. } => {
-                    let new_structure = self.abstr_aux_levels_sptr(structure, start_pos, num_open_binders);
+                    let new_structure = self.abstr_aux_levels(structure, start_pos, num_open_binders);
                     self.mk_proj(ty_name, idx, new_structure)
                 }
                 Var { .. } | Sort { .. } | Const { .. } => panic!("should flag as no locals"),
@@ -760,21 +760,21 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
     }
 
     /// Helper for abstr_aux_levels: process an ExprPtr child.
-    fn abstr_aux_levels_sptr(&mut self, child: ExprPtr<'t>, start_pos: u16, num_open_binders: u16) -> ExprPtr<'t> {
+    fn abstr_aux_levels(&mut self, child: ExprPtr<'t>, start_pos: u16, num_open_binders: u16) -> ExprPtr<'t> {
         if child.is_closed() {
             if !self.has_fvars(child.core) { return child; }
-            return self.abstr_aux_levels(child.core, start_pos, num_open_binders);
+            return self.abstr_aux_levels_core(child.core, start_pos, num_open_binders);
         }
         if child.shift == 0 {
-            return self.abstr_aux_levels(child.core, start_pos, num_open_binders);
+            return self.abstr_aux_levels_core(child.core, start_pos, num_open_binders);
         }
-        // Adjust num_open_binders by child.shift (same logic as abstr_aux_sptr)
+        // Adjust num_open_binders by child.shift (same logic as abstr_aux)
         if num_open_binders >= child.shift {
-            let result = self.abstr_aux_levels(child.core, start_pos, num_open_binders - child.shift);
+            let result = self.abstr_aux_levels_core(child.core, start_pos, num_open_binders - child.shift);
             result.shift_up(child.shift)
         } else {
             // Fallback: materialize and recurse
-            let viewed = self.view_sptr(child);
+            let viewed = self.view_expr(child);
             match viewed {
                 Local { id: FVarId::DbjLevel(serial), .. } => {
                     if serial < start_pos { ExprPtr::closed(child.core) }
@@ -782,28 +782,28 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
                 }
                 Local { .. } => ExprPtr::closed(child.core),
                 App { fun, arg, .. } => {
-                    let f = self.abstr_aux_levels_sptr(fun, start_pos, num_open_binders);
-                    let a = self.abstr_aux_levels_sptr(arg, start_pos, num_open_binders);
+                    let f = self.abstr_aux_levels(fun, start_pos, num_open_binders);
+                    let a = self.abstr_aux_levels(arg, start_pos, num_open_binders);
                     self.mk_app(f, a)
                 }
                 Pi { binder_name, binder_style, binder_type, body, .. } => {
-                    let t = self.abstr_aux_levels_sptr(binder_type, start_pos, num_open_binders);
-                    let b = self.abstr_aux_levels_sptr(body, start_pos, num_open_binders + 1);
+                    let t = self.abstr_aux_levels(binder_type, start_pos, num_open_binders);
+                    let b = self.abstr_aux_levels(body, start_pos, num_open_binders + 1);
                     self.mk_pi(binder_name, binder_style, t, b)
                 }
                 Lambda { binder_name, binder_style, binder_type, body, .. } => {
-                    let t = self.abstr_aux_levels_sptr(binder_type, start_pos, num_open_binders);
-                    let b = self.abstr_aux_levels_sptr(body, start_pos, num_open_binders + 1);
+                    let t = self.abstr_aux_levels(binder_type, start_pos, num_open_binders);
+                    let b = self.abstr_aux_levels(body, start_pos, num_open_binders + 1);
                     self.mk_lambda(binder_name, binder_style, t, b)
                 }
                 Let { binder_name, binder_type, val, body, nondep, .. } => {
-                    let t = self.abstr_aux_levels_sptr(binder_type, start_pos, num_open_binders);
-                    let v = self.abstr_aux_levels_sptr(val, start_pos, num_open_binders);
-                    let b = self.abstr_aux_levels_sptr(body, start_pos, num_open_binders + 1);
+                    let t = self.abstr_aux_levels(binder_type, start_pos, num_open_binders);
+                    let v = self.abstr_aux_levels(val, start_pos, num_open_binders);
+                    let b = self.abstr_aux_levels(body, start_pos, num_open_binders + 1);
                     self.mk_let(binder_name, t, v, b, nondep)
                 }
                 Proj { ty_name, idx, structure, .. } => {
-                    let s = self.abstr_aux_levels_sptr(structure, start_pos, num_open_binders);
+                    let s = self.abstr_aux_levels(structure, start_pos, num_open_binders);
                     self.mk_proj(ty_name, idx, s)
                 }
                 _ => ExprPtr::closed(child.core), // closed
@@ -815,10 +815,10 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
     /// Used by nanoda's locally-nameless TC.
     pub fn abstr_levels(&mut self, e: CorePtr<'t>, start_pos: u16) -> ExprPtr<'t> {
         self.expr_cache.abstr_cache_levels.clear();
-        self.abstr_aux_levels(e, start_pos, self.dbj_level_counter)
+        self.abstr_aux_levels_core(e, start_pos, self.dbj_level_counter)
     }
 
-    fn subst_aux(&mut self, e: CorePtr<'t>, ks: LevelsPtr<'t>, vs: LevelsPtr<'t>) -> ExprPtr<'t> {
+    fn subst_aux_core(&mut self, e: CorePtr<'t>, ks: LevelsPtr<'t>, vs: LevelsPtr<'t>) -> ExprPtr<'t> {
         stacker::maybe_grow(64 * 1024, 2 * 1024 * 1024, || self.subst_aux_body(e, ks, vs))
     }
 
@@ -841,29 +841,29 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
                 if new_levels == levels { ExprPtr::closed(e) } else { self.mk_const(name, new_levels) }
             }
             App { fun, arg, .. } => {
-                let new_fun = self.subst_aux_sptr(fun, ks, vs);
-                let new_arg = self.subst_aux_sptr(arg, ks, vs);
+                let new_fun = self.subst_aux(fun, ks, vs);
+                let new_arg = self.subst_aux(arg, ks, vs);
                 if new_fun == fun && new_arg == arg { ExprPtr::from_nlbv(e, nlbv) } else { self.mk_app(new_fun, new_arg) }
             }
             Pi { binder_name, binder_style, binder_type, body, .. } => {
-                let new_type = self.subst_aux_sptr(binder_type, ks, vs);
-                let new_body = self.subst_aux_sptr(body, ks, vs);
+                let new_type = self.subst_aux(binder_type, ks, vs);
+                let new_body = self.subst_aux(body, ks, vs);
                 if new_type == binder_type && new_body == body { ExprPtr::from_nlbv(e, nlbv) } else { self.mk_pi(binder_name, binder_style, new_type, new_body) }
             }
             Lambda { binder_name, binder_style, binder_type, body, .. } => {
-                let new_type = self.subst_aux_sptr(binder_type, ks, vs);
-                let new_body = self.subst_aux_sptr(body, ks, vs);
+                let new_type = self.subst_aux(binder_type, ks, vs);
+                let new_body = self.subst_aux(body, ks, vs);
                 if new_type == binder_type && new_body == body { ExprPtr::from_nlbv(e, nlbv) } else { self.mk_lambda(binder_name, binder_style, new_type, new_body) }
             }
             Let { binder_name, binder_type, val, body, nondep, .. } => {
-                let new_type = self.subst_aux_sptr(binder_type, ks, vs);
-                let new_val = self.subst_aux_sptr(val, ks, vs);
-                let new_body = self.subst_aux_sptr(body, ks, vs);
+                let new_type = self.subst_aux(binder_type, ks, vs);
+                let new_val = self.subst_aux(val, ks, vs);
+                let new_body = self.subst_aux(body, ks, vs);
                 if new_type == binder_type && new_val == val && new_body == body { ExprPtr::from_nlbv(e, nlbv) } else { self.mk_let(binder_name, new_type, new_val, new_body, nondep) }
             }
             Local { .. } => panic!("level substitution should not find locals"),
             Proj { ty_name, idx, structure, .. } => {
-                let new_structure = self.subst_aux_sptr(structure, ks, vs);
+                let new_structure = self.subst_aux(structure, ks, vs);
                 if new_structure == structure { ExprPtr::from_nlbv(e, nlbv) } else { self.mk_proj(ty_name, idx, new_structure) }
             }
         };
@@ -873,8 +873,8 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
 
     /// Helper for subst_aux: level substitution commutes with shifting,
     /// so recurse on child.core and preserve child.shift.
-    fn subst_aux_sptr(&mut self, child: ExprPtr<'t>, ks: LevelsPtr<'t>, vs: LevelsPtr<'t>) -> ExprPtr<'t> {
-        let result = self.subst_aux(child.core, ks, vs);
+    fn subst_aux(&mut self, child: ExprPtr<'t>, ks: LevelsPtr<'t>, vs: LevelsPtr<'t>) -> ExprPtr<'t> {
+        let result = self.subst_aux_core(child.core, ks, vs);
         result.shift_up(child.shift)
     }
 
@@ -884,7 +884,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         }
         self.expr_cache.subst_cache.clear();
         assert_eq!(self.read_levels(ks).len(), self.read_levels(vs).len());
-        let out = self.subst_aux(e, ks, vs);
+        let out = self.subst_aux_core(e, ks, vs);
         self.expr_cache.dsubst_cache.insert((e, ks, vs), out);
         out
     }
@@ -945,7 +945,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         (e, args)
     }
 
-    /// If this is a const application, return (head_sptr, name, levels, args)
+    /// If this is a const application, return (head_expr, name, levels, args)
     pub fn unfold_const_apps(
         &self,
         e: ExprPtr<'t>,
@@ -1003,10 +1003,10 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
     pub(crate) fn abstr_pi(&mut self, binder: CorePtr<'t>, body: ExprPtr<'t>) -> ExprPtr<'t> {
         match self.read_expr(binder) {
             Local { binder_name, binder_style, binder_type, .. } => {
-                // Use abstr_aux_sptr to correctly handle body.shift.
+                // Use abstr_aux to correctly handle body.shift.
                 // abstr(body.core, ...) would drop the shift, producing wrong var indices.
                 self.expr_cache.abstr_cache.clear();
-                let body = self.abstr_aux_sptr(body, &[binder], 0);
+                let body = self.abstr_aux(body, &[binder], 0);
                 self.mk_pi(binder_name, binder_style, ExprPtr::closed(binder_type), body) // binder_type is CorePtr from Local
             }
             _ => unreachable!("Cannot apply pi with non-local domain type"),
@@ -1017,7 +1017,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         match self.read_expr(binder) {
             Local { binder_name, binder_style, binder_type, .. } => {
                 self.expr_cache.abstr_cache.clear();
-                let body = self.abstr_aux_sptr(body, &[binder], 0);
+                let body = self.abstr_aux(body, &[binder], 0);
                 self.mk_lambda(binder_name, binder_style, ExprPtr::closed(binder_type), body) // binder_type is CorePtr from Local
             }
             _ => unreachable!("Cannot apply lambda with non-local domain type"),
@@ -1338,7 +1338,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
     pub(crate) fn has_fvars(&self, e: CorePtr<'t>) -> bool { self.read_expr(e).has_fvars() }
 
     /// With ExprPtr, fvar_lb of a DAG CorePtr is always 0 (cores are OSNF-normalized).
-    /// The effective fvar_lb of an ExprPtr is sptr.shift.
+    /// The effective fvar_lb of an ExprPtr is e.shift.
     #[inline(always)]
     pub(crate) fn fvar_lb(&self, _e: CorePtr<'t>) -> u16 {
         0

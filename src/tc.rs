@@ -292,7 +292,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
     /// Look up an ExprPtr in a depth-indexed cache, shifting the result to current depth.
     /// Encapsulates: bucket = cache_bucket(x), get(bucket, x.core), result.shift_up(x.shift).
     #[inline(always)]
-    fn sptr_cache_get(&self, x: ExprPtr<'t>,
+    fn expr_cache_get(&self, x: ExprPtr<'t>,
         get: impl FnOnce(&TcCache<'t>, usize, &CorePtr<'t>) -> Option<ExprPtr<'t>>
     ) -> Option<ExprPtr<'t>> {
         let bucket = self.cache_bucket(x);
@@ -322,7 +322,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                 }
             }
         }
-        match self.sptr_cache_get(x, TcCache::uf_get) {
+        match self.expr_cache_get(x, TcCache::uf_get) {
             Some(rep) => self.uf_find(rep),
             None => x,
         }
@@ -510,7 +510,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         match self.ctx.read_expr(whnfd.core) {
             Sort { level, .. } => level,
             _ => {
-                panic!("infer_sort_of: expected Sort, got {:?} from e={:?}, infer={:?}, depth={}", self.ctx.expr_desc(whnfd.core, 5), self.ctx.expr_desc(e.core, 5), self.ctx.expr_desc(ty.core, 5), self.depth());
+                panic!("infer_sort_of: expected Sort, got {:?} from e={:?}, infer={:?}, depth={}", self.ctx.core_desc(whnfd.core, 5), self.ctx.core_desc(e.core, 5), self.ctx.core_desc(ty.core, 5), self.depth());
             }
         }
     }
@@ -609,7 +609,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         if !self.ctx.export_file.config.nat_extension {
             return None
         }
-        if self.ctx.sptr_nlbv(e) > 0 {
+        if self.ctx.nlbv(e) > 0 {
             return None
         }
         let (f, args) = self.ctx.unfold_apps(e);
@@ -690,7 +690,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         let mut ctor_ty = self.ctx.subst_declar_info_levels(*ctor_info, struct_ty_levels);
         for i in 0..(*num_params) {
             ctor_ty = self.whnf(ctor_ty);
-            match self.ctx.view_sptr(ctor_ty) {
+            match self.ctx.view_expr(ctor_ty) {
                 Pi { body, .. } => {
                     ctor_ty = self.ctx.inst_beta(body, &[struct_ty_args[i as usize]]);
                 }
@@ -699,9 +699,9 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         }
         for i in 0..idx {
             ctor_ty = self.whnf(ctor_ty);
-            match self.ctx.view_sptr(ctor_ty) {
+            match self.ctx.view_expr(ctor_ty) {
                 Pi { binder_type, body, .. } => {
-                    if self.ctx.sptr_nlbv(body) != 0 {
+                    if self.ctx.nlbv(body) != 0 {
                       if structure_ty_is_prop && !self.is_proposition(binder_type).0 {
                           panic!("infer_proj prop")
                       }
@@ -715,7 +715,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             }
         }
         let reduced = self.whnf(ctor_ty);
-        match self.ctx.view_sptr(reduced) {
+        match self.ctx.view_expr(reduced) {
             Pi { binder_type, .. } => {
                 if structure_ty_is_prop && !self.is_proposition(binder_type).0 {
                     panic!("infer_proj prop")
@@ -724,7 +724,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             }
             other => panic!("Ran out of constructor telescope getting field: ty_name={:?}, struct_ty_name={:?}, idx={}, num_params={}, struct_ty={:?}, ctor_ty_whnf={:?}, variant={}",
                 self.ctx.debug_print(_ty_name), self.ctx.debug_print(struct_ty_name),
-                idx, num_params, self.ctx.expr_desc(structure_ty.core, 5), self.ctx.expr_desc(reduced.core, 5),
+                idx, num_params, self.ctx.core_desc(structure_ty.core, 5), self.ctx.core_desc(reduced.core, 5),
                 match other { Sort {..} => "Sort", Const {..} => "Const", App {..} => "App", Lambda {..} => "Lambda", _ => "other" })
         }
     }
@@ -732,7 +732,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
     pub(crate) fn infer(&mut self, e: ExprPtr<'t>, flag: InferFlag) -> ExprPtr<'t> {
         self.ctx.trace.infer_calls += 1;
         if self.ctx.trace.trace_defeq {
-            eprintln!("  INF#{} d={} s={} {:?}@{} {}", self.ctx.trace.infer_calls, self.depth(), e.shift, e.core.dag_marker(), e.core.idx(), self.ctx.expr_desc(e.core, 8));
+            eprintln!("  INF#{} d={} s={} {:?}@{} {}", self.ctx.trace.infer_calls, self.depth(), e.shift, e.core.dag_marker(), e.core.idx(), self.ctx.core_desc(e.core, 8));
         }
         stacker::maybe_grow(64 * 1024, 2 * 1024 * 1024, || self.infer_inner(e, flag))
     }
@@ -783,7 +783,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         }
         // At this point, e.shift == 0 OR e.is_closed() (shifted case handled by peel above).
         // So children in the DAG can be used directly without shift composition.
-        // Use read_expr instead of view_sptr to skip unnecessary body traversal.
+        // Use read_expr instead of view_expr to skip unnecessary body traversal.
         debug_assert!(e.shift == 0 || e.is_closed(), "infer_inner post-peel: shift={}", e.shift);
         let r = match self.ctx.read_expr(e.core) {
             Local { binder_type, .. } => ExprPtr::closed(binder_type),
@@ -824,7 +824,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         fun = self.infer(fun, flag);
         let mut arg_idx = 0;
         while arg_idx < args.len() {
-            match self.ctx.view_sptr(fun) {
+            match self.ctx.view_expr(fun) {
                 Pi { binder_type, body, .. } => {
                     let arg = args[arg_idx];
                     arg_idx += 1;
@@ -881,7 +881,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
     fn infer_lambda(&mut self, mut e: ExprPtr<'t>, flag: InferFlag) -> ExprPtr<'t> {
         // Collect binder info while descending into nested lambdas
         let mut binders: Vec<(NamePtr<'t>, crate::expr::BinderStyle, ExprPtr<'t>)> = Vec::new();
-        while let Lambda { binder_name, binder_style, binder_type, body, .. } = self.ctx.view_sptr(e) {
+        while let Lambda { binder_name, binder_style, binder_type, body, .. } = self.ctx.view_expr(e) {
             if let Check = flag {
                 self.infer_sort_of(binder_type, flag);
             }
@@ -905,7 +905,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
     fn infer_pi(&mut self, mut e: ExprPtr<'t>, flag: InferFlag) -> ExprPtr<'t> {
         let mut universes = Vec::new();
         let depth0 = self.depth();
-        while let Pi { binder_type, body, .. } = self.ctx.view_sptr(e) {
+        while let Pi { binder_type, body, .. } = self.ctx.view_expr(e) {
             let dom_univ = self.infer_sort_of(binder_type, flag);
             universes.push(dom_univ);
             self.push_local(binder_type);
@@ -958,7 +958,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             return ExprPtr::from_nlbv(cached, self.ctx.num_loose_bvars(cached)).shift_up(e.shift)
         }
 
-        let out = match self.ctx.view_sptr(e) {
+        let out = match self.ctx.view_expr(e) {
             Expr::App {fun, arg, ..} => {
                 let f = self.strong_reduce(fun, reduce_types, reduce_proofs);
                 let arg = self.strong_reduce(arg, reduce_types, reduce_proofs);
@@ -1106,7 +1106,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             }
             let (e_fun, args) = self.ctx.unfold_apps(cur);
             // Dispatch on head constructor via read_expr (avoids body-traversal for
-            // Pi/Lambda-without-args cases). view_sptr used only when body is needed.
+            // Pi/Lambda-without-args cases). view_expr used only when body is needed.
             match self.ctx.read_expr(e_fun.core) {
                 Proj { idx, structure, .. } => {
                     // Compose e_fun.shift into structure if needed.
@@ -1132,9 +1132,9 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                     break self.ctx.mk_sort(level);
                 }
                 Lambda { .. } if !args.is_empty() => {
-                    // Beta reduction: need body, so use view_sptr.
+                    // Beta reduction: need body, so use view_expr.
                     let (mut e, mut n_args) = (e_fun, 0usize);
-                    while let (Lambda { body, .. }, [_arg, _rest @ ..]) = (self.ctx.view_sptr(e), &args[n_args..]) {
+                    while let (Lambda { body, .. }, [_arg, _rest @ ..]) = (self.ctx.view_expr(e), &args[n_args..]) {
                         n_args += 1;
                         e = body;
                     }
@@ -1152,8 +1152,8 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                     break e_fun;
                 }
                 Let { .. } => {
-                    // Need binder_type/val/body with shifts composed — use view_sptr.
-                    let (binder_type, val, body) = match self.ctx.view_sptr(e_fun) {
+                    // Need binder_type/val/body with shifts composed — use view_expr.
+                    let (binder_type, val, body) = match self.ctx.view_expr(e_fun) {
                         Let { binder_type, val, body, .. } => (binder_type, val, body),
                         _ => unreachable!(),
                     };
@@ -1237,7 +1237,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
     }
 
     fn def_eq_binder_multi(&mut self, x: ExprPtr<'t>, y: ExprPtr<'t>) -> Option<bool> {
-        // Cheap head check — avoid expensive view_sptr body traversal if not both binders.
+        // Cheap head check — avoid expensive view_expr body traversal if not both binders.
         if (self.ctx.is_pi(x) && self.ctx.is_pi(y)) || (self.ctx.is_lambda(x) && self.ctx.is_lambda(y)) {
             self.def_eq_binder_aux(x, y)
         } else {
@@ -1254,7 +1254,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         | (
             Lambda { binder_type: t1, body: body1, .. },
             Lambda { binder_type: t2, body: body2, .. },
-        ) = self.ctx.view_sptr_pair(x, y)
+        ) = self.ctx.view_expr_pair(x, y)
         {
             if self.def_eq_tagged(t1, t2, "bnd_ty") {
                 self.push_local(t1);
@@ -1272,7 +1272,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
     }
 
     fn def_eq_proj(&mut self, x: ExprPtr<'t>, y: ExprPtr<'t>) -> bool {
-        match self.ctx.view_sptr_pair(x, y) {
+        match self.ctx.view_expr_pair(x, y) {
             (Proj { idx: idx_l, structure: structure_l, .. }, Proj { idx: idx_r, structure: structure_r, .. }) =>
                 idx_l == idx_r && self.def_eq(structure_l, structure_r),
             _ => false,
@@ -1280,8 +1280,8 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
     }
 
     fn def_eq_local(&mut self, x: ExprPtr<'t>, y: ExprPtr<'t>) -> bool {
-        // For ExprPtr: Var nodes are represented as ExprPtr(var0, k), so view_sptr gives Var { dbj_idx: k }.
-        match self.ctx.view_sptr_pair(x, y) {
+        // For ExprPtr: Var nodes are represented as ExprPtr(var0, k), so view_expr gives Var { dbj_idx: k }.
+        match self.ctx.view_expr_pair(x, y) {
             // Pure de Bruijn: two Vars are equal iff same index
             (Var { dbj_idx: x_idx, .. }, Var { dbj_idx: y_idx, .. }) =>
                 x_idx == y_idx,
@@ -1307,7 +1307,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         // Peel App layers, checking args via cheap_eq.
         let (mut fx, mut fy) = (x, y);
         loop {
-            match self.ctx.view_sptr_pair(fx, fy) {
+            match self.ctx.view_expr_pair(fx, fy) {
                 (App { fun: f1, arg: a1, .. }, App { fun: f2, arg: a2, .. }) => {
                     if !self.cheap_eq(a1, a2) {
                         return None;
@@ -1366,8 +1366,8 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
     pub fn assert_def_eq(&mut self, u: ExprPtr<'t>, v: ExprPtr<'t>) {
         if !self.def_eq_tagged(u, v, "assert") {
             eprintln!("  assert_def_eq FAILED at depth {}:", self.depth());
-            eprintln!("    u = {} (shift={} nlbv={})", self.ctx.expr_desc(u.core, 20), u.shift, self.ctx.num_loose_bvars(u.core));
-            eprintln!("    v = {} (shift={} nlbv={})", self.ctx.expr_desc(v.core, 20), v.shift, self.ctx.num_loose_bvars(v.core));
+            eprintln!("    u = {} (shift={} nlbv={})", self.ctx.core_desc(u.core, 20), u.shift, self.ctx.num_loose_bvars(u.core));
+            eprintln!("    v = {} (shift={} nlbv={})", self.ctx.core_desc(v.core, 20), v.shift, self.ctx.num_loose_bvars(v.core));
             self.find_diff(u, v, 0);
             panic!("assert_def_eq failed");
         }
@@ -1379,8 +1379,8 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         if u.shift != v.shift {
             eprintln!("{}SHIFT DIFF: shift={} vs shift={}", prefix, u.shift, v.shift);
         }
-        let ue = self.ctx.view_sptr(u);
-        let ve = self.ctx.view_sptr(v);
+        let ue = self.ctx.view_expr(u);
+        let ve = self.ctx.view_expr(v);
         match (ue, ve) {
             (Expr::App { fun: f1, arg: a1, .. }, Expr::App { fun: f2, arg: a2, .. }) => {
                 eprintln!("{}DIFF App at depth {}", prefix, depth);
@@ -1396,7 +1396,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             }
             _ => {
                 eprintln!("{}LEAF DIFF at depth {}: {} vs {}", prefix, depth,
-                    self.ctx.expr_desc(u.core, 5), self.ctx.expr_desc(v.core, 5));
+                    self.ctx.core_desc(u.core, 5), self.ctx.core_desc(v.core, 5));
             }
         }
     }
@@ -1419,8 +1419,8 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         if self.ctx.trace.trace_defeq {
             eprintln!("  DEQ#{} [{}] d={} x=(s={} {}) y=(s={} {}) eq={}",
                 self.ctx.trace.def_eq_calls, tag, self.depth(),
-                x.shift, self.ctx.expr_desc(x.core, 15),
-                y.shift, self.ctx.expr_desc(y.core, 15),
+                x.shift, self.ctx.core_desc(x.core, 15),
+                y.shift, self.ctx.core_desc(y.core, 15),
                 x == y);
         }
         self.ctx.check_heartbeat();
@@ -1472,7 +1472,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         // No shift materialization needed — def_eq_app/def_eq_binder_aux handle
         // shift differences by recursively comparing children via def_eq.
 
-        if (self.ctx.sptr_nlbv(x_n) == 0 || self.ctx.eager_mode) && Some(y_n) == self.ctx.c_bool_true() {
+        if (self.ctx.nlbv(x_n) == 0 || self.ctx.eager_mode) && Some(y_n) == self.ctx.c_bool_true() {
             let x_nn = self.whnf(x_n);
             if Some(x_nn) == self.ctx.c_bool_true() {
                 return true
@@ -1492,7 +1492,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                 let (mut fx, mut fy) = (x_n, y_n);
                 let mut ok = true;
                 loop {
-                    match self.ctx.view_sptr_pair(fx, fy) {
+                    match self.ctx.view_expr_pair(fx, fy) {
                         (App { fun: f1, arg: a1, .. }, App { fun: f2, arg: a2, .. }) => {
                             if !self.cheap_eq(a1, a2) { ok = false; break; }
                             fx = f1; fy = f2;
@@ -1768,8 +1768,8 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
     /// Returns (normalized_x, normalized_y, bucket_index).
     /// Bucket 0 = closed expressions (base), bucket k>0 = depth k.
     fn defeq_normalize_pair(&self, x: ExprPtr<'t>, y: ExprPtr<'t>) -> (ExprPtr<'t>, ExprPtr<'t>, usize) {
-        let x_nlbv = self.ctx.sptr_nlbv(x);
-        let y_nlbv = self.ctx.sptr_nlbv(y);
+        let x_nlbv = self.ctx.nlbv(x);
+        let y_nlbv = self.ctx.nlbv(y);
         if x_nlbv == 0 && y_nlbv == 0 {
             return (x, y, 0); // Both closed — base bucket
         }
@@ -1860,7 +1860,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             return None
         }
 
-        match self.ctx.view_sptr_pair(x, y) {
+        match self.ctx.view_expr_pair(x, y) {
             (App { .. }, App { .. }) if (x_defname == y_defname) => {
                 let (l_fun, l_args) = self.ctx.unfold_apps(x);
                 let (r_fun, r_args) = self.ctx.unfold_apps(y);
@@ -1897,7 +1897,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         if let Some(short) = self.def_eq_nat(x, y) {
             return Some(DeltaResult::FoundEqResult(short))
         }
-        if (self.ctx.sptr_nlbv(x) == 0 && self.ctx.sptr_nlbv(y) == 0) || self.ctx.eager_mode {
+        if (self.ctx.nlbv(x) == 0 && self.ctx.nlbv(y) == 0) || self.ctx.eager_mode {
             if let Some(xprime) = self.try_reduce_nat(x) {
                 return Some(DeltaResult::FoundEqResult(self.def_eq(xprime, y)))
             } else if let Some(yprime) = self.try_reduce_nat(y) {
@@ -1958,7 +1958,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
 
     pub fn is_sort_zero(&mut self, e: ExprPtr<'t>) -> bool {
         let e = self.whnf(e);
-        // Sort is always closed, so read_expr is equivalent to view_sptr but cheaper.
+        // Sort is always closed, so read_expr is equivalent to view_expr but cheaper.
         match self.ctx.read_expr(e.core) {
             Sort { level, .. } => self.ctx.read_level(level) == Level::Zero,
             _ => false,
