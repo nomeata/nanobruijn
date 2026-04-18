@@ -441,7 +441,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
     }
 
     fn is_nested_ind_app(&mut self, st: &InductiveCheckState<'t>, e: ExprPtr<'t>) -> Option<InductiveData<'t>> {
-        if !(matches!(self.ctx.view_sptr(e), App { .. })) {
+        if !self.ctx.is_app(e) {
             return None
         }
         let (_f, name, _levels, args) = self.ctx.unfold_const_apps(e)?;

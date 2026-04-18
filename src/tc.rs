@@ -779,11 +779,13 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                 return cached_result;
             }
         }
-        let r = match self.ctx.view_sptr(e) {
-            Local { binder_type, .. } => ExprPtr::closed(binder_type), // binder_type is CorePtr in Local, declaration-level
-            Var { dbj_idx, .. } => {
-                self.lookup_var(dbj_idx)
-            },
+        // At this point, e.shift == 0 OR e.is_closed() (shifted case handled by peel above).
+        // So children in the DAG can be used directly without shift composition.
+        // Use read_expr instead of view_sptr to skip unnecessary body traversal.
+        debug_assert!(e.shift == 0 || e.is_closed(), "infer_inner post-peel: shift={}", e.shift);
+        let r = match self.ctx.read_expr(e.core) {
+            Local { binder_type, .. } => ExprPtr::closed(binder_type),
+            Var { dbj_idx, .. } => self.lookup_var(dbj_idx),
             Sort { level, .. } => self.infer_sort(level, flag),
             App { .. } => self.infer_app(e, flag),
             Pi { .. } => self.infer_pi(e, flag),
