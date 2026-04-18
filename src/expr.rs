@@ -1,4 +1,5 @@
 //! Implementation of Lean expressions
+use crate::hash64;
 use crate::util::{AppArgs, BigUintPtr, CorePtr, FxHashMap, LevelPtr, LevelsPtr, NamePtr, ExprPtr, StringPtr, TcCtx};
 use num_bigint::BigUint;
 use num_traits::identities::Zero;
@@ -20,16 +21,13 @@ pub(crate) const NAT_LIT_HASH: u64 = 1583;
 pub enum Expr<'a> {
     /// A string literal with a pointer to a utf-8 string.
     StringLit {
-        hash: u64,
         ptr: StringPtr<'a>,
     },
     /// A nat literal, holds a pointer to an arbitrary precision bignum.
     NatLit {
-        hash: u64,
         ptr: BigUintPtr<'a>,
     },
     Proj {
-        hash: u64,
         /// The name of the structure being projected. E.g. `Prod` if this is
         /// projection 0 of `Prod.mk ..`
         ty_name: NamePtr<'a>,
@@ -45,27 +43,22 @@ pub enum Expr<'a> {
     /// In the DAG, only Var { dbj_idx: 0 } exists. All variable references
     /// are ExprPtr(var0_ptr, k) where k is the de Bruijn index.
     Var {
-        hash: u64,
         dbj_idx: u16,
     },
     Sort {
-        hash: u64,
         level: LevelPtr<'a>,
     },
     Const {
-        hash: u64,
         name: NamePtr<'a>,
         levels: LevelsPtr<'a>,
     },
     App {
-        hash: u64,
         fun: ExprPtr<'a>,
         arg: ExprPtr<'a>,
         num_loose_bvars: u16,
         has_fvars: bool,
     },
     Pi {
-        hash: u64,
         binder_name: NamePtr<'a>,
         binder_style: BinderStyle,
         binder_type: ExprPtr<'a>,
@@ -74,7 +67,6 @@ pub enum Expr<'a> {
         has_fvars: bool,
     },
     Lambda {
-        hash: u64,
         binder_name: NamePtr<'a>,
         binder_style: BinderStyle,
         binder_type: ExprPtr<'a>,
@@ -83,7 +75,6 @@ pub enum Expr<'a> {
         has_fvars: bool,
     },
     Let {
-        hash: u64,
         binder_name: NamePtr<'a>,
         binder_type: ExprPtr<'a>,
         val: ExprPtr<'a>,
@@ -94,7 +85,6 @@ pub enum Expr<'a> {
     },
     /// A free variable with binder information and a unique identifier.
     Local {
-        hash: u64,
         binder_name: NamePtr<'a>,
         binder_style: BinderStyle,
         binder_type: CorePtr<'a>,
@@ -114,17 +104,21 @@ pub enum FVarId {
 impl<'a> Expr<'a> {
     pub(crate) fn get_hash(&self) -> u64 {
         match self {
-            Var { hash, .. }
-            | Sort { hash, .. }
-            | Const { hash, .. }
-            | App { hash, .. }
-            | Pi { hash, .. }
-            | Lambda { hash, .. }
-            | Let { hash, .. }
-            | Local { hash, .. }
-            | StringLit { hash, .. }
-            | NatLit { hash, .. }
-            | Proj { hash, .. } => *hash,
+            Var { dbj_idx } => hash64!(VAR_HASH, dbj_idx),
+            Sort { level } => hash64!(SORT_HASH, level),
+            Const { name, levels } => hash64!(CONST_HASH, name, levels),
+            App { fun, arg, .. } => hash64!(APP_HASH, fun, arg),
+            Pi { binder_name, binder_style, binder_type, body, .. } =>
+                hash64!(PI_HASH, binder_name, binder_style, binder_type, body),
+            Lambda { binder_name, binder_style, binder_type, body, .. } =>
+                hash64!(LAMBDA_HASH, binder_name, binder_style, binder_type, body),
+            Let { binder_name, binder_type, val, body, nondep, .. } =>
+                hash64!(LET_HASH, binder_name, binder_type, val, body, nondep),
+            Local { binder_name, binder_style, binder_type, id, .. } =>
+                hash64!(LOCAL_HASH, binder_name, binder_style, binder_type, id),
+            StringLit { ptr } => hash64!(STRING_LIT_HASH, ptr),
+            NatLit { ptr } => hash64!(NAT_LIT_HASH, ptr),
+            Proj { ty_name, idx, structure, .. } => hash64!(PROJ_HASH, ty_name, idx, structure),
         }
     }
 }

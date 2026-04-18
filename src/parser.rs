@@ -439,10 +439,7 @@ impl<'a, R: BufRead> Parser<'a, R> {
 
     /// Find or create Var(0) in the DAG. Returns its CorePtr.
     fn find_or_insert_var0(&mut self) -> CorePtr<'a> {
-        let hash = hash64!(crate::expr::VAR_HASH, 0u16);
-        let (dag_idx, _) = self.insert_expr(Expr::Var {
-            dbj_idx: 0, hash,
-        });
+        let (dag_idx, _) = self.insert_expr(Expr::Var { dbj_idx: 0 });
         crate::util::Ptr::from(DagMarker::ExportFile, dag_idx)
     }
 
@@ -570,8 +567,7 @@ impl<'a, R: BufRead> Parser<'a, R> {
                 }
                 let num_ptr = BigUintPtr::from(DagMarker::ExportFile, self.dag.bignums.as_mut().unwrap().insert_full(big_uint).0);
                 let (dag_idx, _) = {
-                    let hash = hash64!(crate::expr::NAT_LIT_HASH, num_ptr);
-                    self.insert_expr(Expr::NatLit { ptr: num_ptr, hash })
+                    self.insert_expr(Expr::NatLit { ptr: num_ptr })
                 };
                 if !self.config.nat_extension {
                     return Err(Box::<dyn Error>::from(
@@ -592,8 +588,7 @@ impl<'a, R: BufRead> Parser<'a, R> {
                     self.dag.strings.insert_full(crate::util::CowStr::Owned(s)).0
                 );
                 let (dag_idx, _) = {
-                    let hash = hash64!(crate::expr::STRING_LIT_HASH, string_ptr);
-                    self.insert_expr(Expr::StringLit { ptr: string_ptr, hash })
+                    self.insert_expr(Expr::StringLit { ptr: string_ptr })
                 };
                 self.record_expr(dag_idx, ExprPtr::CLOSED_SHIFT);
             }
@@ -634,8 +629,7 @@ impl<'a, R: BufRead> Parser<'a, R> {
             ExprSort(level) => {
                 let level = self.get_level_ptr(level);
                 let (dag_idx, _) = {
-                    let hash = hash64!(crate::expr::SORT_HASH, level);
-                    self.insert_expr(Expr::Sort { level, hash })
+                    self.insert_expr(Expr::Sort { level })
                 };
                 self.record_expr(dag_idx, ExprPtr::CLOSED_SHIFT);
             }
@@ -646,8 +640,7 @@ impl<'a, R: BufRead> Parser<'a, R> {
                 let name = self.get_name_ptr(name);
                 let levels = self.get_levels_ptr(&levels);
                 let (dag_idx, _) = {
-                    let hash = hash64!(crate::expr::CONST_HASH, name, levels);
-                    self.insert_expr(Expr::Const { name, levels, hash })
+                    self.insert_expr(Expr::Const { name, levels })
                 };
                 self.record_expr(dag_idx, ExprPtr::CLOSED_SHIFT);
             }
@@ -673,10 +666,9 @@ impl<'a, R: BufRead> Parser<'a, R> {
                 let core_arg_nlbv = if arg_core_nlbv == 0 { 0 } else { arg_core_nlbv + core_arg.shift };
                 let core_nlbv = core_fun_nlbv.max(core_arg_nlbv);
                 let locals = self.has_fvars_ptr(fun_e.core) || self.has_fvars_ptr(arg_e.core);
-                let hash = hash64!(crate::expr::APP_HASH, core_fun, core_arg);
                 let (core_idx, _) = self.insert_expr(Expr::App {
                     fun: core_fun, arg: core_arg, num_loose_bvars: core_nlbv,
-                    has_fvars: locals, hash,
+                    has_fvars: locals,
                 });
                 self.record_expr(core_idx, min_shift);
             }
@@ -717,10 +709,9 @@ impl<'a, R: BufRead> Parser<'a, R> {
                 let core_body_nlbv = if body_core_nlbv == 0 { 0 } else { body_core_nlbv + core_body.shift };
                 let core_nlbv = core_ty_nlbv.max(core_body_nlbv.saturating_sub(1));
                 let locals = self.has_fvars_ptr(ty_e.core) || self.has_fvars_ptr(body_e.core);
-                let hash = hash64!(crate::expr::LAMBDA_HASH, binder_name, binder_info, core_ty, core_body);
                 let (core_idx, _) = self.insert_expr(Expr::Lambda {
                     binder_name, binder_style: binder_info, binder_type: core_ty, body: core_body,
-                    num_loose_bvars: core_nlbv, has_fvars: locals, hash,
+                    num_loose_bvars: core_nlbv, has_fvars: locals,
                 });
                 self.record_expr(core_idx, min_shift);
             }
@@ -747,10 +738,9 @@ impl<'a, R: BufRead> Parser<'a, R> {
                 let core_body_nlbv = if body_core_nlbv == 0 { 0 } else { body_core_nlbv + core_body.shift };
                 let core_nlbv = core_ty_nlbv.max(core_body_nlbv.saturating_sub(1));
                 let locals = self.has_fvars_ptr(ty_e.core) || self.has_fvars_ptr(body_e.core);
-                let hash = hash64!(crate::expr::PI_HASH, binder_name, binder_info, core_ty, core_body);
                 let (core_idx, _) = self.insert_expr(Expr::Pi {
                     binder_name, binder_style: binder_info, binder_type: core_ty, body: core_body,
-                    num_loose_bvars: core_nlbv, has_fvars: locals, hash,
+                    num_loose_bvars: core_nlbv, has_fvars: locals,
                 });
                 self.record_expr(core_idx, min_shift);
             }
@@ -783,7 +773,6 @@ impl<'a, R: BufRead> Parser<'a, R> {
                 let core_body_nlbv = if body_core_nlbv == 0 { 0 } else { body_core_nlbv + core_body.shift };
                 let core_nlbv = core_ty_nlbv.max(core_val_nlbv.max(core_body_nlbv.saturating_sub(1)));
                 let locals = self.has_fvars_ptr(ty_e.core) || self.has_fvars_ptr(val_e.core) || self.has_fvars_ptr(body_e.core);
-                let hash = hash64!(crate::expr::LET_HASH, binder_name, core_ty, core_val, core_body, nondep);
                 let (core_idx, _) = self.insert_expr(Expr::Let {
                     binder_name,
                     binder_type: core_ty,
@@ -791,7 +780,6 @@ impl<'a, R: BufRead> Parser<'a, R> {
                     body: core_body,
                     num_loose_bvars: core_nlbv,
                     has_fvars: locals,
-                    hash,
                     nondep,
                 });
                 self.record_expr(core_idx, min_shift);
@@ -806,14 +794,12 @@ impl<'a, R: BufRead> Parser<'a, R> {
                 let core_struct = if struct_eff_nlbv == 0 { struct_e } else { ExprPtr::new(struct_e.core, struct_e.shift - min_shift) };
                 let core_struct_nlbv = if struct_core_nlbv == 0 { 0 } else { struct_core_nlbv + core_struct.shift };
                 let locals = self.has_fvars_ptr(struct_e.core);
-                let hash = hash64!(crate::expr::PROJ_HASH, ty_name, idx, core_struct);
                 let (core_idx, _) = self.insert_expr(Expr::Proj {
                     ty_name,
                     idx,
                     structure: core_struct,
                     num_loose_bvars: core_struct_nlbv,
                     has_fvars: locals,
-                    hash,
                 });
                 self.record_expr(core_idx, min_shift);
             }

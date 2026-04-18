@@ -1003,8 +1003,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         if let Some(ptr) = self.expr_cache.var0_ptr {
             return ptr;
         }
-        let hash = hash64!(crate::expr::VAR_HASH, 0u16);
-        let ptr = self.alloc_expr(Expr::Var { dbj_idx: 0, hash });
+        let ptr = self.alloc_expr(Expr::Var { dbj_idx: 0 });
         self.expr_cache.var0_ptr = Some(ptr);
         ptr
     }
@@ -1020,14 +1019,12 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
 
     pub fn mk_sort(&mut self, level: LevelPtr<'t>) -> ExprPtr<'t> {
         self.trace.alloc_mk_other += 1;
-        let hash = hash64!(crate::expr::SORT_HASH, level);
-        ExprPtr::closed(self.alloc_expr(Expr::Sort { level, hash }))
+        ExprPtr::closed(self.alloc_expr(Expr::Sort { level }))
     }
 
     pub fn mk_const(&mut self, name: NamePtr<'t>, levels: LevelsPtr<'t>) -> ExprPtr<'t> {
         self.trace.alloc_mk_other += 1;
-        let hash = hash64!(crate::expr::CONST_HASH, name, levels);
-        ExprPtr::closed(self.alloc_expr(Expr::Const { name, levels, hash }))
+        ExprPtr::closed(self.alloc_expr(Expr::Const { name, levels }))
     }
 
     /// Compute the effective num_loose_bvars for an ExprPtr.
@@ -1102,8 +1099,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         let adj_arg_nlbv = self.nlbv(adj_arg);
         let core_nlbv = adj_fun_nlbv.max(adj_arg_nlbv);
         let has_fvars = self.has_fvars(fun.core) || self.has_fvars(arg.core);
-        let hash = hash64!(crate::expr::APP_HASH, adj_fun, adj_arg);
-        let app_expr = Expr::App { fun: adj_fun, arg: adj_arg, num_loose_bvars: core_nlbv, has_fvars, hash };
+        let app_expr = Expr::App { fun: adj_fun, arg: adj_arg, num_loose_bvars: core_nlbv, has_fvars };
         // OSNF check: min_shift of adjusted open children should be 0
         debug_assert!({
             let f_s = if adj_fun.is_closed() { ExprPtr::CLOSED_SHIFT } else { adj_fun.shift };
@@ -1156,8 +1152,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         let adj_body_nlbv = self.nlbv(adj_body);
         let core_nlbv = adj_ty_nlbv.max(adj_body_nlbv.saturating_sub(1));
         let has_fvars = self.has_fvars(binder_type.core) || self.has_fvars(body.core);
-        let hash = hash64!(crate::expr::LAMBDA_HASH, binder_name, binder_style, adj_ty, adj_body);
-        let lambda_expr = Expr::Lambda { binder_name, binder_style, binder_type: adj_ty, body: adj_body, num_loose_bvars: core_nlbv, has_fvars, hash };
+        let lambda_expr = Expr::Lambda { binder_name, binder_style, binder_type: adj_ty, body: adj_body, num_loose_bvars: core_nlbv, has_fvars };
         let core = self.alloc_expr(lambda_expr);
         let result = if min_shift == ExprPtr::CLOSED_SHIFT { ExprPtr::closed(core) } else { ExprPtr::new(core, min_shift) };
         self.expr_cache.mk_lambda_cache.insert(key, result);
@@ -1185,8 +1180,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         let adj_body_nlbv = self.nlbv(adj_body);
         let core_nlbv = adj_ty_nlbv.max(adj_body_nlbv.saturating_sub(1));
         let has_fvars = self.has_fvars(binder_type.core) || self.has_fvars(body.core);
-        let hash = hash64!(crate::expr::PI_HASH, binder_name, binder_style, adj_ty, adj_body);
-        let pi_expr = Expr::Pi { binder_name, binder_style, binder_type: adj_ty, body: adj_body, num_loose_bvars: core_nlbv, has_fvars, hash };
+        let pi_expr = Expr::Pi { binder_name, binder_style, binder_type: adj_ty, body: adj_body, num_loose_bvars: core_nlbv, has_fvars };
         let core = self.alloc_expr(pi_expr);
         let result = if min_shift == ExprPtr::CLOSED_SHIFT { ExprPtr::closed(core) } else { ExprPtr::new(core, min_shift) };
         self.expr_cache.mk_pi_cache.insert(key, result);
@@ -1222,8 +1216,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         let adj_body_nlbv = self.nlbv(adj_body);
         let core_nlbv = adj_ty_nlbv.max(adj_val_nlbv.max(adj_body_nlbv.saturating_sub(1)));
         let has_fvars = self.has_fvars(binder_type.core) || self.has_fvars(val.core) || self.has_fvars(body.core);
-        let hash = hash64!(crate::expr::LET_HASH, binder_name, adj_ty, adj_val, adj_body, nondep);
-        let let_expr = Expr::Let { binder_name, binder_type: adj_ty, val: adj_val, body: adj_body, num_loose_bvars: core_nlbv, has_fvars, hash, nondep };
+        let let_expr = Expr::Let { binder_name, binder_type: adj_ty, val: adj_val, body: adj_body, num_loose_bvars: core_nlbv, has_fvars, nondep };
         let core = self.alloc_expr(let_expr);
         if min_shift == ExprPtr::CLOSED_SHIFT { ExprPtr::closed(core) } else { ExprPtr::new(core, min_shift) }
     }
@@ -1234,8 +1227,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
             // Closed structure → closed proj
             let adj_s_nlbv = 0u16;
             let has_fvars = self.has_fvars(structure.core);
-            let hash = hash64!(crate::expr::PROJ_HASH, ty_name, idx, structure);
-            let proj_expr = Expr::Proj { ty_name, idx, structure, num_loose_bvars: adj_s_nlbv, has_fvars, hash };
+            let proj_expr = Expr::Proj { ty_name, idx, structure, num_loose_bvars: adj_s_nlbv, has_fvars };
             let core = self.alloc_expr(proj_expr);
             return ExprPtr::closed(core);
         }
@@ -1243,8 +1235,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         let adj_s = ExprPtr::new(structure.core, 0);
         let adj_s_nlbv = self.nlbv(adj_s);
         let has_fvars = self.has_fvars(structure.core);
-        let hash = hash64!(crate::expr::PROJ_HASH, ty_name, idx, adj_s);
-        let proj_expr = Expr::Proj { ty_name, idx, structure: adj_s, num_loose_bvars: adj_s_nlbv, has_fvars, hash };
+        let proj_expr = Expr::Proj { ty_name, idx, structure: adj_s, num_loose_bvars: adj_s_nlbv, has_fvars };
         let core = self.alloc_expr(proj_expr);
         ExprPtr::new(core, min_shift)
     }
@@ -1253,8 +1244,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         if !self.export_file.config.string_extension {
             return None
         }
-        let hash = hash64!(crate::expr::STRING_LIT_HASH, string_ptr);
-        Some(ExprPtr::closed(self.alloc_expr(Expr::StringLit { ptr: string_ptr, hash })))
+        Some(ExprPtr::closed(self.alloc_expr(Expr::StringLit { ptr: string_ptr })))
     }
 
     pub fn mk_string_lit_quick(&mut self, s: CowStr<'t>) -> Option<ExprPtr<'t>> {
@@ -1269,8 +1259,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         if !self.export_file.config.nat_extension {
             return None
         }
-        let hash = hash64!(crate::expr::NAT_LIT_HASH, num_ptr);
-        Some(ExprPtr::closed(self.alloc_expr(Expr::NatLit { ptr: num_ptr, hash })))
+        Some(ExprPtr::closed(self.alloc_expr(Expr::NatLit { ptr: num_ptr })))
     }
 
     /// Shortcut to make an `Expr::NatLit` directly from a `BigUint`, rather than
@@ -1291,8 +1280,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         let unique_id = self.unique_counter;
         self.unique_counter += 1;
         let id = FVarId::Unique(unique_id);
-        let hash = hash64!(crate::expr::LOCAL_HASH, binder_name, binder_style, binder_type, id);
-        ExprPtr::closed(self.alloc_expr(Expr::Local { binder_name, binder_style, binder_type, id, hash }))
+        ExprPtr::closed(self.alloc_expr(Expr::Local { binder_name, binder_style, binder_type, id }))
     }
 
     /// Construct a free variable representing a deBruijn level, incrementing the counter.
@@ -1306,8 +1294,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         let level = self.dbj_level_counter;
         self.dbj_level_counter += 1;
         let id = FVarId::DbjLevel(level);
-        let hash = hash64!(crate::expr::LOCAL_HASH, binder_name, binder_style, binder_type, id);
-        ExprPtr::closed(self.alloc_expr(Expr::Local { binder_name, binder_style, binder_type, id, hash }))
+        ExprPtr::closed(self.alloc_expr(Expr::Local { binder_name, binder_style, binder_type, id }))
     }
 
     /// Construct a free variable representing a deBruijn level, reusing a particular level
@@ -1320,8 +1307,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         level: u16,
     ) -> ExprPtr<'t> {
         let id = FVarId::DbjLevel(level);
-        let hash = hash64!(crate::expr::LOCAL_HASH, binder_name, binder_style, binder_type, id);
-        ExprPtr::closed(self.alloc_expr(Expr::Local { binder_name, binder_style, binder_type, id, hash }))
+        ExprPtr::closed(self.alloc_expr(Expr::Local { binder_name, binder_style, binder_type, id }))
     }
 
     /// Decrement the deBruijn level counter when closing a binder.
@@ -1650,8 +1636,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
             // Var(0) shifted by amount => Var(amount)
             Expr::Var { dbj_idx, .. } => {
                 let new_idx = dbj_idx + amount;
-                let hash = hash64!(crate::expr::VAR_HASH, new_idx);
-                Expr::Var { dbj_idx: new_idx, hash }
+                Expr::Var { dbj_idx: new_idx }
             }
             Expr::App { fun, arg, has_fvars, .. } => {
                 let new_fun = fun.shift_up(amount);
@@ -1659,8 +1644,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
                 let fun_nlbv = self.nlbv(new_fun);
                 let arg_nlbv = self.nlbv(new_arg);
                 let num_loose_bvars = fun_nlbv.max(arg_nlbv);
-                let hash = hash64!(crate::expr::APP_HASH, new_fun, new_arg);
-                Expr::App { fun: new_fun, arg: new_arg, num_loose_bvars, has_fvars, hash }
+                Expr::App { fun: new_fun, arg: new_arg, num_loose_bvars, has_fvars }
             }
             Expr::Pi { binder_name, binder_style, binder_type, body, has_fvars, .. } => {
                 let new_type = binder_type.shift_up(amount);
@@ -1670,8 +1654,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
                 let ty_nlbv = self.nlbv(new_type);
                 let body_nlbv = self.nlbv(new_body);
                 let num_loose_bvars = ty_nlbv.max(body_nlbv.saturating_sub(1));
-                let hash = hash64!(crate::expr::PI_HASH, binder_name, binder_style, new_type, new_body);
-                Expr::Pi { binder_name, binder_style, binder_type: new_type, body: new_body, num_loose_bvars, has_fvars, hash }
+                Expr::Pi { binder_name, binder_style, binder_type: new_type, body: new_body, num_loose_bvars, has_fvars }
             }
             Expr::Lambda { binder_name, binder_style, binder_type, body, has_fvars, .. } => {
                 let new_type = binder_type.shift_up(amount);
@@ -1679,8 +1662,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
                 let ty_nlbv = self.nlbv(new_type);
                 let body_nlbv = self.nlbv(new_body);
                 let num_loose_bvars = ty_nlbv.max(body_nlbv.saturating_sub(1));
-                let hash = hash64!(crate::expr::LAMBDA_HASH, binder_name, binder_style, new_type, new_body);
-                Expr::Lambda { binder_name, binder_style, binder_type: new_type, body: new_body, num_loose_bvars, has_fvars, hash }
+                Expr::Lambda { binder_name, binder_style, binder_type: new_type, body: new_body, num_loose_bvars, has_fvars }
             }
             Expr::Let { binder_name, binder_type, val, body, nondep, has_fvars, .. } => {
                 let new_type = binder_type.shift_up(amount);
@@ -1690,14 +1672,12 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
                 let val_nlbv = self.nlbv(new_val);
                 let body_nlbv = self.nlbv(new_body);
                 let num_loose_bvars = ty_nlbv.max(val_nlbv.max(body_nlbv.saturating_sub(1)));
-                let hash = hash64!(crate::expr::LET_HASH, binder_name, new_type, new_val, new_body, nondep);
-                Expr::Let { binder_name, binder_type: new_type, val: new_val, body: new_body, num_loose_bvars, has_fvars, hash, nondep }
+                Expr::Let { binder_name, binder_type: new_type, val: new_val, body: new_body, num_loose_bvars, has_fvars, nondep }
             }
             Expr::Proj { ty_name, idx, structure, has_fvars, .. } => {
                 let new_s = structure.shift_up(amount);
                 let s_nlbv = self.nlbv(new_s);
-                let hash = hash64!(crate::expr::PROJ_HASH, ty_name, idx, new_s);
-                Expr::Proj { ty_name, idx, structure: new_s, num_loose_bvars: s_nlbv, has_fvars, hash }
+                Expr::Proj { ty_name, idx, structure: new_s, num_loose_bvars: s_nlbv, has_fvars }
             }
         }
     }

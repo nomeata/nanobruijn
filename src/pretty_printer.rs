@@ -917,8 +917,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
     fn swap_local_binding_name(&mut self, e: CorePtr<'t>, new_name: NamePtr<'t>) -> CorePtr<'t> {
         match self.read_expr(e) {
             Local { binder_style, binder_type, id: id @ FVarId::Unique(_), .. } => {
-                let hash = hash64!(crate::expr::LOCAL_HASH, new_name, binder_style, binder_type, id);
-                self.alloc_expr(Local { binder_name: new_name, binder_style, binder_type, id, hash })
+                self.alloc_expr(Local { binder_name: new_name, binder_style, binder_type, id })
             }
             _ => panic!(),
         }
