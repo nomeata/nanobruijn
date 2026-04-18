@@ -1,7 +1,7 @@
 use crate::expr::Expr::*;
 use crate::level::Level;
 use crate::name::Name;
-use crate::util::{CorePtr, LevelPtr, NamePtr, SPtr, TcCtx};
+use crate::util::{CorePtr, LevelPtr, NamePtr, ExprPtr, TcCtx};
 
 pub struct DebugPrinter<'x, 't, 'p, A> {
     pub(crate) ctx: &'x TcCtx<'t, 'p>,
@@ -118,7 +118,7 @@ impl<'x, 't, 'p> std::fmt::Debug for DebugPrinter<'x, 't, 'p, LevelPtr<'t>> {
     }
 }
 
-impl<'x, 't, 'p> std::fmt::Debug for DebugPrinter<'x, 't, 'p, SPtr<'t>> {
+impl<'x, 't, 'p> std::fmt::Debug for DebugPrinter<'x, 't, 'p, ExprPtr<'t>> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let s = self.elem_to_print;
         if s.shift != 0 {

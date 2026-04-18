@@ -90,52 +90,52 @@ pub type CorePtr<'a> = Ptr<&'a Expr<'a>>;
 pub type BigUintPtr<'a> = Ptr<&'a BigUint>;
 
 /// Shifted pointer: a DAG pointer paired with a cutoff-0 shift amount.
-/// SPtr(ptr, k) represents `shift(dag[ptr], k, 0)`.
-/// - SPtr(ptr, 0) = unshifted, equivalent to bare CorePtr
-/// - For Var(0) core: SPtr(var0_ptr, k) represents Var(k)
+/// ExprPtr(ptr, k) represents `shift(dag[ptr], k, 0)`.
+/// - ExprPtr(ptr, 0) = unshifted, equivalent to bare CorePtr
+/// - For Var(0) core: ExprPtr(var0_ptr, k) represents Var(k)
 /// - Construction is pure value — zero DAG allocation
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct SPtr<'a> {
+pub struct ExprPtr<'a> {
     pub core: CorePtr<'a>,
     pub shift: u16,
 }
 
-impl<'a> std::hash::Hash for SPtr<'a> {
+impl<'a> std::hash::Hash for ExprPtr<'a> {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         self.core.hash(state);
         self.shift.hash(state);
     }
 }
 
-impl<'a> SPtr<'a> {
+impl<'a> ExprPtr<'a> {
     /// Sentinel shift for closed expressions (nlbv=0). Acts as +infinity in min calculations.
     pub const CLOSED_SHIFT: u16 = u16::MAX;
 
-    /// Create an unshifted SPtr from a CorePtr. The expression MUST be open (nlbv > 0).
-    /// For closed expressions, use `SPtr::closed(core)` instead.
-    /// For uncertain closedness, use `SPtr::from_nlbv(core, nlbv)`.
+    /// Create an unshifted ExprPtr from a CorePtr. The expression MUST be open (nlbv > 0).
+    /// For closed expressions, use `ExprPtr::closed(core)` instead.
+    /// For uncertain closedness, use `ExprPtr::from_nlbv(core, nlbv)`.
     #[inline(always)]
     pub fn unshifted(core: CorePtr<'a>) -> Self { Self { core, shift: 0 } }
 
-    /// Create a closed SPtr (shift = CLOSED_SHIFT). The expression MUST have nlbv=0.
+    /// Create a closed ExprPtr (shift = CLOSED_SHIFT). The expression MUST have nlbv=0.
     #[inline(always)]
     pub fn closed(core: CorePtr<'a>) -> Self { Self { core, shift: Self::CLOSED_SHIFT } }
 
-    /// Create an SPtr with a given shift. The expression MUST be open (nlbv > 0).
-    /// For closed expressions, use `SPtr::closed(core)` instead.
+    /// Create an ExprPtr with a given shift. The expression MUST be open (nlbv > 0).
+    /// For closed expressions, use `ExprPtr::closed(core)` instead.
     #[inline(always)]
     pub fn new(core: CorePtr<'a>, shift: u16) -> Self {
-        debug_assert!(shift != Self::CLOSED_SHIFT, "SPtr::new called with CLOSED_SHIFT; use SPtr::closed instead");
+        debug_assert!(shift != Self::CLOSED_SHIFT, "ExprPtr::new called with CLOSED_SHIFT; use ExprPtr::closed instead");
         Self { core, shift }
     }
 
-    /// Create an SPtr from a core and its nlbv. If nlbv=0, uses CLOSED_SHIFT.
+    /// Create an ExprPtr from a core and its nlbv. If nlbv=0, uses CLOSED_SHIFT.
     #[inline(always)]
     pub fn from_nlbv(core: CorePtr<'a>, nlbv: u16) -> Self {
         if nlbv == 0 { Self::closed(core) } else { Self::unshifted(core) }
     }
 
-    /// Check if this SPtr represents a closed expression.
+    /// Check if this ExprPtr represents a closed expression.
     #[inline(always)]
     pub fn is_closed(self) -> bool { self.shift == Self::CLOSED_SHIFT }
 
@@ -143,14 +143,14 @@ impl<'a> SPtr<'a> {
     #[inline(always)]
     pub fn get_hash(&self) -> u64 { self.core.get_hash() }
 
-    /// Shift this SPtr up by `amount`. No-op for closed expressions.
+    /// Shift this ExprPtr up by `amount`. No-op for closed expressions.
     #[inline(always)]
     pub fn shift_up(self, amount: u16) -> Self {
         if amount == 0 || self.is_closed() { return self; }
         Self { core: self.core, shift: self.shift + amount }
     }
 
-    /// Adjust an SPtr valid at `from_depth` to be valid at `to_depth`.
+    /// Adjust an ExprPtr valid at `from_depth` to be valid at `to_depth`.
     /// Closed expressions are depth-independent and returned unchanged.
     /// For open expressions, the shift is adjusted by the depth difference.
     #[inline(always)]
@@ -167,7 +167,7 @@ impl<'a> SPtr<'a> {
 
     /// OSNF child adjustment: reduce shift by `amount` for an open child,
     /// or normalize to CLOSED_SHIFT if closed (nlbv==0).
-    /// `nlbv` is the effective nlbv of this SPtr (from sptr_nlbv).
+    /// `nlbv` is the effective nlbv of this ExprPtr (from sptr_nlbv).
     #[inline(always)]
     pub fn osnf_adj(self, nlbv: u16, amount: u16) -> Self {
         if nlbv == 0 {
@@ -181,7 +181,7 @@ impl<'a> SPtr<'a> {
     }
 }
 
-pub type AppArgs<'a> = SmallVec<[SPtr<'a>; 8]>;
+pub type AppArgs<'a> = SmallVec<[ExprPtr<'a>; 8]>;
 
 pub(crate) fn new_fx_index_map<K, V>() -> FxIndexMap<K, V> { FxIndexMap::with_hasher(Default::default()) }
 
@@ -221,19 +221,19 @@ impl<K: Eq + std::hash::Hash, V> LazyMap<K, V> {
 /// A single depth frame: one local context entry plus per-depth caches.
 /// Collectively pushed/popped for efficient context management.
 pub(crate) struct DepthFrame<'t> {
-    pub(crate) local: (SPtr<'t>, Option<SPtr<'t>>),
-    pub(crate) whnf: LazyMap<CorePtr<'t>, SPtr<'t>>,
-    pub(crate) wnu: LazyMap<CorePtr<'t>, SPtr<'t>>,
-    pub(crate) infer_check: LazyMap<CorePtr<'t>, SPtr<'t>>,
-    pub(crate) infer_no_check: LazyMap<CorePtr<'t>, SPtr<'t>>,
-    pub(crate) defeq_pos: LazyMap<(SPtr<'t>, SPtr<'t>), (SPtr<'t>, SPtr<'t>, u16)>,
-    pub(crate) defeq_neg: LazyMap<(SPtr<'t>, SPtr<'t>), (SPtr<'t>, SPtr<'t>, u16)>,
-    /// Per-depth weighted UF: core → SPtr(rep_core, shift_delta).
-    pub(crate) uf: LazyMap<CorePtr<'t>, SPtr<'t>>,
+    pub(crate) local: (ExprPtr<'t>, Option<ExprPtr<'t>>),
+    pub(crate) whnf: LazyMap<CorePtr<'t>, ExprPtr<'t>>,
+    pub(crate) wnu: LazyMap<CorePtr<'t>, ExprPtr<'t>>,
+    pub(crate) infer_check: LazyMap<CorePtr<'t>, ExprPtr<'t>>,
+    pub(crate) infer_no_check: LazyMap<CorePtr<'t>, ExprPtr<'t>>,
+    pub(crate) defeq_pos: LazyMap<(ExprPtr<'t>, ExprPtr<'t>), (ExprPtr<'t>, ExprPtr<'t>, u16)>,
+    pub(crate) defeq_neg: LazyMap<(ExprPtr<'t>, ExprPtr<'t>), (ExprPtr<'t>, ExprPtr<'t>, u16)>,
+    /// Per-depth weighted UF: core → ExprPtr(rep_core, shift_delta).
+    pub(crate) uf: LazyMap<CorePtr<'t>, ExprPtr<'t>>,
 }
 
 impl<'t> DepthFrame<'t> {
-    fn new(ty: SPtr<'t>, val: Option<SPtr<'t>>) -> Self {
+    fn new(ty: ExprPtr<'t>, val: Option<ExprPtr<'t>>) -> Self {
         DepthFrame {
             local: (ty, val),
             whnf: LazyMap::new(), wnu: LazyMap::new(),
@@ -342,26 +342,26 @@ pub(crate) fn nat_lor(x: BigUint, y: BigUint) -> BigUint {
 
 pub struct ExprCache<'t> {
     /// Caches (e, substs_id, params) |-> output for instantiation.
-    pub(crate) inst_cache: Vec<(u64, u64, CorePtr<'t>, SPtr<'t>)>,
+    pub(crate) inst_cache: Vec<(u64, u64, CorePtr<'t>, ExprPtr<'t>)>,
     pub(crate) inst_substs_id: u64,
     /// Caches (e, ks, vs) |-> output for level substitution.
-    pub(crate) subst_cache: FxHashMap<(CorePtr<'t>, LevelsPtr<'t>, LevelsPtr<'t>), SPtr<'t>>,
-    pub(crate) dsubst_cache: FxHashMap<(CorePtr<'t>, LevelsPtr<'t>, LevelsPtr<'t>), SPtr<'t>>,
+    pub(crate) subst_cache: FxHashMap<(CorePtr<'t>, LevelsPtr<'t>, LevelsPtr<'t>), ExprPtr<'t>>,
+    pub(crate) dsubst_cache: FxHashMap<(CorePtr<'t>, LevelsPtr<'t>, LevelsPtr<'t>), ExprPtr<'t>>,
     /// Caches (e, offset) |-> output for abstraction.
-    pub(crate) abstr_cache: FxHashMap<(CorePtr<'t>, u16), SPtr<'t>>,
+    pub(crate) abstr_cache: FxHashMap<(CorePtr<'t>, u16), ExprPtr<'t>>,
     /// Caches (e, amount, cutoff) |-> output for shifting.
-    pub(crate) shift_cache: FxHashMap<(CorePtr<'t>, u16, u16), SPtr<'t>>,
+    pub(crate) shift_cache: FxHashMap<(CorePtr<'t>, u16, u16), ExprPtr<'t>>,
     /// Caches (e, amount, cutoff) |-> output for downward shifting.
     pub(crate) shift_down_cache: FxHashMap<(CorePtr<'t>, u16, u16), CorePtr<'t>>,
     /// Cache for abstr_aux_levels (nanoda TC).
-    pub(crate) abstr_cache_levels: FxHashMap<(CorePtr<'t>, u16, u16), SPtr<'t>>,
+    pub(crate) abstr_cache_levels: FxHashMap<(CorePtr<'t>, u16, u16), ExprPtr<'t>>,
     /// Direct-mapped mk_app cache.
-    pub(crate) mk_app_dm_cache: Vec<(u64, SPtr<'t>, SPtr<'t>, SPtr<'t>)>,
+    pub(crate) mk_app_dm_cache: Vec<(u64, ExprPtr<'t>, ExprPtr<'t>, ExprPtr<'t>)>,
     pub(crate) mk_app_miss_count: u32,
-    /// Memoization cache for mk_pi: (name, style, type, body) → SPtr.
-    pub(crate) mk_pi_cache: FxHashMap<(NamePtr<'t>, BinderStyle, SPtr<'t>, SPtr<'t>), SPtr<'t>>,
-    /// Memoization cache for mk_lambda: (name, style, type, body) → SPtr.
-    pub(crate) mk_lambda_cache: FxHashMap<(NamePtr<'t>, BinderStyle, SPtr<'t>, SPtr<'t>), SPtr<'t>>,
+    /// Memoization cache for mk_pi: (name, style, type, body) → ExprPtr.
+    pub(crate) mk_pi_cache: FxHashMap<(NamePtr<'t>, BinderStyle, ExprPtr<'t>, ExprPtr<'t>), ExprPtr<'t>>,
+    /// Memoization cache for mk_lambda: (name, style, type, body) → ExprPtr.
+    pub(crate) mk_lambda_cache: FxHashMap<(NamePtr<'t>, BinderStyle, ExprPtr<'t>, ExprPtr<'t>), ExprPtr<'t>>,
     /// Cached Var(0) CorePtr. Only one Var exists in the DAG.
     pub(crate) var0_ptr: Option<CorePtr<'t>>,
 }
@@ -413,7 +413,7 @@ pub struct ExportFile<'p> {
     pub config: Config,
     // Information used for setting EnvLimit during inductive checking.
     pub mutual_block_sizes: FxHashMap<NamePtr<'p>, (usize, usize)>,
-    // osnf_core removed: SPtr refactor eliminates Shift DAG nodes entirely
+    // osnf_core removed: ExprPtr refactor eliminates Shift DAG nodes entirely
 }
 
 impl<'p> ExportFile<'p> {
@@ -764,8 +764,8 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         (self.read_expr(a), self.read_expr(x))
     }
 
-    /// View two SPtrs as materialized Exprs.
-    pub fn view_sptr_pair(&mut self, a: SPtr<'t>, x: SPtr<'t>) -> (Expr<'t>, Expr<'t>) {
+    /// View two ExprPtrs as materialized Exprs.
+    pub fn view_sptr_pair(&mut self, a: ExprPtr<'t>, x: ExprPtr<'t>) -> (Expr<'t>, Expr<'t>) {
         let va = self.view_sptr(a);
         let vx = self.view_sptr(x);
         (va, vx)
@@ -930,8 +930,8 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         }
     }
 
-    /// Compact SPtr descriptor for diagnostics.
-    pub fn sptr_desc(&self, s: SPtr<'t>, max_depth: u32) -> String {
+    /// Compact ExprPtr descriptor for diagnostics.
+    pub fn sptr_desc(&self, s: ExprPtr<'t>, max_depth: u32) -> String {
         if s.is_closed() {
             format!("{}*", self.expr_desc(s.core, max_depth))
         } else if s.shift == 0 {
@@ -1006,30 +1006,30 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
     }
 
     /// Construct a variable reference. Only Var(0) exists in the DAG;
-    /// mk_var(k) returns SPtr(var0_ptr, k).
-    pub fn mk_var(&mut self, dbj_idx: u16) -> SPtr<'t> {
+    /// mk_var(k) returns ExprPtr(var0_ptr, k).
+    pub fn mk_var(&mut self, dbj_idx: u16) -> ExprPtr<'t> {
         self.trace.alloc_mk_var += 1;
         debug_assert!(dbj_idx < 10000, "mk_var: suspiciously large index {}", dbj_idx);
         let ptr = self.var0_ptr();
-        SPtr::new(ptr, dbj_idx)
+        ExprPtr::new(ptr, dbj_idx)
     }
 
-    pub fn mk_sort(&mut self, level: LevelPtr<'t>) -> SPtr<'t> {
+    pub fn mk_sort(&mut self, level: LevelPtr<'t>) -> ExprPtr<'t> {
         self.trace.alloc_mk_other += 1;
         let hash = hash64!(crate::expr::SORT_HASH, level);
-        SPtr::closed(self.alloc_expr(Expr::Sort { level, hash }))
+        ExprPtr::closed(self.alloc_expr(Expr::Sort { level, hash }))
     }
 
-    pub fn mk_const(&mut self, name: NamePtr<'t>, levels: LevelsPtr<'t>) -> SPtr<'t> {
+    pub fn mk_const(&mut self, name: NamePtr<'t>, levels: LevelsPtr<'t>) -> ExprPtr<'t> {
         self.trace.alloc_mk_other += 1;
         let hash = hash64!(crate::expr::CONST_HASH, name, levels);
-        SPtr::closed(self.alloc_expr(Expr::Const { name, levels, hash }))
+        ExprPtr::closed(self.alloc_expr(Expr::Const { name, levels, hash }))
     }
 
-    /// Compute the effective num_loose_bvars for an SPtr.
+    /// Compute the effective num_loose_bvars for an ExprPtr.
     /// Closed expressions (CLOSED_SHIFT) return 0 without DAG lookup.
     #[inline(always)]
-    pub fn sptr_nlbv(&self, s: SPtr<'t>) -> u16 {
+    pub fn sptr_nlbv(&self, s: ExprPtr<'t>) -> u16 {
         if s.is_closed() { return 0; }
         let core_nlbv = self.num_loose_bvars(s.core);
         if core_nlbv == 0 { 0 } else { core_nlbv + s.shift }
@@ -1049,7 +1049,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         // Body's outer contribution: body.shift.saturating_sub(1)
         // (body.shift == 0 means body has free vars at outer index 0, so contribution = 0)
         // CLOSED_SHIFT.saturating_sub(1) = CLOSED_SHIFT - 1, which is still huge, acting as +inf
-        if ty_nlbv == 0 && body_nlbv <= 1 { SPtr::CLOSED_SHIFT }
+        if ty_nlbv == 0 && body_nlbv <= 1 { ExprPtr::CLOSED_SHIFT }
         else if ty_nlbv == 0 {
             body_shift.saturating_sub(1)
         }
@@ -1059,7 +1059,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         }
     }
 
-    pub fn mk_app(&mut self, fun: SPtr<'t>, arg: SPtr<'t>) -> SPtr<'t> {
+    pub fn mk_app(&mut self, fun: ExprPtr<'t>, arg: ExprPtr<'t>) -> ExprPtr<'t> {
         // 2-way set-associative cache keyed by (fun, arg) — stores result directly.
         let tag = hash64!(fun, arg);
         let dm_len = self.expr_cache.mk_app_dm_cache.len();
@@ -1086,7 +1086,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         let fun_nlbv = self.sptr_nlbv(fun);
         let arg_nlbv = self.sptr_nlbv(arg);
         // Extract min_shift from open children. CLOSED_SHIFT acts as +infinity.
-        let min_shift = if fun_nlbv == 0 && arg_nlbv == 0 { SPtr::CLOSED_SHIFT }
+        let min_shift = if fun_nlbv == 0 && arg_nlbv == 0 { ExprPtr::CLOSED_SHIFT }
             else if fun_nlbv == 0 { arg.shift }
             else if arg_nlbv == 0 { fun.shift }
             else { fun.shift.min(arg.shift) };
@@ -1102,17 +1102,17 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         let app_expr = Expr::App { fun: adj_fun, arg: adj_arg, num_loose_bvars: core_nlbv, has_fvars, hash };
         // OSNF check: min_shift of adjusted open children should be 0
         debug_assert!({
-            let f_s = if adj_fun.is_closed() { SPtr::CLOSED_SHIFT } else { adj_fun.shift };
-            let a_s = if adj_arg.is_closed() { SPtr::CLOSED_SHIFT } else { adj_arg.shift };
-            f_s.min(a_s) == 0 || (f_s == SPtr::CLOSED_SHIFT && a_s == SPtr::CLOSED_SHIFT)
+            let f_s = if adj_fun.is_closed() { ExprPtr::CLOSED_SHIFT } else { adj_fun.shift };
+            let a_s = if adj_arg.is_closed() { ExprPtr::CLOSED_SHIFT } else { adj_arg.shift };
+            f_s.min(a_s) == 0 || (f_s == ExprPtr::CLOSED_SHIFT && a_s == ExprPtr::CLOSED_SHIFT)
         }, "mk_app OSNF violation: adj_fun.shift={} adj_arg.shift={}", adj_fun.shift, adj_arg.shift);
         let core = self.alloc_expr(app_expr);
-        let result = if min_shift == SPtr::CLOSED_SHIFT { SPtr::closed(core) } else { SPtr::new(core, min_shift) };
+        let result = if min_shift == ExprPtr::CLOSED_SHIFT { ExprPtr::closed(core) } else { ExprPtr::new(core, min_shift) };
         // Update DM cache
         if dm_len == 0 {
             self.expr_cache.mk_app_miss_count += 1;
             if self.expr_cache.mk_app_miss_count >= MK_APP_DM_THRESHOLD {
-                let dummy = SPtr::closed(Ptr::from(DagMarker::ExportFile, 0));
+                let dummy = ExprPtr::closed(Ptr::from(DagMarker::ExportFile, 0));
                 self.expr_cache.mk_app_dm_cache.resize(MK_APP_CACHE_SIZE, (0, dummy, dummy, dummy));
                 let set = (tag as usize) & ((MK_APP_CACHE_SIZE >> 1) - 1);
                 self.expr_cache.mk_app_dm_cache[set << 1] = (tag, fun, arg, result);
@@ -1130,9 +1130,9 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         &mut self,
         binder_name: NamePtr<'t>,
         binder_style: BinderStyle,
-        binder_type: SPtr<'t>,
-        body: SPtr<'t>,
-    ) -> SPtr<'t> {
+        binder_type: ExprPtr<'t>,
+        body: ExprPtr<'t>,
+    ) -> ExprPtr<'t> {
         let key = (binder_name, binder_style, binder_type, body);
         if let Some(&cached) = self.expr_cache.mk_lambda_cache.get(&key) {
             return cached;
@@ -1155,7 +1155,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         let hash = hash64!(crate::expr::LAMBDA_HASH, binder_name, binder_style, adj_ty, adj_body);
         let lambda_expr = Expr::Lambda { binder_name, binder_style, binder_type: adj_ty, body: adj_body, num_loose_bvars: core_nlbv, has_fvars, hash };
         let core = self.alloc_expr(lambda_expr);
-        let result = if min_shift == SPtr::CLOSED_SHIFT { SPtr::closed(core) } else { SPtr::new(core, min_shift) };
+        let result = if min_shift == ExprPtr::CLOSED_SHIFT { ExprPtr::closed(core) } else { ExprPtr::new(core, min_shift) };
         self.expr_cache.mk_lambda_cache.insert(key, result);
         result
     }
@@ -1164,9 +1164,9 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         &mut self,
         binder_name: NamePtr<'t>,
         binder_style: BinderStyle,
-        binder_type: SPtr<'t>,
-        body: SPtr<'t>,
-    ) -> SPtr<'t> {
+        binder_type: ExprPtr<'t>,
+        body: ExprPtr<'t>,
+    ) -> ExprPtr<'t> {
         let key = (binder_name, binder_style, binder_type, body);
         if let Some(&cached) = self.expr_cache.mk_pi_cache.get(&key) {
             return cached;
@@ -1184,7 +1184,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         let hash = hash64!(crate::expr::PI_HASH, binder_name, binder_style, adj_ty, adj_body);
         let pi_expr = Expr::Pi { binder_name, binder_style, binder_type: adj_ty, body: adj_body, num_loose_bvars: core_nlbv, has_fvars, hash };
         let core = self.alloc_expr(pi_expr);
-        let result = if min_shift == SPtr::CLOSED_SHIFT { SPtr::closed(core) } else { SPtr::new(core, min_shift) };
+        let result = if min_shift == ExprPtr::CLOSED_SHIFT { ExprPtr::closed(core) } else { ExprPtr::new(core, min_shift) };
         self.expr_cache.mk_pi_cache.insert(key, result);
         result
     }
@@ -1192,11 +1192,11 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
     pub fn mk_let(
         &mut self,
         binder_name: NamePtr<'t>,
-        binder_type: SPtr<'t>,
-        val: SPtr<'t>,
-        body: SPtr<'t>,
+        binder_type: ExprPtr<'t>,
+        val: ExprPtr<'t>,
+        body: ExprPtr<'t>,
         nondep: bool
-    ) -> SPtr<'t> {
+    ) -> ExprPtr<'t> {
         self.trace.alloc_mk_let += 1;
         let ty_nlbv = self.sptr_nlbv(binder_type);
         let val_nlbv = self.sptr_nlbv(val);
@@ -1204,7 +1204,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         // Compute min_shift across all open children.
         // Body contributes body.shift - 1 (under a binder) when body_nlbv > 1.
         // CLOSED_SHIFT acts as +infinity (start with it, min only with open children).
-        let mut min_shift = SPtr::CLOSED_SHIFT;
+        let mut min_shift = ExprPtr::CLOSED_SHIFT;
         if ty_nlbv > 0 { min_shift = min_shift.min(binder_type.shift); }
         if val_nlbv > 0 { min_shift = min_shift.min(val.shift); }
         if body_nlbv > 1 {
@@ -1221,10 +1221,10 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         let hash = hash64!(crate::expr::LET_HASH, binder_name, adj_ty, adj_val, adj_body, nondep);
         let let_expr = Expr::Let { binder_name, binder_type: adj_ty, val: adj_val, body: adj_body, num_loose_bvars: core_nlbv, has_fvars, hash, nondep };
         let core = self.alloc_expr(let_expr);
-        if min_shift == SPtr::CLOSED_SHIFT { SPtr::closed(core) } else { SPtr::new(core, min_shift) }
+        if min_shift == ExprPtr::CLOSED_SHIFT { ExprPtr::closed(core) } else { ExprPtr::new(core, min_shift) }
     }
 
-    pub fn mk_proj(&mut self, ty_name: NamePtr<'t>, idx: u32, structure: SPtr<'t>) -> SPtr<'t> {
+    pub fn mk_proj(&mut self, ty_name: NamePtr<'t>, idx: u32, structure: ExprPtr<'t>) -> ExprPtr<'t> {
         self.trace.alloc_mk_proj += 1;
         if structure.is_closed() {
             // Closed structure → closed proj
@@ -1233,27 +1233,27 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
             let hash = hash64!(crate::expr::PROJ_HASH, ty_name, idx, structure);
             let proj_expr = Expr::Proj { ty_name, idx, structure, num_loose_bvars: adj_s_nlbv, has_fvars, hash };
             let core = self.alloc_expr(proj_expr);
-            return SPtr::closed(core);
+            return ExprPtr::closed(core);
         }
         let min_shift = structure.shift;
-        let adj_s = SPtr::new(structure.core, 0);
+        let adj_s = ExprPtr::new(structure.core, 0);
         let adj_s_nlbv = self.sptr_nlbv(adj_s);
         let has_fvars = self.has_fvars(structure.core);
         let hash = hash64!(crate::expr::PROJ_HASH, ty_name, idx, adj_s);
         let proj_expr = Expr::Proj { ty_name, idx, structure: adj_s, num_loose_bvars: adj_s_nlbv, has_fvars, hash };
         let core = self.alloc_expr(proj_expr);
-        SPtr::new(core, min_shift)
+        ExprPtr::new(core, min_shift)
     }
 
-    pub fn mk_string_lit(&mut self, string_ptr: StringPtr<'t>) -> Option<SPtr<'t>> {
+    pub fn mk_string_lit(&mut self, string_ptr: StringPtr<'t>) -> Option<ExprPtr<'t>> {
         if !self.export_file.config.string_extension {
             return None
         }
         let hash = hash64!(crate::expr::STRING_LIT_HASH, string_ptr);
-        Some(SPtr::closed(self.alloc_expr(Expr::StringLit { ptr: string_ptr, hash })))
+        Some(ExprPtr::closed(self.alloc_expr(Expr::StringLit { ptr: string_ptr, hash })))
     }
 
-    pub fn mk_string_lit_quick(&mut self, s: CowStr<'t>) -> Option<SPtr<'t>> {
+    pub fn mk_string_lit_quick(&mut self, s: CowStr<'t>) -> Option<ExprPtr<'t>> {
         if !self.export_file.config.string_extension {
             return None
         }
@@ -1261,17 +1261,17 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         self.mk_string_lit(string_ptr)
     }
 
-    pub fn mk_nat_lit(&mut self, num_ptr: BigUintPtr<'t>) -> Option<SPtr<'t>> {
+    pub fn mk_nat_lit(&mut self, num_ptr: BigUintPtr<'t>) -> Option<ExprPtr<'t>> {
         if !self.export_file.config.nat_extension {
             return None
         }
         let hash = hash64!(crate::expr::NAT_LIT_HASH, num_ptr);
-        Some(SPtr::closed(self.alloc_expr(Expr::NatLit { ptr: num_ptr, hash })))
+        Some(ExprPtr::closed(self.alloc_expr(Expr::NatLit { ptr: num_ptr, hash })))
     }
 
     /// Shortcut to make an `Expr::NatLit` directly from a `BigUint`, rather than
     /// going `alloc_bignum` and `mk_nat_lit`
-    pub fn mk_nat_lit_quick(&mut self, n: BigUint) -> Option<SPtr<'t>> {
+    pub fn mk_nat_lit_quick(&mut self, n: BigUint) -> Option<ExprPtr<'t>> {
         let num_ptr = self.alloc_bignum(n)?;
         self.mk_nat_lit(num_ptr)
     }
@@ -1283,12 +1283,12 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         binder_name: NamePtr<'t>,
         binder_style: BinderStyle,
         binder_type: CorePtr<'t>,
-    ) -> SPtr<'t> {
+    ) -> ExprPtr<'t> {
         let unique_id = self.unique_counter;
         self.unique_counter += 1;
         let id = FVarId::Unique(unique_id);
         let hash = hash64!(crate::expr::LOCAL_HASH, binder_name, binder_style, binder_type, id);
-        SPtr::closed(self.alloc_expr(Expr::Local { binder_name, binder_style, binder_type, id, hash }))
+        ExprPtr::closed(self.alloc_expr(Expr::Local { binder_name, binder_style, binder_type, id, hash }))
     }
 
     /// Construct a free variable representing a deBruijn level, incrementing the counter.
@@ -1298,12 +1298,12 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         binder_name: NamePtr<'t>,
         binder_style: BinderStyle,
         binder_type: CorePtr<'t>,
-    ) -> SPtr<'t> {
+    ) -> ExprPtr<'t> {
         let level = self.dbj_level_counter;
         self.dbj_level_counter += 1;
         let id = FVarId::DbjLevel(level);
         let hash = hash64!(crate::expr::LOCAL_HASH, binder_name, binder_style, binder_type, id);
-        SPtr::closed(self.alloc_expr(Expr::Local { binder_name, binder_style, binder_type, id, hash }))
+        ExprPtr::closed(self.alloc_expr(Expr::Local { binder_name, binder_style, binder_type, id, hash }))
     }
 
     /// Construct a free variable representing a deBruijn level, reusing a particular level
@@ -1314,15 +1314,15 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         binder_style: BinderStyle,
         binder_type: CorePtr<'t>,
         level: u16,
-    ) -> SPtr<'t> {
+    ) -> ExprPtr<'t> {
         let id = FVarId::DbjLevel(level);
         let hash = hash64!(crate::expr::LOCAL_HASH, binder_name, binder_style, binder_type, id);
-        SPtr::closed(self.alloc_expr(Expr::Local { binder_name, binder_style, binder_type, id, hash }))
+        ExprPtr::closed(self.alloc_expr(Expr::Local { binder_name, binder_style, binder_type, id, hash }))
     }
 
     /// Decrement the deBruijn level counter when closing a binder.
-    pub(crate) fn replace_dbj_level(&mut self, e: SPtr<'t>) {
-        debug_assert!(e.is_closed(), "replace_dbj_level: expected closed SPtr (Local)");
+    pub(crate) fn replace_dbj_level(&mut self, e: ExprPtr<'t>) {
+        debug_assert!(e.is_closed(), "replace_dbj_level: expected closed ExprPtr (Local)");
         match self.read_expr(e.core) {
             Expr::Local { id: FVarId::DbjLevel(level), .. } => {
                 debug_assert_eq!(level + 1, self.dbj_level_counter);
@@ -1333,20 +1333,20 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
     }
 
     /// Convert a deBruijn level to a deBruijn index (bound variable).
-    pub(crate) fn fvar_to_bvar(&mut self, num_open_binders: u16, dbj_level: u16) -> SPtr<'t> {
+    pub(crate) fn fvar_to_bvar(&mut self, num_open_binders: u16, dbj_level: u16) -> ExprPtr<'t> {
         self.mk_var((num_open_binders - dbj_level) - 1)
     }
 
-    /// Create a shifted pointer: SPtr(inner, amount).
+    /// Create a shifted pointer: ExprPtr(inner, amount).
     /// Pure value construction — no DAG allocation. Collapses Var(0) shifts.
     #[inline(always)]
-    pub fn mk_shift(&self, inner: CorePtr<'t>, amount: u16) -> SPtr<'t> {
-        if self.num_loose_bvars(inner) == 0 { return SPtr::closed(inner); }
-        SPtr::new(inner, amount)
+    pub fn mk_shift(&self, inner: CorePtr<'t>, amount: u16) -> ExprPtr<'t> {
+        if self.num_loose_bvars(inner) == 0 { return ExprPtr::closed(inner); }
+        ExprPtr::new(inner, amount)
     }
 
-    /// Recursively find the first point where two SPtrs diverge at the DAG level.
-    pub fn find_sptr_divergence(&self, x: SPtr<'t>, y: SPtr<'t>, depth: usize) {
+    /// Recursively find the first point where two ExprPtrs diverge at the DAG level.
+    pub fn find_sptr_divergence(&self, x: ExprPtr<'t>, y: ExprPtr<'t>, depth: usize) {
         if x == y { return; }
         if depth > 30 { eprintln!("{}...(depth limit)", "  ".repeat(depth)); return; }
         let prefix = "  ".repeat(depth);
@@ -1374,16 +1374,16 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         }
     }
 
-    /// Shift an SPtr up by `amount`. No-op for closed expressions.
-    pub fn sptr_shift(&self, e: SPtr<'t>, amount: u16) -> SPtr<'t> {
+    /// Shift an ExprPtr up by `amount`. No-op for closed expressions.
+    pub fn sptr_shift(&self, e: ExprPtr<'t>, amount: u16) -> ExprPtr<'t> {
         if amount == 0 || e.is_closed() { return e; }
         e.shift_up(amount)
     }
 
-    /// Materialize an SPtr to shift=0 by rebuilding the expression,
+    /// Materialize an ExprPtr to shift=0 by rebuilding the expression,
     /// baking the shift into the OSNF children. This produces a canonical
-    /// representation where the SPtr shift is 0.
-    pub fn materialize_sptr(&mut self, e: SPtr<'t>) -> SPtr<'t> {
+    /// representation where the ExprPtr shift is 0.
+    pub fn materialize_sptr(&mut self, e: ExprPtr<'t>) -> ExprPtr<'t> {
         if e.shift == 0 || e.is_closed() { return e; }
         // View the expression (which pushes shift into children) and rebuild
         match self.view_sptr(e) {
@@ -1397,7 +1397,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
                 self.mk_let(binder_name, binder_type, val, body, nondep),
             Expr::Proj { ty_name, idx, structure, .. } =>
                 self.mk_proj(ty_name, idx, structure),
-            _ => SPtr::closed(e.core), // closed
+            _ => ExprPtr::closed(e.core), // closed
         }
     }
 
@@ -1462,20 +1462,20 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         }
     }
 
-    /// Shift down an SPtr child: compose shift_down(amount, cutoff) with the child's SPtr shift.
-    fn push_shift_down_sptr(&mut self, child: SPtr<'t>, amount: u16, cutoff: u16) -> SPtr<'t> {
+    /// Shift down an ExprPtr child: compose shift_down(amount, cutoff) with the child's ExprPtr shift.
+    fn push_shift_down_sptr(&mut self, child: ExprPtr<'t>, amount: u16, cutoff: u16) -> ExprPtr<'t> {
         if child.is_closed() { return child; }
         let child_nlbv = self.sptr_nlbv(child);
         if child_nlbv <= cutoff { return child; }
         // If child.shift >= cutoff and child.shift >= amount: uniform shift_down
         if child.shift >= cutoff && child.shift >= amount {
-            return SPtr::new(child.core, child.shift - amount);
+            return ExprPtr::new(child.core, child.shift - amount);
         }
         if child.shift == 0 {
             let result = self.push_shift_down_cutoff(child.core, amount, cutoff);
-            return SPtr::from_nlbv(result, self.num_loose_bvars(result));
+            return ExprPtr::from_nlbv(result, self.num_loose_bvars(result));
         }
-        // General case: view the SPtr and shift_down the viewed children
+        // General case: view the ExprPtr and shift_down the viewed children
         let viewed = self.view_sptr(child);
         match viewed {
             Expr::Var { dbj_idx, .. } => {
@@ -1510,16 +1510,16 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
                 let new_structure = self.push_shift_down_sptr(structure, amount, cutoff);
                 self.mk_proj(ty_name, idx, new_structure)
             }
-            _ => SPtr::closed(child.core), // closed
+            _ => ExprPtr::closed(child.core), // closed
         }
     }
 
 
-    /// View an SPtr as a materialized Expr.
+    /// View an ExprPtr as a materialized Expr.
     /// If shift==0, returns read_expr(ptr) directly.
     /// If shift>0, adjusts children by composing shifts.
-    /// Children of the returned Expr are SPtr values with adjusted shifts.
-    pub fn view_sptr(&mut self, s: SPtr<'t>) -> Expr<'t> {
+    /// Children of the returned Expr are ExprPtr values with adjusted shifts.
+    pub fn view_sptr(&mut self, s: ExprPtr<'t>) -> Expr<'t> {
         if s.shift == 0 || s.is_closed() {
             return self.read_expr(s.core);
         }
@@ -1795,14 +1795,14 @@ pub struct NameCache<'p> {
 
 pub(crate) struct TcCache<'t> {
     /// Base caches (bucket 0): closed expressions, depth-independent.
-    pub(crate) whnf_base: LazyMap<CorePtr<'t>, SPtr<'t>>,
-    pub(crate) wnu_base: LazyMap<CorePtr<'t>, SPtr<'t>>,
-    pub(crate) infer_check_base: LazyMap<CorePtr<'t>, SPtr<'t>>,
-    pub(crate) infer_no_check_base: LazyMap<CorePtr<'t>, SPtr<'t>>,
-    pub(crate) defeq_pos_base: LazyMap<(SPtr<'t>, SPtr<'t>), (SPtr<'t>, SPtr<'t>, u16)>,
-    pub(crate) defeq_neg_base: LazyMap<(SPtr<'t>, SPtr<'t>), (SPtr<'t>, SPtr<'t>, u16)>,
+    pub(crate) whnf_base: LazyMap<CorePtr<'t>, ExprPtr<'t>>,
+    pub(crate) wnu_base: LazyMap<CorePtr<'t>, ExprPtr<'t>>,
+    pub(crate) infer_check_base: LazyMap<CorePtr<'t>, ExprPtr<'t>>,
+    pub(crate) infer_no_check_base: LazyMap<CorePtr<'t>, ExprPtr<'t>>,
+    pub(crate) defeq_pos_base: LazyMap<(ExprPtr<'t>, ExprPtr<'t>), (ExprPtr<'t>, ExprPtr<'t>, u16)>,
+    pub(crate) defeq_neg_base: LazyMap<(ExprPtr<'t>, ExprPtr<'t>), (ExprPtr<'t>, ExprPtr<'t>, u16)>,
     /// Depth-stacked weighted UF base (bucket 0): closed expressions.
-    pub(crate) uf_base: LazyMap<CorePtr<'t>, SPtr<'t>>,
+    pub(crate) uf_base: LazyMap<CorePtr<'t>, ExprPtr<'t>>,
     /// Strong reduction cache (global, library feature).
     pub(crate) strong_cache: UniqueHashMap<(CorePtr<'t>, bool, bool), CorePtr<'t>>,
     /// Per-depth frames: local bindings + open-expression caches.
@@ -1838,7 +1838,7 @@ impl<'t> TcCache<'t> {
     /// Push a new binder. If a hidden frame exists with a matching type,
     /// reuse it (preserving its caches). Otherwise, create a fresh frame.
     /// Returns true if frame was reused.
-    pub(crate) fn push_local(&mut self, ty: SPtr<'t>) -> bool {
+    pub(crate) fn push_local(&mut self, ty: ExprPtr<'t>) -> bool {
         if self.frames.len() > self.depth
             && self.frames[self.depth].local.0 == ty
             && self.frames[self.depth].local.1.is_none()
@@ -1854,7 +1854,7 @@ impl<'t> TcCache<'t> {
     }
 
     /// Returns true if frame was reused.
-    pub(crate) fn push_local_let(&mut self, ty: SPtr<'t>, val: SPtr<'t>) -> bool {
+    pub(crate) fn push_local_let(&mut self, ty: ExprPtr<'t>, val: ExprPtr<'t>) -> bool {
         if self.frames.len() > self.depth
             && self.frames[self.depth].local.0 == ty
             && self.frames[self.depth].local.1 == Some(val)
@@ -1895,35 +1895,35 @@ impl<'t> TcCache<'t> {
         self.depth = self.frames.len();
     }
 
-    pub(crate) fn local_type(&self, dbj_idx: u16) -> SPtr<'t> {
+    pub(crate) fn local_type(&self, dbj_idx: u16) -> ExprPtr<'t> {
         let depth = self.depth;
         assert!(dbj_idx < depth as u16, "local_type: dbj_idx={} >= depth={}", dbj_idx, depth);
         self.frames[depth - 1 - dbj_idx as usize].local.0
     }
 
-    pub(crate) fn local_value(&self, dbj_idx: u16) -> Option<SPtr<'t>> {
+    pub(crate) fn local_value(&self, dbj_idx: u16) -> Option<ExprPtr<'t>> {
         let depth = self.depth;
         if dbj_idx >= depth as u16 { return None; }
         self.frames[depth - 1 - dbj_idx as usize].local.1
     }
 
     // Depth-indexed cache accessors using depth_get!/depth_insert! macros.
-    pub(crate) fn whnf_get(&self, b: usize, k: &CorePtr<'t>) -> Option<SPtr<'t>> { depth_get!(self, b, k, whnf_base, whnf) }
-    pub(crate) fn whnf_insert(&mut self, b: usize, k: CorePtr<'t>, v: SPtr<'t>) { depth_insert!(self, b, k, v, whnf_base, whnf) }
-    pub(crate) fn wnu_get(&self, b: usize, k: &CorePtr<'t>) -> Option<SPtr<'t>> { depth_get!(self, b, k, wnu_base, wnu) }
-    pub(crate) fn wnu_insert(&mut self, b: usize, k: CorePtr<'t>, v: SPtr<'t>) { depth_insert!(self, b, k, v, wnu_base, wnu) }
-    pub(crate) fn infer_check_get(&self, b: usize, k: &CorePtr<'t>) -> Option<SPtr<'t>> { depth_get!(self, b, k, infer_check_base, infer_check) }
-    pub(crate) fn infer_check_insert(&mut self, b: usize, k: CorePtr<'t>, v: SPtr<'t>) { depth_insert!(self, b, k, v, infer_check_base, infer_check) }
-    pub(crate) fn infer_no_check_get(&self, b: usize, k: &CorePtr<'t>) -> Option<SPtr<'t>> { depth_get!(self, b, k, infer_no_check_base, infer_no_check) }
-    pub(crate) fn infer_no_check_insert(&mut self, b: usize, k: CorePtr<'t>, v: SPtr<'t>) { depth_insert!(self, b, k, v, infer_no_check_base, infer_no_check) }
+    pub(crate) fn whnf_get(&self, b: usize, k: &CorePtr<'t>) -> Option<ExprPtr<'t>> { depth_get!(self, b, k, whnf_base, whnf) }
+    pub(crate) fn whnf_insert(&mut self, b: usize, k: CorePtr<'t>, v: ExprPtr<'t>) { depth_insert!(self, b, k, v, whnf_base, whnf) }
+    pub(crate) fn wnu_get(&self, b: usize, k: &CorePtr<'t>) -> Option<ExprPtr<'t>> { depth_get!(self, b, k, wnu_base, wnu) }
+    pub(crate) fn wnu_insert(&mut self, b: usize, k: CorePtr<'t>, v: ExprPtr<'t>) { depth_insert!(self, b, k, v, wnu_base, wnu) }
+    pub(crate) fn infer_check_get(&self, b: usize, k: &CorePtr<'t>) -> Option<ExprPtr<'t>> { depth_get!(self, b, k, infer_check_base, infer_check) }
+    pub(crate) fn infer_check_insert(&mut self, b: usize, k: CorePtr<'t>, v: ExprPtr<'t>) { depth_insert!(self, b, k, v, infer_check_base, infer_check) }
+    pub(crate) fn infer_no_check_get(&self, b: usize, k: &CorePtr<'t>) -> Option<ExprPtr<'t>> { depth_get!(self, b, k, infer_no_check_base, infer_no_check) }
+    pub(crate) fn infer_no_check_insert(&mut self, b: usize, k: CorePtr<'t>, v: ExprPtr<'t>) { depth_insert!(self, b, k, v, infer_no_check_base, infer_no_check) }
 
-    /// Raw UF lookup at a specific bucket. Returns stored SPtr if present.
-    pub(crate) fn uf_get(&self, bucket: usize, core: &CorePtr<'t>) -> Option<SPtr<'t>> {
+    /// Raw UF lookup at a specific bucket. Returns stored ExprPtr if present.
+    pub(crate) fn uf_get(&self, bucket: usize, core: &CorePtr<'t>) -> Option<ExprPtr<'t>> {
         depth_get!(self, bucket, core, uf_base, uf)
     }
 
     /// Raw UF insert at a specific bucket.
-    pub(crate) fn uf_insert(&mut self, bucket: usize, core: CorePtr<'t>, rep: SPtr<'t>) {
+    pub(crate) fn uf_insert(&mut self, bucket: usize, core: CorePtr<'t>, rep: ExprPtr<'t>) {
         depth_insert!(self, bucket, core, rep, uf_base, uf);
     }
 }

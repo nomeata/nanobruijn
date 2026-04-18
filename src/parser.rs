@@ -7,7 +7,7 @@ use crate::level::Level;
 use crate::name::Name;
 use crate::util::{
     new_fx_hash_map, new_fx_index_map, BigUintPtr, Config, DagMarker, CorePtr, FxHashMap, FxIndexMap,
-    LeanDag, LevelPtr, LevelsPtr, NamePtr, SPtr, StringPtr,
+    LeanDag, LevelPtr, LevelsPtr, NamePtr, ExprPtr, StringPtr,
 };
 use num_bigint::BigUint;
 use serde::{ Deserialize, Deserializer };
@@ -50,8 +50,8 @@ pub struct Parser<'a, R: BufRead> {
     mutual_block_sizes: FxHashMap<NamePtr<'a>, (usize, usize)>,
     osnf_count: u32,
     /// Maps parser expression index → (DAG index, shift). Parser indices are sequential
-    /// (matching the export file). The SPtr for expression i is
-    /// SPtr::new(Ptr::from(ExportFile, remap.0), remap.1).
+    /// (matching the export file). The ExprPtr for expression i is
+    /// ExprPtr::new(Ptr::from(ExportFile, remap.0), remap.1).
     expr_remap: Vec<(usize, u16)>,
 }
 
@@ -396,7 +396,7 @@ pub(crate) fn parse_export_file<'p, R: BufRead>(
     }
     
     let dag_size = parser.dag.exprs.len();
-    eprintln!("SPtr parse: {} parser entries → {} DAG entries, {} OSNF-shifted",
+    eprintln!("ExprPtr parse: {} parser entries → {} DAG entries, {} OSNF-shifted",
         parser.expr_remap.len(), dag_size, parser.osnf_count);
     let name_cache = parser.dag.mk_name_cache();
     let export_file = crate::util::ExportFile {
@@ -494,16 +494,16 @@ impl<'a, R: BufRead> Parser<'a, R> {
         result
     }
 
-    fn get_expr_sptr(&self, idx: u32) -> SPtr<'a> {
+    fn get_expr_sptr(&self, idx: u32) -> ExprPtr<'a> {
         let (dag_idx, shift) = self.expr_remap[idx as usize];
         let core = crate::util::Ptr::from(DagMarker::ExportFile, dag_idx);
-        if shift == SPtr::CLOSED_SHIFT { SPtr::closed(core) } else { SPtr::new(core, shift) }
+        if shift == ExprPtr::CLOSED_SHIFT { ExprPtr::closed(core) } else { ExprPtr::new(core, shift) }
     }
 
     /// Get the CorePtr for a declaration type/value (must be closed, shift == CLOSED_SHIFT).
     fn get_expr_ptr(&self, idx: u32) -> CorePtr<'a> {
         let (dag_idx, shift) = self.expr_remap[idx as usize];
-        debug_assert!(shift == SPtr::CLOSED_SHIFT, "get_expr_ptr: expected CLOSED_SHIFT for declaration expr, got shift={}", shift);
+        debug_assert!(shift == ExprPtr::CLOSED_SHIFT, "get_expr_ptr: expected CLOSED_SHIFT for declaration expr, got shift={}", shift);
         crate::util::Ptr::from(DagMarker::ExportFile, dag_idx)
     }
 
@@ -578,7 +578,7 @@ impl<'a, R: BufRead> Parser<'a, R> {
                         format!("Nat lit extension disallowed by checker execution config, found {:?}", line)
                     ))
                 }
-                self.record_expr(dag_idx, SPtr::CLOSED_SHIFT);
+                self.record_expr(dag_idx, ExprPtr::CLOSED_SHIFT);
             }
             StrLit(cow_str) => {
                 if !self.config.string_extension {
@@ -595,7 +595,7 @@ impl<'a, R: BufRead> Parser<'a, R> {
                     let hash = hash64!(crate::expr::STRING_LIT_HASH, string_ptr);
                     self.insert_expr(Expr::StringLit { ptr: string_ptr, hash })
                 };
-                self.record_expr(dag_idx, SPtr::CLOSED_SHIFT);
+                self.record_expr(dag_idx, ExprPtr::CLOSED_SHIFT);
             }
             LevelSucc(l) => {
                 let l = self.get_level_ptr(l);
@@ -637,7 +637,7 @@ impl<'a, R: BufRead> Parser<'a, R> {
                     let hash = hash64!(crate::expr::SORT_HASH, level);
                     self.insert_expr(Expr::Sort { level, hash })
                 };
-                self.record_expr(dag_idx, SPtr::CLOSED_SHIFT);
+                self.record_expr(dag_idx, ExprPtr::CLOSED_SHIFT);
             }
             ExprMData {..} => {
                 panic!("Expr.mdata not supported");
@@ -649,26 +649,26 @@ impl<'a, R: BufRead> Parser<'a, R> {
                     let hash = hash64!(crate::expr::CONST_HASH, name, levels);
                     self.insert_expr(Expr::Const { name, levels, hash })
                 };
-                self.record_expr(dag_idx, SPtr::CLOSED_SHIFT);
+                self.record_expr(dag_idx, ExprPtr::CLOSED_SHIFT);
             }
             ExprApp {fun, arg} => {
                 let fun_sptr = self.get_expr_sptr(fun);
                 let arg_sptr = self.get_expr_sptr(arg);
-                // Effective nlbv for an SPtr child:
+                // Effective nlbv for an ExprPtr child:
                 // if core nlbv == 0 then 0, else core_nlbv + shift
                 let fun_core_nlbv = self.num_loose_bvars(fun_sptr.core);
                 let arg_core_nlbv = self.num_loose_bvars(arg_sptr.core);
                 let fun_eff_nlbv = if fun_core_nlbv == 0 { 0 } else { fun_core_nlbv + fun_sptr.shift };
                 let arg_eff_nlbv = if arg_core_nlbv == 0 { 0 } else { arg_core_nlbv + arg_sptr.shift };
                 // Compute min_shift from open children for OSNF. CLOSED_SHIFT = all closed.
-                let min_shift = if fun_eff_nlbv == 0 && arg_eff_nlbv == 0 { SPtr::CLOSED_SHIFT }
+                let min_shift = if fun_eff_nlbv == 0 && arg_eff_nlbv == 0 { ExprPtr::CLOSED_SHIFT }
                     else if fun_eff_nlbv == 0 { arg_sptr.shift }
                     else if arg_eff_nlbv == 0 { fun_sptr.shift }
                     else { fun_sptr.shift.min(arg_sptr.shift) };
-                if min_shift > 0 && min_shift != SPtr::CLOSED_SHIFT { self.osnf_count += 1; }
+                if min_shift > 0 && min_shift != ExprPtr::CLOSED_SHIFT { self.osnf_count += 1; }
                 // Build core children with min_shift subtracted (only for open children)
-                let core_fun = if fun_eff_nlbv == 0 { fun_sptr } else { SPtr::new(fun_sptr.core, fun_sptr.shift - min_shift) };
-                let core_arg = if arg_eff_nlbv == 0 { arg_sptr } else { SPtr::new(arg_sptr.core, arg_sptr.shift - min_shift) };
+                let core_fun = if fun_eff_nlbv == 0 { fun_sptr } else { ExprPtr::new(fun_sptr.core, fun_sptr.shift - min_shift) };
+                let core_arg = if arg_eff_nlbv == 0 { arg_sptr } else { ExprPtr::new(arg_sptr.core, arg_sptr.shift - min_shift) };
                 let core_fun_nlbv = if fun_core_nlbv == 0 { 0 } else { fun_core_nlbv + core_fun.shift };
                 let core_arg_nlbv = if arg_core_nlbv == 0 { 0 } else { arg_core_nlbv + core_arg.shift };
                 let core_nlbv = core_fun_nlbv.max(core_arg_nlbv);
@@ -681,7 +681,7 @@ impl<'a, R: BufRead> Parser<'a, R> {
                 self.record_expr(core_idx, min_shift);
             }
             ExprBVar(dbj_idx) => {
-                // Only Var(0) lives in the DAG. BVar(k) is represented as SPtr(var0, k).
+                // Only Var(0) lives in the DAG. BVar(k) is represented as ExprPtr(var0, k).
                 let var0_ptr = self.find_or_insert_var0();
                 self.record_expr(var0_ptr.idx(), dbj_idx);
             }
@@ -704,15 +704,15 @@ impl<'a, R: BufRead> Parser<'a, R> {
                 let body_outer_shift = if body_eff_nlbv <= 1 { None }
                     else { Some(body_sptr.shift.saturating_sub(1)) };
                 let min_shift = match (ty_eff_nlbv > 0, body_outer_shift) {
-                    (false, None) => SPtr::CLOSED_SHIFT,
+                    (false, None) => ExprPtr::CLOSED_SHIFT,
                     (true, None) => ty_sptr.shift,
                     (false, Some(bs)) => bs,
                     (true, Some(bs)) => ty_sptr.shift.min(bs),
                 };
-                if min_shift > 0 && min_shift != SPtr::CLOSED_SHIFT { self.osnf_count += 1; }
+                if min_shift > 0 && min_shift != ExprPtr::CLOSED_SHIFT { self.osnf_count += 1; }
                 // Build core children: only adjust shifts for open children that contributed
-                let core_ty = if ty_eff_nlbv == 0 { ty_sptr } else { SPtr::new(ty_sptr.core, ty_sptr.shift - min_shift) };
-                let core_body = if body_eff_nlbv > 1 { SPtr::new(body_sptr.core, body_sptr.shift - min_shift) } else { body_sptr };
+                let core_ty = if ty_eff_nlbv == 0 { ty_sptr } else { ExprPtr::new(ty_sptr.core, ty_sptr.shift - min_shift) };
+                let core_body = if body_eff_nlbv > 1 { ExprPtr::new(body_sptr.core, body_sptr.shift - min_shift) } else { body_sptr };
                 let core_ty_nlbv = if ty_core_nlbv == 0 { 0 } else { ty_core_nlbv + core_ty.shift };
                 let core_body_nlbv = if body_core_nlbv == 0 { 0 } else { body_core_nlbv + core_body.shift };
                 let core_nlbv = core_ty_nlbv.max(core_body_nlbv.saturating_sub(1));
@@ -735,14 +735,14 @@ impl<'a, R: BufRead> Parser<'a, R> {
                 let body_outer_shift = if body_eff_nlbv <= 1 { None }
                     else { Some(body_sptr.shift.saturating_sub(1)) };
                 let min_shift = match (ty_eff_nlbv > 0, body_outer_shift) {
-                    (false, None) => SPtr::CLOSED_SHIFT,
+                    (false, None) => ExprPtr::CLOSED_SHIFT,
                     (true, None) => ty_sptr.shift,
                     (false, Some(bs)) => bs,
                     (true, Some(bs)) => ty_sptr.shift.min(bs),
                 };
-                if min_shift > 0 && min_shift != SPtr::CLOSED_SHIFT { self.osnf_count += 1; }
-                let core_ty = if ty_eff_nlbv == 0 { ty_sptr } else { SPtr::new(ty_sptr.core, ty_sptr.shift - min_shift) };
-                let core_body = if body_eff_nlbv > 1 { SPtr::new(body_sptr.core, body_sptr.shift - min_shift) } else { body_sptr };
+                if min_shift > 0 && min_shift != ExprPtr::CLOSED_SHIFT { self.osnf_count += 1; }
+                let core_ty = if ty_eff_nlbv == 0 { ty_sptr } else { ExprPtr::new(ty_sptr.core, ty_sptr.shift - min_shift) };
+                let core_body = if body_eff_nlbv > 1 { ExprPtr::new(body_sptr.core, body_sptr.shift - min_shift) } else { body_sptr };
                 let core_ty_nlbv = if ty_core_nlbv == 0 { 0 } else { ty_core_nlbv + core_ty.shift };
                 let core_body_nlbv = if body_core_nlbv == 0 { 0 } else { body_core_nlbv + core_body.shift };
                 let core_nlbv = core_ty_nlbv.max(core_body_nlbv.saturating_sub(1));
@@ -774,10 +774,10 @@ impl<'a, R: BufRead> Parser<'a, R> {
                 if val_eff_nlbv > 0 { min_shift = min_shift.min(val_sptr.shift); }
                 if let Some(bs) = body_outer_shift { min_shift = min_shift.min(bs); }
                 // min_shift == CLOSED_SHIFT means all children are closed
-                if min_shift > 0 && min_shift != SPtr::CLOSED_SHIFT { self.osnf_count += 1; }
-                let core_ty = if ty_eff_nlbv == 0 { ty_sptr } else { SPtr::new(ty_sptr.core, ty_sptr.shift - min_shift) };
-                let core_val = if val_eff_nlbv == 0 { val_sptr } else { SPtr::new(val_sptr.core, val_sptr.shift - min_shift) };
-                let core_body = if body_eff_nlbv > 1 { SPtr::new(body_sptr.core, body_sptr.shift - min_shift) } else { body_sptr };
+                if min_shift > 0 && min_shift != ExprPtr::CLOSED_SHIFT { self.osnf_count += 1; }
+                let core_ty = if ty_eff_nlbv == 0 { ty_sptr } else { ExprPtr::new(ty_sptr.core, ty_sptr.shift - min_shift) };
+                let core_val = if val_eff_nlbv == 0 { val_sptr } else { ExprPtr::new(val_sptr.core, val_sptr.shift - min_shift) };
+                let core_body = if body_eff_nlbv > 1 { ExprPtr::new(body_sptr.core, body_sptr.shift - min_shift) } else { body_sptr };
                 let core_ty_nlbv = if ty_core_nlbv == 0 { 0 } else { ty_core_nlbv + core_ty.shift };
                 let core_val_nlbv = if val_core_nlbv == 0 { 0 } else { val_core_nlbv + core_val.shift };
                 let core_body_nlbv = if body_core_nlbv == 0 { 0 } else { body_core_nlbv + core_body.shift };
@@ -801,9 +801,9 @@ impl<'a, R: BufRead> Parser<'a, R> {
                 let struct_sptr = self.get_expr_sptr(struct_);
                 let struct_core_nlbv = self.num_loose_bvars(struct_sptr.core);
                 let struct_eff_nlbv = if struct_core_nlbv == 0 { 0 } else { struct_core_nlbv + struct_sptr.shift };
-                let min_shift = if struct_eff_nlbv == 0 { SPtr::CLOSED_SHIFT } else { struct_sptr.shift };
-                if min_shift > 0 && min_shift != SPtr::CLOSED_SHIFT { self.osnf_count += 1; }
-                let core_struct = if struct_eff_nlbv == 0 { struct_sptr } else { SPtr::new(struct_sptr.core, struct_sptr.shift - min_shift) };
+                let min_shift = if struct_eff_nlbv == 0 { ExprPtr::CLOSED_SHIFT } else { struct_sptr.shift };
+                if min_shift > 0 && min_shift != ExprPtr::CLOSED_SHIFT { self.osnf_count += 1; }
+                let core_struct = if struct_eff_nlbv == 0 { struct_sptr } else { ExprPtr::new(struct_sptr.core, struct_sptr.shift - min_shift) };
                 let core_struct_nlbv = if struct_core_nlbv == 0 { 0 } else { struct_core_nlbv + core_struct.shift };
                 let locals = self.has_fvars_ptr(struct_sptr.core);
                 let hash = hash64!(crate::expr::PROJ_HASH, ty_name, idx, core_struct);

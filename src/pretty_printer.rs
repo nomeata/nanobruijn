@@ -3,7 +3,7 @@ use crate::expr::{BinderStyle, Expr::*, FVarId};
 use crate::hash64;
 use crate::level::Level;
 use crate::name::Name;
-use crate::util::{ExportFile, CorePtr, LevelPtr, LevelsPtr, NamePtr, SPtr, StringPtr, TcCtx};
+use crate::util::{ExportFile, CorePtr, LevelPtr, LevelsPtr, NamePtr, ExprPtr, StringPtr, TcCtx};
 use serde::Deserialize;
 use std::error::Error;
 use std::rc::Rc;
@@ -526,7 +526,7 @@ impl<'x, 't, 'p> PrettyPrinter<'x, 't, 'p> {
     /// they carry information about whether they're a pi or lambda, if they're seen
     /// later, etc.
     fn parse_binders(&mut self, mut e: CorePtr<'t>) -> (Vec<ParsedBinder<'t>>, CorePtr<'t>) {
-        let (mut binders, mut binder_tys) = (Vec::<ParsedBinder>::new(), Vec::<SPtr>::new());
+        let (mut binders, mut binder_tys) = (Vec::<ParsedBinder>::new(), Vec::<ExprPtr>::new());
         while let Pi { binder_name, binder_style, binder_type, body, .. }
         | Lambda { binder_name, binder_style, binder_type, body, .. } = self.ctx.read_expr(e)
         {
@@ -540,7 +540,7 @@ impl<'x, 't, 'p> PrettyPrinter<'x, 't, 'p> {
             binder_tys.push(local);
             e = body.core;
         }
-        let instd = self.ctx.inst(SPtr::closed(e), binder_tys.as_slice());
+        let instd = self.ctx.inst(ExprPtr::closed(e), binder_tys.as_slice());
         (binders, instd.core)
     }
 
@@ -613,7 +613,7 @@ impl<'x, 't, 'p> PrettyPrinter<'x, 't, 'p> {
     /// Does this expression infer as a `Pi` with any binder style other than `Default`
     fn is_implicit_fun(&mut self, fun: CorePtr<'t>) -> bool {
         self.ctx.with_tc(crate::env::EnvLimit::PpUnlimited, |tc| {
-            let ty = tc.infer_then_whnf(SPtr::closed(fun), crate::tc::InferFlag::InferOnly);
+            let ty = tc.infer_then_whnf(ExprPtr::closed(fun), crate::tc::InferFlag::InferOnly);
             match tc.ctx.read_expr(ty.core) {
                 Pi { binder_style, .. } => binder_style != BinderStyle::Default,
                 _ => false,
@@ -718,7 +718,7 @@ impl<'x, 't, 'p> PrettyPrinter<'x, 't, 'p> {
             _ => panic!(),
         };
 
-        let instd = self.ctx.inst(SPtr::closed(body), &[SPtr::closed(swapped_lc)]);
+        let instd = self.ctx.inst(ExprPtr::closed(body), &[ExprPtr::closed(swapped_lc)]);
         let binder = self.pp_bare_binder(n, t).group();
         let val = self.pp_expr_aux(val).parens(0).group();
         let body = self.pp_expr_aux(instd.core).parens(0);
@@ -734,7 +734,7 @@ impl<'x, 't, 'p> PrettyPrinter<'x, 't, 'p> {
     }
 
     fn pp_expr_aux(&mut self, e: CorePtr<'t>) -> Parenable {
-        if !self.options().proofs && self.ctx.with_tc(crate::env::EnvLimit::PpUnlimited, |tc| tc.is_proof(crate::util::SPtr::closed(e)).0) {
+        if !self.options().proofs && self.ctx.with_tc(crate::env::EnvLimit::PpUnlimited, |tc| tc.is_proof(crate::util::ExprPtr::closed(e)).0) {
             DocPtr::from("_").as_unparenable()
         } else {
             match self.ctx.read_expr(e) {
@@ -806,11 +806,11 @@ impl<'x, 't, 'p> PrettyPrinter<'x, 't, 'p> {
             }
         }
         let (named_binders, rest_binders) = binders.split_at(slice_split_idx);
-        let named_binder_tys: Vec<SPtr> = named_binders.iter().map(|x| SPtr::closed(x.local_const)).collect();
+        let named_binder_tys: Vec<ExprPtr> = named_binders.iter().map(|x| ExprPtr::closed(x.local_const)).collect();
 
-        let instd = self.ctx.inst(SPtr::closed(val), named_binder_tys.as_slice());
+        let instd = self.ctx.inst(ExprPtr::closed(val), named_binder_tys.as_slice());
         let pp_val = {
-            let is_prop = self.ctx.with_tc(crate::env::EnvLimit::PpUnlimited, |tc| tc.is_proposition(SPtr::closed(declar.info().ty)).0);
+            let is_prop = self.ctx.with_tc(crate::env::EnvLimit::PpUnlimited, |tc| tc.is_proposition(ExprPtr::closed(declar.info().ty)).0);
             line()
                 .concat(if is_prop && !self.options().proofs {
                     DocPtr::from("_")

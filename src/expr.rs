@@ -1,5 +1,5 @@
 //! Implementation of Lean expressions
-use crate::util::{AppArgs, BigUintPtr, CorePtr, FxHashMap, LevelPtr, LevelsPtr, NamePtr, SPtr, StringPtr, TcCtx};
+use crate::util::{AppArgs, BigUintPtr, CorePtr, FxHashMap, LevelPtr, LevelsPtr, NamePtr, ExprPtr, StringPtr, TcCtx};
 use num_bigint::BigUint;
 use num_traits::identities::Zero;
 use Expr::*;
@@ -37,13 +37,13 @@ pub enum Expr<'a> {
         /// parameters. For some struct Foo A B, and a constructor Foo.mk A B p q r s,
         /// `q` will have idx 1.
         idx: u32,
-        structure: SPtr<'a>,
+        structure: ExprPtr<'a>,
         num_loose_bvars: u16,
         has_fvars: bool,
     },
     /// A bound variable represented by a deBruijn index.
     /// In the DAG, only Var { dbj_idx: 0 } exists. All variable references
-    /// are SPtr(var0_ptr, k) where k is the de Bruijn index.
+    /// are ExprPtr(var0_ptr, k) where k is the de Bruijn index.
     Var {
         hash: u64,
         dbj_idx: u16,
@@ -59,8 +59,8 @@ pub enum Expr<'a> {
     },
     App {
         hash: u64,
-        fun: SPtr<'a>,
-        arg: SPtr<'a>,
+        fun: ExprPtr<'a>,
+        arg: ExprPtr<'a>,
         num_loose_bvars: u16,
         has_fvars: bool,
     },
@@ -68,8 +68,8 @@ pub enum Expr<'a> {
         hash: u64,
         binder_name: NamePtr<'a>,
         binder_style: BinderStyle,
-        binder_type: SPtr<'a>,
-        body: SPtr<'a>,
+        binder_type: ExprPtr<'a>,
+        body: ExprPtr<'a>,
         num_loose_bvars: u16,
         has_fvars: bool,
     },
@@ -77,17 +77,17 @@ pub enum Expr<'a> {
         hash: u64,
         binder_name: NamePtr<'a>,
         binder_style: BinderStyle,
-        binder_type: SPtr<'a>,
-        body: SPtr<'a>,
+        binder_type: ExprPtr<'a>,
+        body: ExprPtr<'a>,
         num_loose_bvars: u16,
         has_fvars: bool,
     },
     Let {
         hash: u64,
         binder_name: NamePtr<'a>,
-        binder_type: SPtr<'a>,
-        val: SPtr<'a>,
-        body: SPtr<'a>,
+        binder_type: ExprPtr<'a>,
+        val: ExprPtr<'a>,
+        body: ExprPtr<'a>,
         num_loose_bvars: u16,
         has_fvars: bool,
         nondep: bool
@@ -151,7 +151,7 @@ pub enum BinderStyle {
 }
 
 impl<'t, 'p: 't> TcCtx<'t, 'p> {
-    pub(crate) fn inst_forall_params(&mut self, mut e: SPtr<'t>, n: usize, all_args: &[SPtr<'t>]) -> SPtr<'t> {
+    pub(crate) fn inst_forall_params(&mut self, mut e: ExprPtr<'t>, n: usize, all_args: &[ExprPtr<'t>]) -> ExprPtr<'t> {
         for _ in 0..n {
             match self.read_expr(e.core) {
                 Pi { body, .. } => {
@@ -178,13 +178,13 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
     /// Replaces Var(offset + i) with substs[rev(i)] for i < substs.len().
     /// Vars beyond the substitution range are left unchanged (no shifting).
     /// Used for local-to-local replacement (e.g. replace_params, inductive.rs).
-    pub fn inst(&mut self, e: SPtr<'t>, substs: &[SPtr<'t>]) -> SPtr<'t> {
+    pub fn inst(&mut self, e: ExprPtr<'t>, substs: &[ExprPtr<'t>]) -> ExprPtr<'t> {
         self.trace.inst_calls += 1;
         if substs.is_empty() {
             return e
         }
         if e.is_closed() { return e; }
-        // SPtr fast path: if e.shift >= n_substs, no substituted variable appears.
+        // ExprPtr fast path: if e.shift >= n_substs, no substituted variable appears.
         if e.shift >= substs.len() as u16 {
             return e;
         }
@@ -194,16 +194,16 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
 
     /// Like `inst`, but also shifts down Var indices beyond the substitution range.
     /// Used for beta reduction and let-substitution where binders are being removed.
-    pub fn inst_beta(&mut self, e: SPtr<'t>, substs: &[SPtr<'t>]) -> SPtr<'t> {
+    pub fn inst_beta(&mut self, e: ExprPtr<'t>, substs: &[ExprPtr<'t>]) -> ExprPtr<'t> {
         self.trace.inst_calls += 1;
         if substs.is_empty() {
             return e
         }
         if e.is_closed() { return e; }
-        // SPtr fast path: if e.shift >= n_substs, all substituted variables are dead.
+        // ExprPtr fast path: if e.shift >= n_substs, all substituted variables are dead.
         let n_substs = substs.len() as u16;
         if e.shift >= n_substs {
-            return SPtr::new(e.core, e.shift - n_substs);
+            return ExprPtr::new(e.core, e.shift - n_substs);
         }
         self.expr_cache.inst_substs_id = self.expr_cache.inst_substs_id.wrapping_add(1);
         self.inst_aux(e.core, substs, 0, true, e.shift as i16, 0)
@@ -212,15 +212,15 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
     /// Combined shift+instantiation in one pass.
     /// `sh_amt`/`sh_cut` represent a pending outer Shift that is applied to `e` before
     /// instantiation, without creating intermediate Shift wrapper expressions.
-    /// With SPtr children, the child's shift composes with the pending (sh_amt, sh_cut).
-    fn inst_aux(&mut self, e: CorePtr<'t>, substs: &[SPtr<'t>], offset: u16, shift_down: bool, sh_amt: i16, sh_cut: u16) -> SPtr<'t> {
+    /// With ExprPtr children, the child's shift composes with the pending (sh_amt, sh_cut).
+    fn inst_aux(&mut self, e: CorePtr<'t>, substs: &[ExprPtr<'t>], offset: u16, shift_down: bool, sh_amt: i16, sh_cut: u16) -> ExprPtr<'t> {
         stacker::maybe_grow(64 * 1024, 2 * 1024 * 1024, || self.inst_aux_body(e, substs, offset, shift_down, sh_amt, sh_cut))
     }
 
-    /// Inlined fast path for inst_aux on SPtr children.
-    /// Composes the child's SPtr shift (cutoff=0) with the pending (sh_amt, sh_cut).
+    /// Inlined fast path for inst_aux on ExprPtr children.
+    /// Composes the child's ExprPtr shift (cutoff=0) with the pending (sh_amt, sh_cut).
     #[inline(always)]
-    fn inst_aux_quick_sptr(&mut self, child: SPtr<'t>, substs: &[SPtr<'t>], offset: u16, shift_down: bool, sh_amt: i16, sh_cut: u16) -> SPtr<'t> {
+    fn inst_aux_quick_sptr(&mut self, child: ExprPtr<'t>, substs: &[ExprPtr<'t>], offset: u16, shift_down: bool, sh_amt: i16, sh_cut: u16) -> ExprPtr<'t> {
         if child.is_closed() { return child; }
         if child.shift == 0 {
             return self.inst_aux_quick(child.core, substs, offset, shift_down, sh_amt, sh_cut);
@@ -236,14 +236,14 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         }
         // Mismatch: 0 < child.shift < sh_cut. Can't compose into a single (sh_amt, sh_cut).
         // Materialize the child's view, then process each child of the viewed expression.
-        // For now, use a simpler approach: view the SPtr and recurse.
+        // For now, use a simpler approach: view the ExprPtr and recurse.
         let viewed = self.view_sptr(child);
-        // Process the viewed expression (which has adjusted SPtr children)
+        // Process the viewed expression (which has adjusted ExprPtr children)
         // We need to process it as if it were at the current (sh_amt, sh_cut) level.
         // The viewed expression is a temporary Expr, not in the DAG. We need to process its children.
         match viewed {
             Sort { .. } | Const { .. } | Local { .. } | StringLit { .. } | NatLit { .. } => {
-                SPtr::closed(child.core) // closed
+                ExprPtr::closed(child.core) // closed
             }
             Var { dbj_idx, .. } => {
                 // The viewed var already has the correct index (child.shift applied)
@@ -295,11 +295,11 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
     /// Inlined fast path for inst_aux on children: avoids function call + stacker overhead
     /// for the common early-exit cases (closed expressions, nlbv below offset).
     #[inline(always)]
-    fn inst_aux_quick(&mut self, e: CorePtr<'t>, substs: &[SPtr<'t>], offset: u16, shift_down: bool, sh_amt: i16, sh_cut: u16) -> SPtr<'t> {
+    fn inst_aux_quick(&mut self, e: CorePtr<'t>, substs: &[ExprPtr<'t>], offset: u16, shift_down: bool, sh_amt: i16, sh_cut: u16) -> ExprPtr<'t> {
         let nlbv = self.num_loose_bvars(e);
         let n_substs = substs.len() as u16;
         if sh_amt == 0 {
-            if nlbv <= offset { return SPtr::from_nlbv(e, nlbv); }
+            if nlbv <= offset { return ExprPtr::from_nlbv(e, nlbv); }
             // OSNF dead-substitution: if all free vars are past the substitution range,
             // no variable gets substituted.
             let fvar_lb = self.fvar_lb(e);
@@ -307,16 +307,16 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
                 if shift_down {
                     let r = self.push_shift_down_cutoff(e, n_substs, offset);
                     let r_nlbv = self.num_loose_bvars(r);
-                    return SPtr::from_nlbv(r, r_nlbv);
+                    return ExprPtr::from_nlbv(r, r_nlbv);
                 } else {
-                    return SPtr::from_nlbv(e, nlbv);
+                    return ExprPtr::from_nlbv(e, nlbv);
                 }
             }
         } else {
-            if nlbv == 0 { return SPtr::closed(e); }
+            if nlbv == 0 { return ExprPtr::closed(e); }
             let effective_nlbv = if nlbv <= sh_cut { nlbv as i16 } else { nlbv as i16 + sh_amt };
             if effective_nlbv <= offset as i16 {
-                if nlbv <= sh_cut { return SPtr::from_nlbv(e, nlbv); }
+                if nlbv <= sh_cut { return ExprPtr::from_nlbv(e, nlbv); }
                 if sh_cut == 0 { return self.mk_shift(e, sh_amt as u16); }
                 return self.shift_expr(e, sh_amt as u16, sh_cut);
             }
@@ -335,9 +335,9 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
                                 return self.mk_shift(e, sh_amt as u16 - n_substs);
                             } else if (sh_amt as u16) < n_substs {
                                 let r = self.push_shift_down_cutoff(e, n_substs - sh_amt as u16, 0);
-                                return SPtr::from_nlbv(r, self.num_loose_bvars(r));
+                                return ExprPtr::from_nlbv(r, self.num_loose_bvars(r));
                             } else {
-                                return SPtr::from_nlbv(e, nlbv);
+                                return ExprPtr::from_nlbv(e, nlbv);
                             }
                         }
                         // sh_cut > 0: fall through to full inst_aux
@@ -351,7 +351,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         self.inst_aux(e, substs, offset, shift_down, sh_amt, sh_cut)
     }
 
-    fn inst_aux_body(&mut self, e: CorePtr<'t>, substs: &[SPtr<'t>], offset: u16, shift_down: bool, sh_amt: i16, sh_cut: u16) -> SPtr<'t> {
+    fn inst_aux_body(&mut self, e: CorePtr<'t>, substs: &[ExprPtr<'t>], offset: u16, shift_down: bool, sh_amt: i16, sh_cut: u16) -> ExprPtr<'t> {
         self.trace.inst_aux_calls += 1;
         if sh_amt != 0 { self.trace.inst_aux_shifted_path += 1; }
         self.check_heartbeat();
@@ -363,14 +363,14 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         if sh_amt == 0 {
             if nlbv <= offset {
                 self.trace.inst_aux_elided += 1;
-                return SPtr::from_nlbv(e, nlbv);
+                return ExprPtr::from_nlbv(e, nlbv);
             }
         } else {
             let effective_nlbv = if nlbv <= sh_cut { nlbv as i16 } else { nlbv as i16 + sh_amt };
             if effective_nlbv <= offset as i16 {
                 self.trace.inst_aux_elided += 1;
                 if nlbv <= sh_cut {
-                    return SPtr::from_nlbv(e, nlbv);
+                    return ExprPtr::from_nlbv(e, nlbv);
                 }
                 if sh_cut == 0 {
                     return self.mk_shift(e, sh_amt as u16);
@@ -385,7 +385,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         let substs_id = self.expr_cache.inst_substs_id;
         let cache_tag = e.get_hash().wrapping_mul(0x517cc1b727220a95) ^ params;
         if self.expr_cache.inst_cache.is_empty() {
-            let dummy = SPtr::closed(crate::util::Ptr::from(crate::util::DagMarker::ExportFile, 0));
+            let dummy = ExprPtr::closed(crate::util::Ptr::from(crate::util::DagMarker::ExportFile, 0));
             let dummy_e: CorePtr<'t> = crate::util::Ptr::from(crate::util::DagMarker::ExportFile, 0);
             self.expr_cache.inst_cache.resize(crate::util::INST_CACHE_SIZE, (0, 0, dummy_e, dummy));
         }
@@ -403,7 +403,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         if sh_amt > 0 && shift_down && sh_amt == n_substs as i16 && sh_cut == offset {
             self.trace.inst_aux_shift_skip_clean += 1;
             self.trace.inst_aux_elided += 1;
-            let r = SPtr::from_nlbv(e, nlbv);
+            let r = ExprPtr::from_nlbv(e, nlbv);
             self.expr_cache.inst_cache[slot] = (substs_id, params, e, r);
             return r;
         }
@@ -436,17 +436,17 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
             let lb = self.fvar_lb(e);
             if lb >= offset + n_substs {
                 let rcore = self.push_shift_down_cutoff(e, n_substs, offset);
-                let r = SPtr::from_nlbv(rcore, self.num_loose_bvars(rcore));
+                let r = ExprPtr::from_nlbv(rcore, self.num_loose_bvars(rcore));
                 self.expr_cache.inst_cache[slot] = (substs_id, params, e, r);
                 return r;
             }
         }
 
         // Main dispatch: read the DAG node and process.
-        // Children are SPtr — their shifts compose with the pending (sh_amt, sh_cut).
+        // Children are ExprPtr — their shifts compose with the pending (sh_amt, sh_cut).
         let calcd = match self.read_expr(e) {
             Sort { .. } | Const { .. } | Local { .. } | StringLit { .. } | NatLit { .. } => {
-                if sh_amt > 0 { return SPtr::closed(e); }
+                if sh_amt > 0 { return ExprPtr::closed(e); }
                 panic!("inst_aux_body reached closed expr with sh_amt=0 but nlbv > offset")
             }
             Var { dbj_idx, .. } => {
@@ -462,7 +462,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
                         self.mk_var(shifted_idx - n_substs)
                     } else {
                         if sh_amt != 0 { self.mk_var(shifted_idx) }
-                        else { SPtr::from_nlbv(e, nlbv) }
+                        else { ExprPtr::from_nlbv(e, nlbv) }
                     }
                 }
             }
@@ -499,10 +499,10 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
     /// Shift all free variables in `e` (those with index >= cutoff) up by `amount`.
     /// For cutoff=0, creates a lazy Shift node (O(1)).
     /// For cutoff>0, traverses and rebuilds.
-    pub fn shift_expr(&mut self, e: CorePtr<'t>, amount: u16, cutoff: u16) -> SPtr<'t> {
+    pub fn shift_expr(&mut self, e: CorePtr<'t>, amount: u16, cutoff: u16) -> ExprPtr<'t> {
         let nlbv = self.num_loose_bvars(e);
         if amount == 0 || nlbv <= cutoff {
-            return SPtr::from_nlbv(e, nlbv)
+            return ExprPtr::from_nlbv(e, nlbv)
         }
         if cutoff == 0 {
             return self.mk_shift(e, amount);
@@ -510,10 +510,10 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         self.shift_expr_aux(e, amount, cutoff)
     }
 
-    fn shift_expr_aux(&mut self, e: CorePtr<'t>, amount: u16, cutoff: u16) -> SPtr<'t> {
+    fn shift_expr_aux(&mut self, e: CorePtr<'t>, amount: u16, cutoff: u16) -> ExprPtr<'t> {
         let nlbv = self.num_loose_bvars(e);
         if nlbv <= cutoff {
-            return SPtr::from_nlbv(e, nlbv)
+            return ExprPtr::from_nlbv(e, nlbv)
         }
         // If all free bvars are already >= cutoff, the cutoff is irrelevant —
         // this is a uniform shift, so use O(1) mk_shift instead of traversing.
@@ -529,7 +529,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
                 if dbj_idx >= cutoff {
                     self.mk_var(dbj_idx + amount)
                 } else {
-                    SPtr::unshifted(e) // Var is always open (nlbv > 0)
+                    ExprPtr::unshifted(e) // Var is always open (nlbv > 0)
                 }
             }
             App { fun, arg, .. } => {
@@ -562,9 +562,9 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         calcd
     }
 
-    /// Helper: shift an SPtr child. The child's own shift composes with the operation.
-    /// Returns an SPtr (as the mk_* functions now expect SPtr children).
-    pub(crate) fn shift_expr_aux_sptr(&mut self, child: SPtr<'t>, amount: u16, cutoff: u16) -> SPtr<'t> {
+    /// Helper: shift an ExprPtr child. The child's own shift composes with the operation.
+    /// Returns an ExprPtr (as the mk_* functions now expect ExprPtr children).
+    pub(crate) fn shift_expr_aux_sptr(&mut self, child: ExprPtr<'t>, amount: u16, cutoff: u16) -> ExprPtr<'t> {
         if child.is_closed() { return child; }
         // If the child has a shift, vars in child.core at index >= 0 become >= child.shift.
         // If child.shift >= cutoff, the cutoff is irrelevant for child.core's vars —
@@ -575,7 +575,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         // Otherwise, we need to traverse child.core with adjusted cutoff.
         let new_cutoff = cutoff - child.shift;
         let result = self.shift_expr_aux(child.core, amount, new_cutoff);
-        SPtr::new(result.core, result.shift + child.shift)
+        ExprPtr::new(result.core, result.shift + child.shift)
     }
 
     /// From `e[x_1..x_n/v_1..v_n]`, abstract and re-inst, creating `e[y_1..y_n/v_1..v_n]`.
@@ -584,28 +584,28 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         e: CorePtr<'t>,
         ingoing: &[CorePtr<'t>],
         outgoing: &[CorePtr<'t>],
-    ) -> SPtr<'t> {
+    ) -> ExprPtr<'t> {
         let e = self.abstr(e, outgoing);
-        let ingoing_sptrs: AppArgs<'t> = ingoing.iter().map(|&p| SPtr::closed(p)).collect(); // Locals are always closed
+        let ingoing_sptrs: AppArgs<'t> = ingoing.iter().map(|&p| ExprPtr::closed(p)).collect(); // Locals are always closed
         self.inst(e, &ingoing_sptrs)
     }
 
-    fn abstr_aux(&mut self, e: CorePtr<'t>, locals: &[CorePtr<'t>], offset: u16) -> SPtr<'t> {
+    fn abstr_aux(&mut self, e: CorePtr<'t>, locals: &[CorePtr<'t>], offset: u16) -> ExprPtr<'t> {
         stacker::maybe_grow(64 * 1024, 2 * 1024 * 1024, || self.abstr_aux_body(e, locals, offset))
     }
 
-    fn abstr_aux_body(&mut self, e: CorePtr<'t>, locals: &[CorePtr<'t>], offset: u16) -> SPtr<'t> {
+    fn abstr_aux_body(&mut self, e: CorePtr<'t>, locals: &[CorePtr<'t>], offset: u16) -> ExprPtr<'t> {
         if !self.has_fvars(e) {
-            SPtr::from_nlbv(e, self.num_loose_bvars(e))
+            ExprPtr::from_nlbv(e, self.num_loose_bvars(e))
         } else if let Some(cached) = self.expr_cache.abstr_cache.get(&(e, offset)) {
             *cached
         } else {
-            // Children are SPtr. Locals never appear under shift (nlbv=0).
+            // Children are ExprPtr. Locals never appear under shift (nlbv=0).
             let calcd = match self.read_expr(e) {
                 Local { .. } => {
                     locals.iter().rev().position(|x| *x == e)
                         .map(|pos| self.mk_var(u16::try_from(pos).unwrap() + offset))
-                        .unwrap_or(SPtr::closed(e)) // Local is always closed
+                        .unwrap_or(ExprPtr::closed(e)) // Local is always closed
                 }
                 App { fun, arg, .. } => {
                     let new_fun = self.abstr_aux_sptr(fun, locals, offset);
@@ -641,11 +641,11 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         }
     }
 
-    /// Helper for abstr_aux: process an SPtr child.
+    /// Helper for abstr_aux: process an ExprPtr child.
     /// Locals have nlbv=0 so they can't appear under a shift.
     /// We recurse on child.core and re-wrap with child.shift.
-    /// Abstract locals in an SPtr child. Adjusts offset to account for child's shift.
-    fn abstr_aux_sptr(&mut self, child: SPtr<'t>, locals: &[CorePtr<'t>], offset: u16) -> SPtr<'t> {
+    /// Abstract locals in an ExprPtr child. Adjusts offset to account for child's shift.
+    fn abstr_aux_sptr(&mut self, child: ExprPtr<'t>, locals: &[CorePtr<'t>], offset: u16) -> ExprPtr<'t> {
         if child.is_closed() {
             if !self.has_fvars(child.core) { return child; }
             // Closed (Local) with fvars — must check for abstraction
@@ -666,7 +666,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
                 Local { .. } => {
                     locals.iter().rev().position(|x| *x == child.core)
                         .map(|pos| self.mk_var(u16::try_from(pos).unwrap() + offset))
-                        .unwrap_or(SPtr::closed(child.core))
+                        .unwrap_or(ExprPtr::closed(child.core))
                 }
                 App { fun, arg, .. } => {
                     let f = self.abstr_aux_sptr(fun, locals, offset);
@@ -693,39 +693,39 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
                     let s = self.abstr_aux_sptr(structure, locals, offset);
                     self.mk_proj(ty_name, idx, s)
                 }
-                _ => SPtr::closed(child.core), // closed
+                _ => ExprPtr::closed(child.core), // closed
             }
         }
     }
 
     /// Abstraction of unique identifiers; replaces free variables with the appropriate
     /// bound variable, if the free variable is in `locals`.
-    pub fn abstr(&mut self, e: CorePtr<'t>, locals: &[CorePtr<'t>]) -> SPtr<'t> {
+    pub fn abstr(&mut self, e: CorePtr<'t>, locals: &[CorePtr<'t>]) -> ExprPtr<'t> {
         self.expr_cache.abstr_cache.clear();
         self.abstr_aux(e, locals, 0u16)
     }
 
     /// Abstraction by deBruijn level: converts DbjLevel locals back to Var.
     /// Used by nanoda's locally-nameless TC.
-    fn abstr_aux_levels(&mut self, e: CorePtr<'t>, start_pos: u16, num_open_binders: u16) -> SPtr<'t> {
+    fn abstr_aux_levels(&mut self, e: CorePtr<'t>, start_pos: u16, num_open_binders: u16) -> ExprPtr<'t> {
         stacker::maybe_grow(64 * 1024, 2 * 1024 * 1024, || self.abstr_aux_levels_body(e, start_pos, num_open_binders))
     }
 
-    fn abstr_aux_levels_body(&mut self, e: CorePtr<'t>, start_pos: u16, num_open_binders: u16) -> SPtr<'t> {
+    fn abstr_aux_levels_body(&mut self, e: CorePtr<'t>, start_pos: u16, num_open_binders: u16) -> ExprPtr<'t> {
         if !self.has_fvars(e) {
-            SPtr::from_nlbv(e, self.num_loose_bvars(e))
+            ExprPtr::from_nlbv(e, self.num_loose_bvars(e))
         } else if let Some(&cached) = self.expr_cache.abstr_cache_levels.get(&(e, start_pos, num_open_binders)) {
             cached
         } else {
-            // Children are SPtr. Locals have nlbv=0 so never under shift.
+            // Children are ExprPtr. Locals have nlbv=0 so never under shift.
             let calcd = match self.read_expr(e) {
                 Local { id: FVarId::DbjLevel(serial), .. } =>
                     if serial < start_pos {
-                        SPtr::closed(e) // Local is always closed
+                        ExprPtr::closed(e) // Local is always closed
                     } else {
                         self.fvar_to_bvar(num_open_binders, serial)
                     },
-                Local { id: FVarId::Unique(..), .. } => SPtr::closed(e),
+                Local { id: FVarId::Unique(..), .. } => ExprPtr::closed(e),
                 App { fun, arg, .. } => {
                     let new_fun = self.abstr_aux_levels_sptr(fun, start_pos, num_open_binders);
                     let new_arg = self.abstr_aux_levels_sptr(arg, start_pos, num_open_binders);
@@ -759,8 +759,8 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         }
     }
 
-    /// Helper for abstr_aux_levels: process an SPtr child.
-    fn abstr_aux_levels_sptr(&mut self, child: SPtr<'t>, start_pos: u16, num_open_binders: u16) -> SPtr<'t> {
+    /// Helper for abstr_aux_levels: process an ExprPtr child.
+    fn abstr_aux_levels_sptr(&mut self, child: ExprPtr<'t>, start_pos: u16, num_open_binders: u16) -> ExprPtr<'t> {
         if child.is_closed() {
             if !self.has_fvars(child.core) { return child; }
             return self.abstr_aux_levels(child.core, start_pos, num_open_binders);
@@ -777,10 +777,10 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
             let viewed = self.view_sptr(child);
             match viewed {
                 Local { id: FVarId::DbjLevel(serial), .. } => {
-                    if serial < start_pos { SPtr::closed(child.core) }
+                    if serial < start_pos { ExprPtr::closed(child.core) }
                     else { self.fvar_to_bvar(num_open_binders, serial) }
                 }
-                Local { .. } => SPtr::closed(child.core),
+                Local { .. } => ExprPtr::closed(child.core),
                 App { fun, arg, .. } => {
                     let f = self.abstr_aux_levels_sptr(fun, start_pos, num_open_binders);
                     let a = self.abstr_aux_levels_sptr(arg, start_pos, num_open_binders);
@@ -806,65 +806,65 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
                     let s = self.abstr_aux_levels_sptr(structure, start_pos, num_open_binders);
                     self.mk_proj(ty_name, idx, s)
                 }
-                _ => SPtr::closed(child.core), // closed
+                _ => ExprPtr::closed(child.core), // closed
             }
         }
     }
 
     /// Abstract deBruijn-level free variables back to bound variables.
     /// Used by nanoda's locally-nameless TC.
-    pub fn abstr_levels(&mut self, e: CorePtr<'t>, start_pos: u16) -> SPtr<'t> {
+    pub fn abstr_levels(&mut self, e: CorePtr<'t>, start_pos: u16) -> ExprPtr<'t> {
         self.expr_cache.abstr_cache_levels.clear();
         self.abstr_aux_levels(e, start_pos, self.dbj_level_counter)
     }
 
-    fn subst_aux(&mut self, e: CorePtr<'t>, ks: LevelsPtr<'t>, vs: LevelsPtr<'t>) -> SPtr<'t> {
+    fn subst_aux(&mut self, e: CorePtr<'t>, ks: LevelsPtr<'t>, vs: LevelsPtr<'t>) -> ExprPtr<'t> {
         stacker::maybe_grow(64 * 1024, 2 * 1024 * 1024, || self.subst_aux_body(e, ks, vs))
     }
 
-    fn subst_aux_body(&mut self, e: CorePtr<'t>, ks: LevelsPtr<'t>, vs: LevelsPtr<'t>) -> SPtr<'t> {
+    fn subst_aux_body(&mut self, e: CorePtr<'t>, ks: LevelsPtr<'t>, vs: LevelsPtr<'t>) -> ExprPtr<'t> {
         if let Some(&cached) = self.expr_cache.subst_cache.get(&(e, ks, vs)) {
             return cached;
         }
         // Level substitution commutes with variable shifting (they operate on
-        // independent parts: levels vs. bvar indices). For SPtr children,
+        // independent parts: levels vs. bvar indices). For ExprPtr children,
         // we recurse on child.core and preserve child.shift.
         let nlbv = self.num_loose_bvars(e);
         let r = match self.read_expr(e) {
-            Var { .. } | NatLit { .. } | StringLit { .. } => SPtr::from_nlbv(e, nlbv),
+            Var { .. } | NatLit { .. } | StringLit { .. } => ExprPtr::from_nlbv(e, nlbv),
             Sort { level, .. } => {
                 let new_level = self.subst_level(level, ks, vs);
-                if new_level == level { SPtr::closed(e) } else { self.mk_sort(new_level) }
+                if new_level == level { ExprPtr::closed(e) } else { self.mk_sort(new_level) }
             }
             Const { name, levels, .. } => {
                 let new_levels = self.subst_levels(levels, ks, vs);
-                if new_levels == levels { SPtr::closed(e) } else { self.mk_const(name, new_levels) }
+                if new_levels == levels { ExprPtr::closed(e) } else { self.mk_const(name, new_levels) }
             }
             App { fun, arg, .. } => {
                 let new_fun = self.subst_aux_sptr(fun, ks, vs);
                 let new_arg = self.subst_aux_sptr(arg, ks, vs);
-                if new_fun == fun && new_arg == arg { SPtr::from_nlbv(e, nlbv) } else { self.mk_app(new_fun, new_arg) }
+                if new_fun == fun && new_arg == arg { ExprPtr::from_nlbv(e, nlbv) } else { self.mk_app(new_fun, new_arg) }
             }
             Pi { binder_name, binder_style, binder_type, body, .. } => {
                 let new_type = self.subst_aux_sptr(binder_type, ks, vs);
                 let new_body = self.subst_aux_sptr(body, ks, vs);
-                if new_type == binder_type && new_body == body { SPtr::from_nlbv(e, nlbv) } else { self.mk_pi(binder_name, binder_style, new_type, new_body) }
+                if new_type == binder_type && new_body == body { ExprPtr::from_nlbv(e, nlbv) } else { self.mk_pi(binder_name, binder_style, new_type, new_body) }
             }
             Lambda { binder_name, binder_style, binder_type, body, .. } => {
                 let new_type = self.subst_aux_sptr(binder_type, ks, vs);
                 let new_body = self.subst_aux_sptr(body, ks, vs);
-                if new_type == binder_type && new_body == body { SPtr::from_nlbv(e, nlbv) } else { self.mk_lambda(binder_name, binder_style, new_type, new_body) }
+                if new_type == binder_type && new_body == body { ExprPtr::from_nlbv(e, nlbv) } else { self.mk_lambda(binder_name, binder_style, new_type, new_body) }
             }
             Let { binder_name, binder_type, val, body, nondep, .. } => {
                 let new_type = self.subst_aux_sptr(binder_type, ks, vs);
                 let new_val = self.subst_aux_sptr(val, ks, vs);
                 let new_body = self.subst_aux_sptr(body, ks, vs);
-                if new_type == binder_type && new_val == val && new_body == body { SPtr::from_nlbv(e, nlbv) } else { self.mk_let(binder_name, new_type, new_val, new_body, nondep) }
+                if new_type == binder_type && new_val == val && new_body == body { ExprPtr::from_nlbv(e, nlbv) } else { self.mk_let(binder_name, new_type, new_val, new_body, nondep) }
             }
             Local { .. } => panic!("level substitution should not find locals"),
             Proj { ty_name, idx, structure, .. } => {
                 let new_structure = self.subst_aux_sptr(structure, ks, vs);
-                if new_structure == structure { SPtr::from_nlbv(e, nlbv) } else { self.mk_proj(ty_name, idx, new_structure) }
+                if new_structure == structure { ExprPtr::from_nlbv(e, nlbv) } else { self.mk_proj(ty_name, idx, new_structure) }
             }
         };
         self.expr_cache.subst_cache.insert((e, ks, vs), r);
@@ -873,12 +873,12 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
 
     /// Helper for subst_aux: level substitution commutes with shifting,
     /// so recurse on child.core and preserve child.shift.
-    fn subst_aux_sptr(&mut self, child: SPtr<'t>, ks: LevelsPtr<'t>, vs: LevelsPtr<'t>) -> SPtr<'t> {
+    fn subst_aux_sptr(&mut self, child: ExprPtr<'t>, ks: LevelsPtr<'t>, vs: LevelsPtr<'t>) -> ExprPtr<'t> {
         let result = self.subst_aux(child.core, ks, vs);
         self.sptr_shift(result, child.shift)
     }
 
-    pub fn subst_expr_levels(&mut self, e: CorePtr<'t>, ks: LevelsPtr<'t>, vs: LevelsPtr<'t>) -> SPtr<'t> {
+    pub fn subst_expr_levels(&mut self, e: CorePtr<'t>, ks: LevelsPtr<'t>, vs: LevelsPtr<'t>) -> ExprPtr<'t> {
         if let Some(&cached) = self.expr_cache.dsubst_cache.get(&(e, ks, vs)) {
             return cached;
         }
@@ -893,7 +893,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         &mut self,
         info: crate::env::DeclarInfo<'t>,
         in_vals: LevelsPtr<'t>,
-    ) -> SPtr<'t> {
+    ) -> ExprPtr<'t> {
         self.subst_expr_levels(info.ty, info.uparams, in_vals)
     }
 
@@ -906,8 +906,8 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         num_args
     }
 
-    /// From `f a_0 .. a_N`, return `f` as SPtr.
-    pub fn unfold_apps_fun(&self, mut e: SPtr<'t>) -> SPtr<'t> {
+    /// From `f a_0 .. a_N`, return `f` as ExprPtr.
+    pub fn unfold_apps_fun(&self, mut e: ExprPtr<'t>) -> ExprPtr<'t> {
         loop {
             match self.read_expr(e.core) {
                 App { fun, .. } => {
@@ -924,8 +924,8 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
     }
 
     /// From `f a_0 .. a_N`, return `(f, [a_0, ..a_N])`.
-    /// Composes shifts through the App spine via SPtr arithmetic.
-    pub fn unfold_apps(&self, mut e: SPtr<'t>) -> (SPtr<'t>, AppArgs<'t>) {
+    /// Composes shifts through the App spine via ExprPtr arithmetic.
+    pub fn unfold_apps(&self, mut e: ExprPtr<'t>) -> (ExprPtr<'t>, AppArgs<'t>) {
         let mut args = AppArgs::new();
         loop {
             match self.read_expr(e.core) {
@@ -948,8 +948,8 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
     /// If this is a const application, return (head_sptr, name, levels, args)
     pub fn unfold_const_apps(
         &self,
-        e: SPtr<'t>,
-    ) -> Option<(SPtr<'t>, NamePtr<'t>, LevelsPtr<'t>, AppArgs<'t>)> {
+        e: ExprPtr<'t>,
+    ) -> Option<(ExprPtr<'t>, NamePtr<'t>, LevelsPtr<'t>, AppArgs<'t>)> {
         let (f, args) = self.unfold_apps(e);
         match self.read_expr(f.core) {
             Const { name, levels, .. } => Some((f, name, levels, args)),
@@ -965,7 +965,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
     }
 
     /// Like unfold_apps but returns args in reverse order (stack order).
-    pub(crate) fn unfold_apps_stack(&self, mut e: SPtr<'t>) -> (SPtr<'t>, AppArgs<'t>) {
+    pub(crate) fn unfold_apps_stack(&self, mut e: ExprPtr<'t>) -> (ExprPtr<'t>, AppArgs<'t>) {
         let mut args = AppArgs::new();
         loop {
             match self.read_expr(e.core) {
@@ -983,14 +983,14 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         (e, args)
     }
 
-    pub fn foldl_apps(&mut self, mut fun: SPtr<'t>, args: impl Iterator<Item = SPtr<'t>>) -> SPtr<'t> {
+    pub fn foldl_apps(&mut self, mut fun: ExprPtr<'t>, args: impl Iterator<Item = ExprPtr<'t>>) -> ExprPtr<'t> {
         for arg in args {
             fun = self.mk_app(fun, arg);
         }
         fun
     }
 
-    pub(crate) fn abstr_pis<I>(&mut self, mut binders: I, body: SPtr<'t>) -> SPtr<'t>
+    pub(crate) fn abstr_pis<I>(&mut self, mut binders: I, body: ExprPtr<'t>) -> ExprPtr<'t>
     where
         I: Iterator<Item = CorePtr<'t>> + DoubleEndedIterator, {
         let mut result = body;
@@ -1000,31 +1000,31 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         result
     }
 
-    pub(crate) fn abstr_pi(&mut self, binder: CorePtr<'t>, body: SPtr<'t>) -> SPtr<'t> {
+    pub(crate) fn abstr_pi(&mut self, binder: CorePtr<'t>, body: ExprPtr<'t>) -> ExprPtr<'t> {
         match self.read_expr(binder) {
             Local { binder_name, binder_style, binder_type, .. } => {
                 // Use abstr_aux_sptr to correctly handle body.shift.
                 // abstr(body.core, ...) would drop the shift, producing wrong var indices.
                 self.expr_cache.abstr_cache.clear();
                 let body = self.abstr_aux_sptr(body, &[binder], 0);
-                self.mk_pi(binder_name, binder_style, SPtr::closed(binder_type), body) // binder_type is CorePtr from Local
+                self.mk_pi(binder_name, binder_style, ExprPtr::closed(binder_type), body) // binder_type is CorePtr from Local
             }
             _ => unreachable!("Cannot apply pi with non-local domain type"),
         }
     }
 
-    pub(crate) fn apply_lambda(&mut self, binder: CorePtr<'t>, body: SPtr<'t>) -> SPtr<'t> {
+    pub(crate) fn apply_lambda(&mut self, binder: CorePtr<'t>, body: ExprPtr<'t>) -> ExprPtr<'t> {
         match self.read_expr(binder) {
             Local { binder_name, binder_style, binder_type, .. } => {
                 self.expr_cache.abstr_cache.clear();
                 let body = self.abstr_aux_sptr(body, &[binder], 0);
-                self.mk_lambda(binder_name, binder_style, SPtr::closed(binder_type), body) // binder_type is CorePtr from Local
+                self.mk_lambda(binder_name, binder_style, ExprPtr::closed(binder_type), body) // binder_type is CorePtr from Local
             }
             _ => unreachable!("Cannot apply lambda with non-local domain type"),
         }
     }
     
-    pub(crate) fn is_nat_zero(&mut self, e: SPtr<'t>) -> bool {
+    pub(crate) fn is_nat_zero(&mut self, e: ExprPtr<'t>) -> bool {
         // NatLit and Const are closed (nlbv=0), so shift is irrelevant
         match self.read_expr(e.core) {
             Const { .. } => self.c_nat_zero().map(|z| z == e.core).unwrap_or(false),
@@ -1033,10 +1033,10 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         }
     }
 
-    pub(crate) fn pred_of_nat_succ(&mut self, e: SPtr<'t>) -> Option<SPtr<'t>> {
+    pub(crate) fn pred_of_nat_succ(&mut self, e: ExprPtr<'t>) -> Option<ExprPtr<'t>> {
         match self.read_expr(e.core) {
             App { fun, arg, .. } => {
-                // fun is SPtr; Nat.succ is a Const (closed), so fun.shift doesn't matter
+                // fun is ExprPtr; Nat.succ is a Const (closed), so fun.shift doesn't matter
                 let succ = self.c_nat_succ()?;
                 if fun.core == succ {
                     Some(self.sptr_shift(arg, e.shift))
@@ -1059,21 +1059,21 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
     /// Used in iota reduction (`reduce_rec`) to turn a bignum
     /// either `Nat.zero`, or `App (Nat.succ) (bignum - 1)`; in order to do iota reduction,
     /// we need to know what constructor the major premise comes from.
-    pub(crate) fn nat_lit_to_constructor(&mut self, n: BigUintPtr<'t>) -> Option<SPtr<'t>> {
+    pub(crate) fn nat_lit_to_constructor(&mut self, n: BigUintPtr<'t>) -> Option<ExprPtr<'t>> {
         assert!(self.export_file.config.nat_extension);
         let n = self.read_bignum(n).unwrap();
         if n.is_zero() {
-            self.c_nat_zero().map(SPtr::closed)
+            self.c_nat_zero().map(ExprPtr::closed)
         } else {
             let pred = self.alloc_bignum(core::ops::Sub::sub(n, 1u8)).unwrap();
             let pred = self.mk_nat_lit(pred).unwrap();
             let succ_c = self.c_nat_succ()?;
-            Some(self.mk_app(SPtr::closed(succ_c), pred))
+            Some(self.mk_app(ExprPtr::closed(succ_c), pred))
         }
     }
     
     /// Check if `e` is an application of a specific constant with the given arity.
-    /// With SPtr children, just follow the App.fun spine ignoring shifts.
+    /// With ExprPtr children, just follow the App.fun spine ignoring shifts.
     pub(crate) fn is_app_of_const(&self, e: CorePtr<'t>, name: NamePtr<'t>, arity: usize) -> bool {
         let mut cur = e;
         for _ in 0..arity {
@@ -1092,7 +1092,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
     }
 
     /// Convert a string literal to `String.ofList <| List.cons (Char.ofNat _) .. List.nil`
-    pub(crate) fn str_lit_to_constructor(&mut self, s: StringPtr<'t>) -> Option<SPtr<'t>> {
+    pub(crate) fn str_lit_to_constructor(&mut self, s: StringPtr<'t>) -> Option<ExprPtr<'t>> {
         if (!self.export_file.config.string_extension) || (!self.export_file.config.nat_extension) {
             return None
         }
@@ -1129,7 +1129,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
     }
 
     /// If `e` is a NatLit, or `Const Nat.zero []`, return the appropriate Bignum.
-    pub(crate) fn get_bignum_from_expr(&mut self, e: SPtr<'t>) -> Option<BigUint> {
+    pub(crate) fn get_bignum_from_expr(&mut self, e: ExprPtr<'t>) -> Option<BigUint> {
         // NatLit and Const are closed, shift irrelevant
         match self.read_expr(e.core) {
             NatLit { ptr, .. } => self.read_bignum(ptr).cloned(),
@@ -1144,7 +1144,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         }
     }
 
-    pub(crate) fn get_bignum_succ_from_expr(&mut self, e: SPtr<'t>) -> Option<SPtr<'t>> {
+    pub(crate) fn get_bignum_succ_from_expr(&mut self, e: ExprPtr<'t>) -> Option<ExprPtr<'t>> {
         match self.read_expr(e.core) {
             NatLit { ptr, .. } => {
                 self.mk_nat_lit_quick(self.read_bignum(ptr)? + 1usize)
@@ -1161,7 +1161,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
     }
 
     /// Return the expression representing either `true` or `false`
-    pub(crate) fn bool_to_expr(&mut self, b: bool) -> Option<SPtr<'t>> {
+    pub(crate) fn bool_to_expr(&mut self, b: bool) -> Option<ExprPtr<'t>> {
         if b {
             self.c_bool_true()
         } else {
@@ -1169,13 +1169,13 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         }
     }
 
-    pub(crate) fn c_bool_true(&mut self) -> Option<SPtr<'t>> {
+    pub(crate) fn c_bool_true(&mut self) -> Option<ExprPtr<'t>> {
         let n = self.export_file.name_cache.bool_true?;
         let levels = self.alloc_levels_slice(&[]);
         Some(self.mk_const(n, levels))
     }
 
-    pub(crate) fn c_bool_false(&mut self) -> Option<SPtr<'t>> {
+    pub(crate) fn c_bool_false(&mut self) -> Option<ExprPtr<'t>> {
         let n = self.export_file.name_cache.bool_false?;
         let levels = self.alloc_levels_slice(&[]);
         Some(self.mk_const(n, levels))
@@ -1195,14 +1195,14 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
     }
 
     /// Make `Const("Nat", [])`
-    pub(crate) fn nat_type(&mut self) -> Option<SPtr<'t>> {
+    pub(crate) fn nat_type(&mut self) -> Option<ExprPtr<'t>> {
         let n = self.export_file.name_cache.nat?;
         let levels = self.alloc_levels_slice(&[]);
         Some(self.mk_const(n, levels))
     }
 
     /// Make `Const("String", [])`
-    pub(crate) fn string_type(&mut self) -> Option<SPtr<'t>> {
+    pub(crate) fn string_type(&mut self) -> Option<ExprPtr<'t>> {
         let n = self.export_file.name_cache.string?;
         let levels = self.alloc_levels_slice(&[]);
         Some(self.mk_const(n, levels))
@@ -1212,7 +1212,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
     /// telescope while backing out.
     ///
     /// `[a, b, c], e` ~> `(fun (a b c) => e)`
-    pub(crate) fn abstr_lambda_telescope(&mut self, mut binders: &[CorePtr<'t>], body: SPtr<'t>) -> SPtr<'t> {
+    pub(crate) fn abstr_lambda_telescope(&mut self, mut binders: &[CorePtr<'t>], body: ExprPtr<'t>) -> ExprPtr<'t> {
         let mut result = body;
         while let [tl @ .., binder] = binders {
             result = self.apply_lambda(*binder, result);
@@ -1225,7 +1225,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
     /// telescope while backing out.
     ///
     /// `[a, b, c], e` ~> `(Pi (a b c) => e)`
-    pub(crate) fn abstr_pi_telescope(&mut self, mut binders: &[CorePtr<'t>], body: SPtr<'t>) -> SPtr<'t> {
+    pub(crate) fn abstr_pi_telescope(&mut self, mut binders: &[CorePtr<'t>], body: ExprPtr<'t>) -> ExprPtr<'t> {
         let mut result = body;
         while let [tl @ .., binder] = binders {
             result = self.abstr_pi(*binder, result);
@@ -1266,7 +1266,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
     }
 
     /// Return the number of leading `Pi` binders on this expression.
-    pub(crate) fn pi_telescope_size(&mut self, mut e: SPtr<'t>) -> u16 {
+    pub(crate) fn pi_telescope_size(&mut self, mut e: ExprPtr<'t>) -> u16 {
         let mut size = 0u16;
         loop {
             match self.read_expr(e.core) {
@@ -1289,9 +1289,9 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
     }
 
     /// Make `Sort(Level::Zero)` (Prop).
-    pub(crate) fn prop(&mut self) -> SPtr<'t> { self.mk_sort(self.zero()) }
+    pub(crate) fn prop(&mut self) -> ExprPtr<'t> { self.mk_sort(self.zero()) }
 
-    pub fn get_nth_pi_binder(&mut self, mut e: SPtr<'t>, n: usize) -> Option<SPtr<'t>> {
+    pub fn get_nth_pi_binder(&mut self, mut e: ExprPtr<'t>, n: usize) -> Option<ExprPtr<'t>> {
         for _ in 0..n {
             match self.read_expr(e.core) {
                 Pi { body, .. } => {
@@ -1317,7 +1317,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
     /// Get the name of the inductive type which is the major premise for this recursor
     /// by finding the correct binder in the recursor's type.
     pub fn get_major_induct(&mut self, rec: &crate::env::RecursorData<'t>) -> Option<NamePtr<'t>> {
-        let binder = self.get_nth_pi_binder(SPtr::closed(rec.info.ty), rec.major_idx());
+        let binder = self.get_nth_pi_binder(ExprPtr::closed(rec.info.ty), rec.major_idx());
         match binder.map(|x| { let f = self.unfold_apps_fun(x); self.read_expr(f.core) }) {
             Some(Const { name, .. }) => Some(name),
             _ => None
@@ -1337,8 +1337,8 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
 
     pub(crate) fn has_fvars(&self, e: CorePtr<'t>) -> bool { self.read_expr(e).has_fvars() }
 
-    /// With SPtr, fvar_lb of a DAG CorePtr is always 0 (cores are OSNF-normalized).
-    /// The effective fvar_lb of an SPtr is sptr.shift.
+    /// With ExprPtr, fvar_lb of a DAG CorePtr is always 0 (cores are OSNF-normalized).
+    /// The effective fvar_lb of an ExprPtr is sptr.shift.
     #[inline(always)]
     pub(crate) fn fvar_lb(&self, _e: CorePtr<'t>) -> u16 {
         0
@@ -1348,7 +1348,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
 
 impl<'t> Expr<'t> {
     /// The number of "loose" bound variables in this core expression.
-    /// For compound expressions with SPtr children, this accounts for children's shifts.
+    /// For compound expressions with ExprPtr children, this accounts for children's shifts.
     pub(crate) fn num_loose_bvars(&self) -> u16 {
         match self {
             Sort { .. } | Const { .. } | Local { .. } | StringLit { .. } | NatLit { .. } => 0,
