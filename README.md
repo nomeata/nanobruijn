@@ -42,27 +42,31 @@ binder is free (no substitution), but looking up a bound variable in the
 environment requires adjusting (shifting) the retrieved value to account for the
 difference in binding depth.
 
-### Shift nodes (lazy shifting)
+### Lazy shifting via pointer+offset pairs (`ExprPtr`)
 
-Rather than eagerly shifting every subexpression, nanobruijn wraps retrieved values
-in a `Shift(n, expr)` node that records the pending adjustment. Shifts compose:
-`Shift(a, Shift(b, e))` becomes `Shift(a+b, e)`. Shifts are pushed inward
-lazily during whnf normalization.
+Rather than eagerly shifting every subexpression, every pointer into the
+expression DAG is an `ExprPtr = (CorePtr, u16 shift)` pair. `ExprPtr(p, k)`
+denotes the expression at `p` with all free variable indices increased by `k`.
+There are no explicit `Shift` DAG nodes; shifts are "carried" in the pointer.
+Shifting is O(1) "pointer arithmetic". Shifts compose directly at composition
+sites (`e.shift_up(k)`). Closed expressions use a sentinel `shift = u16::MAX`
+so `is_closed()` is an O(1) field test.
 
 ### Shift-homomorphic caching
 
-The whnf cache uses keys that are invariant under shifting: if `whnf(e) = v`,
-then `whnf(Shift(n, e)) = Shift(n, v)`. This means a single cache entry serves
-all shifted variants of an expression, giving cross-depth cache hits that the
-locally-nameless approach cannot achieve.
+Caches are keyed by `CorePtr` (the DAG pointer alone) with the shift handled
+separately: if `whnf(e) = v`, then `whnf(e.shift_up(k)) = v.shift_up(k)`.
+A single cache entry serves all shifted variants of an expression, giving
+cross-depth cache hits that the locally-nameless approach cannot achieve.
+Per-depth cache buckets (`bucket = depth - shift`) are used for open
+expressions; closed expressions live in a single global bucket.
 
 ### Parse-time OSNF (Outermost-Shift Normal Form)
 
-Expressions are normalized at parse time into OSNF: every DAG node is either a
-bare `bvar`, a "core" (compound expression with `fvar_lb = 0`), or
-`Shift(n, core)` wrapping a core. Expressions that differ only by a uniform
-shift of their free variable indices share the same core in the DAG, with only
-the shift amount differing. Shifting an OSNF expression is O(1).
+Expressions are normalized at parse time into OSNF: in every compound DAG
+node, the minimum shift among open children is 0. Expressions that differ
+only by a uniform shift of their free variable indices share the same core
+in the DAG, with only the shift amount differing in the outer `ExprPtr`.
 
 A literature search found no established name for this specific normal form,
 though it sits at the intersection of several well-studied ideas:
@@ -96,9 +100,10 @@ See `Theory.lean` for a formalization of OSNF and its uniqueness property.
 
 ## Current status
 
-nanobruijn successfully type-checks all of Mathlib with 0 errors and 0 timeouts.
-It is approximately 1.7x slower than the original nanoda. See `PLAN.md` for
-detailed benchmark data and analysis of the performance gap.
+nanobruijn successfully type-checks all of Mathlib (670k declarations) with
+0 errors and 0 timeouts. See
+[arena results](https://arena.lean-lang.org/) for up-to-date cross-checker
+performance comparison, and `PLAN.md` for design history.
 
 ## Building and running
 

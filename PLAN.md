@@ -23,31 +23,54 @@ We use a local context array with `push_local`/`pop_local` (zero allocation).
 - `lookup_var` retrieves types from `local_ctx[depth - 1 - idx]` and shifts to current depth
 - `inductive.rs`/`quot.rs` still use old Local approach (works correctly)
 
-### SPtr: Shift-in-pointer (replacing Shift DAG nodes)
+### ExprPtr: Shift-in-pointer (replacing Shift DAG nodes)
 
-No `Shift` variant in the Expr enum. Instead, `SPtr = (CorePtr, u16)` carries the shift
-inline. The DAG only stores core expressions. `SPtr(ptr, k)` represents `shift(dag[ptr], k, 0)`.
+No `Shift` variant in the Expr enum. Instead, `ExprPtr = (CorePtr, u16)` carries the
+shift inline. The DAG only stores core expressions (indexed by `CorePtr`).
+`ExprPtr(p, k)` represents `shift(dag[p], k, 0)`.
 
-- `SPtr::CLOSED_SHIFT = u16::MAX`: Sentinel for closed expressions (nlbv=0). Acts as
+- `ExprPtr::CLOSED_SHIFT = u16::MAX`: Sentinel for closed expressions (nlbv=0). Acts as
   +infinity in min calculations. Strict invariant: shift=0 means OPEN at depth 0,
   CLOSED_SHIFT means closed. Enforced by `osnf_adj` (panics on violation).
-- `SPtr::closed(core)`, `SPtr::unshifted(core)`, `SPtr::new(core, k)`, `SPtr::from_nlbv(core, nlbv)`:
-  Constructors for different cases. `from_nlbv` checks nlbv to pick closed vs open.
-- `sptr_shift(e, amount)`: O(1) shift composition. No-op for closed (is_closed() check).
-- `view_sptr(e)`: if shift=0 or closed, returns read_expr directly. Otherwise adjusts
-  children by composing shifts. Non-binder children: O(1). Binder bodies: full traversal via
-  shift_expr_aux_sptr (cached).
+- `ExprPtr::closed(core)`, `ExprPtr::unshifted(core)`, `ExprPtr::new(core, k)`,
+  `ExprPtr::from_nlbv(core, nlbv)`: constructors for different cases. `from_nlbv`
+  checks nlbv to pick closed vs open. `unshifted` is only for verified-open expressions.
+- `e.shift_up(amount)`: O(1) shift composition. No-op for closed (is_closed() check).
+- `e.adjust_depth(from, to)`: depth-aware shift adjustment for UF and cache operations.
+  Handles closed expressions transparently.
+- `view_expr(e)`: if shift=0 or closed, returns `read_expr` directly. Otherwise adjusts
+  children by composing shifts. Non-binder children: O(1). Binder bodies: full traversal
+  via `shift_expr_aux` (cached). EXPENSIVE for Pi/Lambda/Let with shift > 0.
 - `osnf_adj(nlbv, amount)`: OSNF child adjustment. Normalizes closed children (nlbv=0) to
   CLOSED_SHIFT. Panics if invariant violated. Used in all mk_* constructors.
-- `adjust_depth(from, to)`: Depth-aware shift adjustment for UF and cache operations.
-  Handles closed expressions transparently.
-- `mk_shift(inner, amount)`: Returns SPtr::closed for closed cores, SPtr::new otherwise.
-- `unfold_apps`: Checks is_closed()/shift==0 per-iteration to avoid unnecessary sptr_shift.
+- `mk_shift(inner, amount)`: returns ExprPtr::closed for closed cores, ExprPtr::new otherwise.
+- `unfold_apps`: checks is_closed()/shift==0 per-iteration to avoid unnecessary shift_up.
 - **OSNF for cores**: min(open_child.shift) == 0. CLOSED_SHIFT children act as infinity in min.
 
 **Shift composition in inst_aux**: `inst_aux` carries pending shift `(sh_amt, sh_cut)`.
-SPtr children's shifts compose with the pending shift: if `child.shift >= sh_cut`,
-clean composition. Otherwise, view_sptr fallback.
+Children's shifts compose with the pending shift: if `child.shift >= sh_cut`, clean
+composition. Otherwise, `view_expr` fallback.
+
+### Cheap head checks (view_expr discipline)
+
+`view_expr` is expensive for Pi/Lambda/Let with `shift > 0` — it performs a full
+body-traversal to compose shifts under cutoff=1. To avoid this when only the head
+constructor or a subset of children is needed:
+
+- **`is_app/is_pi/is_lambda/is_let/is_sort/is_const/is_proj/is_var/is_local/is_nat_lit/is_string_lit`**:
+  O(1) tag checks via `read_expr` — no shift work (tag is shift-invariant).
+- **`view_app`**: returns `Option<(fun, arg)>`. App children only need `shift_up` (O(1)).
+- **`view_proj`, `view_const`, `view_var`**: partial views for non-binder forms.
+- **`view_pi_head`, `view_lambda_head`**: return `(name, style, binder_type)` without
+  composing body shifts. Skips the expensive binder-body traversal.
+- **`read_expr`**: when the DAG tag suffices (e.g., `is_sort_zero`) or when we know
+  `e.shift == 0 || e.is_closed()` (e.g., after the peel path in `infer_inner`), use
+  `read_expr(e.core)` directly — shift work is unnecessary.
+
+Discipline: prefer `is_*` for tag checks, `view_*_head`/`view_*` for partial views, and
+`read_expr` in post-peel code; reserve `view_expr` for places that genuinely need the
+full shift-composed view (e.g., binder body traversal in `infer_pi`/`infer_lambda`,
+Lambda beta reduction in `whnf_no_unfolding`).
 
 ### Pointer equality (replacing sem_eq)
 
@@ -75,60 +98,46 @@ zeta returns the original `val` pointer.
 
 ### Pointer-based caching (nanoda style)
 
-All caches are keyed by `ExprPtr` (pointer identity via hash-consing). No semantic
+All caches are keyed by `CorePtr` (DAG pointer identity via hash-consing). No semantic
 equality verification needed — pointer equality is exact.
 
-Each expression stores `fvar_lb: u16` (lower bound on free bvar indices). Caches use
-depth-indexed frames: `bucket_idx = depth - fvar_lb`. Bucket 0 holds closed expressions
-(never evicted); higher buckets are pushed/popped with local context.
+Caches use depth-indexed frames: for an open `ExprPtr(core, shift)` at current depth
+`d`, `bucket_idx = d - shift`. Bucket 0 holds closed expressions (shift=CLOSED_SHIFT,
+never evicted); higher buckets are pushed/popped with local context. Shifting a cached
+result to a query depth is O(1) via `shift_up`.
 
-**WHNF cache**: `FxHashMap<ExprPtr, ExprPtr>` per depth bucket. Shift-peels top-level
-Shifts before lookup (shift-equivariance).
+**WHNF cache**: `FxHashMap<CorePtr, ExprPtr>` per depth bucket. On lookup with shifted
+input, we peel the shift, look up the core, and shift the result back. A single cache
+entry serves all shifted variants.
 
 **Infer cache**: Separate check/no-check maps per depth bucket. Check entries serve
 both Check and InferOnly queries.
 
-**DefEq cache (closed)**: `FxHashSet<(ExprPtr, ExprPtr)>` for positive results.
-`UnionFind<ExprPtr>` provides transitive equality in O(α(n)).
-
-**DefEq cache (open)**: Per-depth positive/negative stacks (LazyMap per frame).
+**DefEq cache**: Per-depth positive/negative maps (keyed on normalized ExprPtr pairs).
+`UnionFind<ExprPtr>` provides transitive equality with depth-stratified unions — unions
+proven at higher depths live in higher buckets and are discarded on pop.
 
 ### OSNF (Outermost-Shift Normal Form) — everywhere
 
-Every expression in the DAG is in exactly one of these forms:
-1. **Var(n)**: variable reference
-2. **Core compound** (App, Pi, Lambda, Let, Proj, Sort, Const, Lit): always `fvar_lb = 0`
-3. **Shift(n, core)**: `n > 0`, `core.fvar_lb = 0`
+Every DAG node is a "core" expression. Compound cores (App, Pi, Lambda, Let, Proj)
+satisfy the OSNF invariant: the minimum shift among their open children is 0.
+Closed children use shift=CLOSED_SHIFT which acts as +infinity in min calculations.
+Var(0) is the only Var in the DAG; Var(k) = ExprPtr(var0_ptr, k).
 
-No negative shifts. No cutoff field on Shift. No compound expressions with `fvar_lb > 0`.
-Pointer equality is reliable: same structural expression → same pointer.
+Pointer equality on `ExprPtr` is reliable: two expressions that differ only by a
+uniform shift share the same core, and have the same `ExprPtr` if and only if they
+have the same shift too. Hash-consing keys (`Expr`) include the shift of each
+child, so cores with differently-shifted children are distinct.
 
 **Enforcement**: Both at parse time and during TC. The `mk_app`/`mk_pi`/`mk_lambda`/
-`mk_let`/`mk_proj` constructors all check `fvar_lb` after computing it from children.
-If > 0, they extract a core (adjusting children down via `adjust_child_tc`) and wrap in
-`Shift(fvar_lb, core)`. `adjust_child_tc` is O(1) per child under OSNF since children
-with `nlbv > cutoff` must be `Shift(k, core)` or `Var(j)` with `k, j >= amount`.
+`mk_let`/`mk_proj` constructors compute `min_shift` across open children, adjust
+each open child via `osnf_adj(nlbv, min_shift)`, and return the core paired with
+`min_shift` in the outer `ExprPtr`. `osnf_adj` enforces the CLOSED_SHIFT invariant
+(closed children keep CLOSED_SHIFT) and panics on violation.
 
-**view_expr migration**: All code that pattern-matches expression constructors (Pi, Lambda,
-App, Proj) must use `view_expr` instead of `read_expr`, since OSNF wraps open expressions
-in Shift nodes that `read_expr` doesn't see through. This applies to:
-- `inductive.rs`: get_local_params, check_ctor, sep_nonrec_rec_ctor_args, etc.
-- `nanoda_tc.rs`: infer_lambda, infer_pi, infer_app, def_eq_binder_aux, etc.
-- `tc.rs`: ensure_pi, whnf_no_unfolding_aux, def_eq_binder_multi, def_eq_proj, etc.
-- `expr.rs`: abstr_aux_body, abstr_aux_levels_body, pi_telescope_size
-
-**Fixpoint issue**: `push_shift_up(core_Pi, k)` can produce `Shift(k, core_Pi)` — the
-same expression — when OSNF normalization in mk_pi re-wraps the result. Code that forces
-Shifts via push_shift_up and then matches via read_expr must instead use `view_expr` to
-avoid infinite loops.
-
-**Parse-time core extraction**: During parsing, `adjust_child(child, fvar_lb, cutoff)`
-extracts cores. Uses `expr_remap: Vec<usize>` for sequential-to-DAG index mapping.
-
-**Results** (parse-time + TC enforcement, Init benchmark, single-thread):
-- 2.9M of 5.7M parser expressions normalized, 10% core dedup → 7.8M DAG entries
-- **Init: 26.7s vs nanoda 34.0s (22% faster), 587MB vs 471MB (+24% memory)**
-- Parse-time only (full Mathlib): 47M of 88M normalized, -7% time, +18% RSS
+**view_expr discipline**: see the "Cheap head checks" section above. `view_expr`
+performs body-traversal for Pi/Lambda/Let with shift>0, so prefer `is_*`/`view_*_head`
+for tag checks and partial views, and `read_expr` when post-peel guarantees shift=0.
 
 ### Speculative app congruence in def_eq
 
@@ -147,42 +156,40 @@ was a no-op.
 
 ### Shift-down-only optimization in inst_aux
 
-When inst_aux detects all free bvars are past the substitution range
-(`fvar_lb >= offset + n_substs`), delegates to persistently-cached
+When `inst_aux` detects all free bvars are past the substitution range
+(via `nlbv` checks), delegates to persistently-cached
 `push_shift_down_cutoff(e, n_substs, offset)` instead of traversing. Guard:
 `n_substs >= 4` (lower thresholds regress due to HashMap overhead outweighing savings).
-Fixed worst outliers: #298261 from 11.5s to 830ms, #357120 from 2.3s to 85ms.
 
 ### OSNF dead-substitution in inst_aux_quick and inst/inst_beta
 
-Under OSNF, `fvar_lb` directly tells us the minimum free variable index. When
-`fvar_lb >= offset + n_substs`, ALL substituted variables are dead — no variable gets
-substituted. This is O(1) for Shift and Var nodes (push_shift_down or identity).
+The ExprPtr's shift directly tells us the minimum free variable index (for open
+expressions). When `e.shift >= n_substs`, ALL substituted variables are dead — no
+variable gets substituted, which is O(1).
 
 Three levels of the check:
-1. **inst_beta/inst top level**: if `fvar_lb(e) >= n_substs`, short-circuit before entering
-   inst_aux entirely. For inst_beta: `push_shift_down(e, n_substs)`. For inst: return `e`.
-2. **inst_aux_quick sh_amt==0**: on per-depth cache miss, check fvar_lb. Catches all Shift
-   children in single-arg beta reduction (the common case), since Shift implies fvar_lb ≥ 1.
-3. **inst_aux_quick sh_amt>0**: when `fvar_lb > sh_cut`, compute effective_fvar_lb and check.
+1. **inst_beta/inst top level**: if `e.shift >= n_substs`, short-circuit before entering
+   inst_aux entirely. For inst_beta: return `ExprPtr::new(e.core, e.shift - n_substs)`.
+   For inst: return `e`.
+2. **inst_aux_quick sh_amt==0**: on per-depth cache miss, check `nlbv <= offset`.
+3. **inst_aux_quick sh_amt>0**: when the shifted nlbv falls below offset.
 
-Also: `expr_fvar_lb: Vec<u16>` parallel array (like `expr_nlbv`) for O(1) fvar_lb access
-without reading the full Expr. inst_cache enlarged from 4096 to 64K entries.
-
-**Impact**: Declaration #272519 from 48.5s → 28.5s (41% faster). inst_aux calls 398M → 280M.
-Full Mathlib panics: 6 → 5 (borderline declarations still ~28-30s vs 30s timeout).
+The `expr_nlbv: Vec<u16>` parallel array provides O(1) nlbv access without reading
+the full Expr. `inst_cache` is a 64K-entry direct-mapped cache.
 
 ### Pre-peel cache for infer/whnf/wnu
 
-Before peeling Shift(core, n) at depth d (expensive split_off/extend), check if core's
-result is already cached at the inner depth d-n. If so, shift the cached result and return
-without peeling. Eliminates >99% of infer/whnf peels and 67% of wnu peels.
+Before peeling `ExprPtr(core, n)` at depth d (expensive `split_off`/`extend`), check
+if the core's result is already cached at the inner depth d-n. If so, shift the cached
+result via `shift_up(n)` and return without peeling. Eliminates >99% of infer/whnf
+peels and 67% of wnu peels.
 
 ### inst_aux_quick fast path
 
-Inlined `#[inline(always)]` wrapper that checks nlbv and fvar_lb early exits before calling
-the full inst_aux (which involves stacker::maybe_grow + cache lookup). Avoids ~24M+ function
-calls for trivial cases (closed expressions, nlbv below offset, dead substitutions).
+Inlined `#[inline(always)]` wrapper that checks nlbv early-exits before calling the
+full inst_aux (which involves `stacker::maybe_grow` + cache lookup). Avoids ~24M+
+function calls for trivial cases (closed expressions, nlbv below offset, dead
+substitutions).
 
 ### Infrastructure
 
@@ -479,30 +486,24 @@ cascading cache misses → repeated whnf/infer → more expression creation → 
 
 ## TODO
 
-- **OSNF everywhere (including TC-generated expressions)**: Use OSNF even for TC-generated
-  expressions, not just parser expressions. Without this, pointer equality doesn't work
-  reliably (same structural expression can have different pointers if fvar_lb differs).
-  This is the most likely fix for the memory regression — cache misses cause repeated
-  computation, which creates more TC DAG entries.
+- **OSNF everywhere (including TC-generated expressions)**: DONE. Parse-time and
+  TC-generated expressions both go through `osnf_adj` in the mk_* constructors.
+  Pointer equality via `CorePtr` is reliable.
 
-- **SExprPtr instead of Shift constructor**: Replace the Shift expression variant entirely
-  with a shifted pointer type `SExprPtr = (ExprPtr, u16)` used in recursive Expr positions.
-  An `Expr` is always a core expression. Benefits:
-  - Less allocation for Shift nodes (no DAG entries for Shifts)
-  - Fewer entries in the DAGs
-  - Caches only cache core expressions anyway
+- **ExprPtr instead of Shift constructor**: DONE. `Shift` variant removed from the
+  `Expr` enum; shifts carried in the outer `ExprPtr = (CorePtr, u16)` pair. No DAG
+  entries for Shifts.
 
-- **Optimize view_expr usage**: Don't use view_expr when only checking closed constructors
-  (Sort, Const, NatLit) — these can never be Shift-wrapped, so read_expr suffices.
-  Use `is_app_of_const(e, name, arity)` pattern (peel Shift+App via read_expr without
-  pushing shifts) instead of view_expr chains for simple head-const checks.
-  Cache unfold_apps results for heavy declarations (lazily allocated, like mk_app DM cache).
+- **Optimize view_expr usage**: DONE. Added cheap `is_*` head checks and `view_*`
+  partial views (view_app, view_proj, view_const, view_var, view_pi_head,
+  view_lambda_head). Hot paths in `def_eq_binder_multi`, `spec_app_congruence`,
+  `ensure_pi`, `ensure_sort`, `try_eta_expansion`, `infer_inner`,
+  `whnf_no_unfolding_aux`, `is_sort_zero`, Quot iota, inductive restore paths
+  converted to use these instead of `view_expr`.
 
-- **fvar_lb removal**: If all expressions are in OSNF, then fvar_lb is derivable:
-  - Var(k) → fvar_lb = k
-  - Shift(n, core) → fvar_lb = n (core has fvar_lb = 0)
-  - Core compound → fvar_lb = 0
-  So fvar_lb could be removed as a stored field, shrinking Expr.
+- **fvar_lb removal**: DONE. `fvar_lb` field removed from Expr. Shift info is
+  in the outer `ExprPtr`; Expr's `num_loose_bvars` (a parallel array) serves
+  for quick nlbv lookup.
 
 - **Depth-stacked UF for def_eq**: DONE. Cross-shift weighted UF with per-depth buckets
   in DepthFrame. Unions for closed expressions go to bucket 0; open expressions to
@@ -529,11 +530,19 @@ cascading cache misses → repeated whnf/infer → more expression creation → 
 
 ## Current performance
 
+Local measurements (single-thread, release build):
+
 | | Init | Mathlib |
 |---|---|---|
-| **nanoda (baseline)** | 227B | ~19.2T |
-| **nanobruijn (current)** | 237B | 11.5T |
-| **speedup** | 0.96x | **1.67x** |
+| nanobruijn (2026-04-18) | 242B | 11.0T |
+| nanobruijn (pre-CLOSED_SHIFT, 2026-04-15) | 238B | ~11.5T |
+| Nanoda Init baseline | 227B | — |
+
+Note: earlier comparisons claiming a large speedup over nanoda on Mathlib were
+incorrect (mis-remembered nanoda number). For up-to-date cross-checker comparisons,
+see [arena results](https://arena.lean-lang.org/).
+
+### TODOs
 
 - **Fill in Theory.lean sorry's**: OSNF uniqueness, erase preservation
 - **Remove remaining dead code**: thread_local profiling counters, dead locally-nameless
