@@ -160,7 +160,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
                     } else if body.shift >= 1 && !body.is_closed() {
                         // body.shift >= 1 means all vars in body.core are >= 1,
                         // so cutoff=1 is irrelevant — uniform shift composition
-                        e = self.sptr_shift(body, e.shift);
+                        e = body.shift_up(e.shift);
                     } else if body.is_closed() {
                         e = body;
                     } else {
@@ -256,7 +256,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
                     let rel_idx = shifted_idx - offset;
                     if rel_idx < n_substs {
                         let val = substs[substs.len() - 1 - rel_idx as usize];
-                        self.sptr_shift(val, offset)
+                        val.shift_up(offset)
                     } else if shift_down {
                         self.mk_var(shifted_idx - n_substs)
                     } else {
@@ -457,7 +457,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
                     let rel_idx = shifted_idx - offset;
                     if rel_idx < n_substs {
                         let val = substs[substs.len() - 1 - rel_idx as usize];
-                        self.sptr_shift(val, offset)
+                        val.shift_up(offset)
                     } else if shift_down {
                         self.mk_var(shifted_idx - n_substs)
                     } else {
@@ -570,7 +570,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         // If child.shift >= cutoff, the cutoff is irrelevant for child.core's vars —
         // just add amount to the child's shift.
         if child.shift >= cutoff {
-            return self.sptr_shift(child, amount);
+            return child.shift_up(amount);
         }
         // Otherwise, we need to traverse child.core with adjusted cutoff.
         let new_cutoff = cutoff - child.shift;
@@ -658,7 +658,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         // Adjust offset down to compensate, then reapply child.shift to result.
         if offset >= child.shift {
             let result = self.abstr_aux(child.core, locals, offset - child.shift);
-            self.sptr_shift(result, child.shift)
+            result.shift_up(child.shift)
         } else {
             // offset < child.shift: materialize via view_sptr and recurse
             let viewed = self.view_sptr(child);
@@ -771,7 +771,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         // Adjust num_open_binders by child.shift (same logic as abstr_aux_sptr)
         if num_open_binders >= child.shift {
             let result = self.abstr_aux_levels(child.core, start_pos, num_open_binders - child.shift);
-            self.sptr_shift(result, child.shift)
+            result.shift_up(child.shift)
         } else {
             // Fallback: materialize and recurse
             let viewed = self.view_sptr(child);
@@ -875,7 +875,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
     /// so recurse on child.core and preserve child.shift.
     fn subst_aux_sptr(&mut self, child: ExprPtr<'t>, ks: LevelsPtr<'t>, vs: LevelsPtr<'t>) -> ExprPtr<'t> {
         let result = self.subst_aux(child.core, ks, vs);
-        self.sptr_shift(result, child.shift)
+        result.shift_up(child.shift)
     }
 
     pub fn subst_expr_levels(&mut self, e: CorePtr<'t>, ks: LevelsPtr<'t>, vs: LevelsPtr<'t>) -> ExprPtr<'t> {
@@ -914,7 +914,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
                     if e.is_closed() || e.shift == 0 {
                         e = fun;
                     } else {
-                        e = self.sptr_shift(fun, e.shift);
+                        e = fun.shift_up(e.shift);
                     }
                 }
                 _ => break,
@@ -934,8 +934,8 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
                         args.push(arg);
                         e = fun;
                     } else {
-                        args.push(self.sptr_shift(arg, e.shift));
-                        e = self.sptr_shift(fun, e.shift);
+                        args.push(arg.shift_up(e.shift));
+                        e = fun.shift_up(e.shift);
                     }
                 }
                 _ => break,
@@ -973,8 +973,8 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
                     if e.is_closed() || e.shift == 0 {
                         args.push(arg); e = fun;
                     } else {
-                        args.push(self.sptr_shift(arg, e.shift));
-                        e = self.sptr_shift(fun, e.shift);
+                        args.push(arg.shift_up(e.shift));
+                        e = fun.shift_up(e.shift);
                     }
                 }
                 _ => break,
@@ -1039,7 +1039,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
                 // fun is ExprPtr; Nat.succ is a Const (closed), so fun.shift doesn't matter
                 let succ = self.c_nat_succ()?;
                 if fun.core == succ {
-                    Some(self.sptr_shift(arg, e.shift))
+                    Some(arg.shift_up(e.shift))
                 } else {
                     None
                 }
@@ -1275,7 +1275,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
                     if e.shift == 0 || e.is_closed() {
                         e = body;
                     } else if body.shift >= 1 && !body.is_closed() {
-                        e = self.sptr_shift(body, e.shift);
+                        e = body.shift_up(e.shift);
                     } else if body.is_closed() {
                         e = body;
                     } else {
@@ -1298,7 +1298,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
                     if e.shift == 0 || e.is_closed() {
                         e = body;
                     } else if body.shift >= 1 && !body.is_closed() {
-                        e = self.sptr_shift(body, e.shift);
+                        e = body.shift_up(e.shift);
                     } else if body.is_closed() {
                         e = body;
                     } else {
@@ -1309,7 +1309,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
             }
         }
         match self.read_expr(e.core) {
-            Pi { binder_type, .. } => Some(self.sptr_shift(binder_type, e.shift)),
+            Pi { binder_type, .. } => Some(binder_type.shift_up(e.shift)),
             _ => None
         }
     }

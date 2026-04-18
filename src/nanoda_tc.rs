@@ -1314,7 +1314,7 @@ impl<'x, 't: 'x, 'p: 't> NanodaTypeChecker<'x, 't, 'p> {
             let y_ty = self.infer_then_whnf(y, InferOnly);
             if let Pi { binder_name, binder_type, binder_style, .. } = self.ctx.view_sptr(y_ty) {
                 let v0 = self.ctx.mk_var(0);
-                let new_body = self.ctx.mk_app(self.ctx.sptr_shift(y, 1), v0);
+                let new_body = self.ctx.mk_app(y.shift_up(1), v0);
                 let new_lambda = self.ctx.mk_lambda(binder_name, binder_style, binder_type, new_body);
                 return self.def_eq(x, new_lambda)
             }

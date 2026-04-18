@@ -290,14 +290,14 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
     fn depth(&self) -> usize { self.tc_cache.depth() }
 
     /// Look up an ExprPtr in a depth-indexed cache, shifting the result to current depth.
-    /// Encapsulates: bucket = cache_bucket(x), get(bucket, x.core), sptr_shift(result, x.shift).
+    /// Encapsulates: bucket = cache_bucket(x), get(bucket, x.core), result.shift_up(x.shift).
     #[inline(always)]
     fn sptr_cache_get(&self, x: ExprPtr<'t>,
         get: impl FnOnce(&TcCache<'t>, usize, &CorePtr<'t>) -> Option<ExprPtr<'t>>
     ) -> Option<ExprPtr<'t>> {
         let bucket = self.cache_bucket(x);
         let stored = get(&self.tc_cache, bucket, &x.core)?;
-        Some(self.ctx.sptr_shift(stored, x.shift))
+        Some(stored.shift_up(x.shift))
     }
 
     /// Cache bucket for an ExprPtr: 0 for closed, depth-shift for open.
@@ -357,14 +357,14 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
     /// shifted to be valid at the current depth. O(1) via ExprPtr.
     fn lookup_var(&mut self, dbj_idx: u16) -> ExprPtr<'t> {
         let ty = self.tc_cache.local_type(dbj_idx);
-        self.ctx.sptr_shift(ty, dbj_idx + 1)
+        ty.shift_up(dbj_idx + 1)
     }
 
     /// Look up the value of a let-bound Var(k), shifted to be valid at current depth.
     /// Returns None for lambda/pi binders. O(1) via ExprPtr.
     fn lookup_var_value(&mut self, dbj_idx: u16) -> Option<ExprPtr<'t>> {
         let val = self.tc_cache.local_value(dbj_idx)?;
-        Some(self.ctx.sptr_shift(val, dbj_idx + 1))
+        Some(val.shift_up(dbj_idx + 1))
     }
 
     /// Push a lambda/pi binder onto the local context.
@@ -751,12 +751,12 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             let inner_bucket = inner_depth; // e is open (not closed) here
             if let Some(inner_cached) = self.tc_cache.infer_check_get(inner_bucket, &e.core) {
                 self.ctx.trace.infer_cache_hits += 1;
-                return self.ctx.sptr_shift(inner_cached, e.shift);
+                return inner_cached.shift_up(e.shift);
             }
             if !is_check {
                 if let Some(inner_cached) = self.tc_cache.infer_no_check_get(inner_bucket, &e.core) {
                     self.ctx.trace.infer_cache_hits += 1;
-                    return self.ctx.sptr_shift(inner_cached, e.shift);
+                    return inner_cached.shift_up(e.shift);
                 }
             }
             // Peel: shrink context to depth d-k, infer inner, restore, shift result.
@@ -765,7 +765,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             let saved = self.tc_cache.split_off(inner_depth);
             let inner_type = self.infer(ExprPtr::unshifted(e.core), flag);
             self.tc_cache.extend(saved);
-            return self.ctx.sptr_shift(inner_type, e.shift);
+            return inner_type.shift_up(e.shift);
         }
         // e.shift == 0 here.
         let bucket_idx = self.cache_bucket(e);
@@ -955,7 +955,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         }
         let e = self.whnf(e);
         if let Some(cached) = self.tc_cache.strong_cache.get(&(e.core, reduce_types, reduce_proofs)).copied() {
-            return self.ctx.sptr_shift(ExprPtr::from_nlbv(cached, self.ctx.num_loose_bvars(cached)), e.shift)
+            return ExprPtr::from_nlbv(cached, self.ctx.num_loose_bvars(cached)).shift_up(e.shift)
         }
 
         let out = match self.ctx.view_sptr(e) {
@@ -1006,7 +1006,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         if matches!(self.ctx.read_expr(e.core), NatLit { .. } | StringLit { .. }) {
             return e
         }
-        // whnf is shift-equivariant: whnf(ExprPtr(ptr, k)) = sptr_shift(whnf(ExprPtr(ptr, 0)), k)
+        // whnf is shift-equivariant: whnf(ExprPtr(ptr, k)) = whnf(ExprPtr(ptr, 0)).shift_up(k)
         if e.shift > 0 && !e.is_closed() {
             debug_assert!(self.ctx.num_loose_bvars(e.core) > 0,
                 "ExprPtr invariant violated in whnf: shift={} but nlbv=0", e.shift);
@@ -1019,18 +1019,18 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             let inner_bucket = if inner_depth == 0 { 0 } else { inner_depth };
             if let Some(inner_cached) = self.tc_cache.whnf_get(inner_bucket, &e.core) {
                 self.ctx.trace.whnf_cache_hits += 1;
-                return self.ctx.sptr_shift(inner_cached, e.shift);
+                return inner_cached.shift_up(e.shift);
             }
             if inner_depth == 0 {
                 let r = self.whnf(ExprPtr::unshifted(e.core));
-                return self.ctx.sptr_shift(r, e.shift);
+                return r.shift_up(e.shift);
             }
             self.ctx.trace.whnf_shift_peel += 1;
             self.ctx.trace.shift_peel_frames_total += e.shift as u64;
             let saved = self.tc_cache.split_off(inner_depth);
             let r = self.whnf(ExprPtr::unshifted(e.core));
             self.tc_cache.extend(saved);
-            return self.ctx.sptr_shift(r, e.shift);
+            return r.shift_up(e.shift);
         }
         // e.shift == 0. Pointer-based whnf cache: bucket 0 for closed, bucket depth for open.
         let whnf_bucket_idx = self.cache_bucket(e);
@@ -1078,19 +1078,19 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                 let inner_bucket = inner_depth; // e is open (not closed) here
                 if let Some(inner_cached) = self.tc_cache.wnu_get(inner_bucket, &e.core) {
                     self.ctx.trace.wnu_cache_hits += 1;
-                    return self.ctx.sptr_shift(inner_cached, e.shift);
+                    return inner_cached.shift_up(e.shift);
                 }
             }
             self.ctx.trace.wnu_shift_peel += 1;
             self.ctx.trace.shift_peel_frames_total += e.shift as u64;
             if inner_depth == 0 {
                 let r = self.whnf_no_unfolding_aux(ExprPtr::unshifted(e.core), cheap_proj);
-                return self.ctx.sptr_shift(r, e.shift);
+                return r.shift_up(e.shift);
             }
             let saved = self.tc_cache.split_off(inner_depth);
             let r = self.whnf_no_unfolding_aux(ExprPtr::unshifted(e.core), cheap_proj);
             self.tc_cache.extend(saved);
-            return self.ctx.sptr_shift(r, e.shift);
+            return r.shift_up(e.shift);
         }
         // e.shift == 0. Iterative version: tail-recursive calls become loop iterations.
         // We track original inputs to cache on exit.
@@ -1113,7 +1113,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                     let structure = if e_fun.shift == 0 || e_fun.is_closed() {
                         structure
                     } else {
-                        self.ctx.sptr_shift(structure, e_fun.shift)
+                        structure.shift_up(e_fun.shift)
                     };
                     if let Some(e) = self.reduce_proj(idx, structure, cheap_proj) {
                         let next = self.ctx.foldl_apps(e, args.into_iter());
@@ -1162,7 +1162,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                     let inner = if args.is_empty() {
                         body
                     } else {
-                        let shifted_args: AppArgs = args.into_iter().map(|a| self.ctx.sptr_shift(a, 1)).collect();
+                        let shifted_args: AppArgs = args.into_iter().map(|a| a.shift_up(1)).collect();
                         self.ctx.foldl_apps(body, shifted_args.into_iter())
                     };
                     let reduced = self.whnf_no_unfolding_aux(inner, cheap_proj);
@@ -1993,7 +1993,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             let y_ty = self.infer_then_whnf(y, InferOnly);
             if let Some((binder_name, binder_style, binder_type)) = self.ctx.view_pi_head(y_ty) {
                 // Shift y up by 1 since it will be placed inside a new lambda body
-                let y_shifted = self.ctx.sptr_shift(y, 1);
+                let y_shifted = y.shift_up(1);
                 let v0 = self.ctx.mk_var(0);
                 let new_body = self.ctx.mk_app(y_shifted, v0);
                 let new_lambda = self.ctx.mk_lambda(binder_name, binder_style, binder_type, new_body);
