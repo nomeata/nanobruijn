@@ -1488,7 +1488,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         // replacing(1) const _nested.Lean.PersistentArrayNode_2.rec with Lean.Elab.InfoTree.rec_2
         // replacing(1) const _nested.List_6.rec with Lean.Elab.InfoTree.rec_6
         // Const is closed, so shift is irrelevant for name matching
-        if let Const { name, levels, .. } = self.ctx.view_sptr(e) {
+        if let Some((name, levels)) = self.ctx.view_const(e) {
             // If e was `Const(_nested.Array_1.rec)`, return `Const(Lean.Syntax.rec_1)`
             if let Some(rec_name) = specialized_rec_names_to_unspecialized_rec_names.get(&name) {
                 return Some(self.ctx.mk_const(*rec_name, levels))
@@ -1541,7 +1541,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         nested_rec_name_to_rec_name: &FxIndexMap<NamePtr<'t>, NamePtr<'t>>,
     ) -> CorePtr<'t> {
         let mut cursor = ExprPtr::closed(e);
-        let is_pi = matches!(self.ctx.view_sptr(cursor), Pi { .. });
+        let is_pi = self.ctx.is_pi(cursor);
         let mut locals = Vec::new();
         for _ in 0..st.local_params.len() {
             match self.ctx.view_sptr(cursor) {
