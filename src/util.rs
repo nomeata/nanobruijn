@@ -1516,6 +1516,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
     /// View an App's children with shifts composed. Returns None if not an App.
     /// O(1) — App children only need shift_up which is a shift-arithmetic no-op
     /// for closed children.
+    #[inline]
     pub fn view_app(&self, s: ExprPtr<'t>) -> Option<(ExprPtr<'t>, ExprPtr<'t>)> {
         match self.read_expr(s.core) {
             Expr::App { fun, arg, .. } => {
@@ -1588,6 +1589,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
     /// binder_type, body) if `s` views as a Pi; binder_type and body are fully
     /// shift-composed. Avoids the Expr construction done by view_expr. Uses the
     /// O(1) fast-path for body when body.shift >= 1 or body.is_closed().
+    #[inline]
     pub fn unfold_pi_step(&mut self, s: ExprPtr<'t>) -> Option<(NamePtr<'t>, BinderStyle, ExprPtr<'t>, ExprPtr<'t>)> {
         match self.read_expr(s.core) {
             Expr::Pi { binder_name, binder_style, binder_type, body, .. } => {
@@ -1604,6 +1606,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
     }
 
     /// Take one step through a Lambda-telescope. Same as unfold_pi_step but for Lambda.
+    #[inline]
     pub fn unfold_lambda_step(&mut self, s: ExprPtr<'t>) -> Option<(NamePtr<'t>, BinderStyle, ExprPtr<'t>, ExprPtr<'t>)> {
         match self.read_expr(s.core) {
             Expr::Lambda { binder_name, binder_style, binder_type, body, .. } => {
