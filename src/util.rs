@@ -147,7 +147,11 @@ impl<'a> ExprPtr<'a> {
     #[inline(always)]
     pub fn shift_up(self, amount: u16) -> Self {
         if amount == 0 || self.is_closed() { return self; }
-        Self { core: self.core, shift: self.shift + amount }
+        // Guard against CLOSED_SHIFT as amount: would silently convert open→closed via wrap.
+        debug_assert!(amount != Self::CLOSED_SHIFT);
+        let new_shift = self.shift + amount;
+        debug_assert!(new_shift < Self::CLOSED_SHIFT, "shift_up: shift {} + amount {} overflowed into CLOSED_SHIFT", self.shift, amount);
+        Self { core: self.core, shift: new_shift }
     }
 
     /// Adjust an ExprPtr valid at `from_depth` to be valid at `to_depth`.

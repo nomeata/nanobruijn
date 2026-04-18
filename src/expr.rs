@@ -575,6 +575,8 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         // Otherwise, we need to traverse child.core with adjusted cutoff.
         let new_cutoff = cutoff - child.shift;
         let result = self.shift_core_aux(child.core, amount, new_cutoff);
+        // child is open (nlbv > 0), so shift_core_aux returns an open result (shift != CLOSED_SHIFT).
+        debug_assert!(!result.is_closed(), "shift_expr_aux: expected open result from shift_core_aux for open input");
         ExprPtr::new(result.core, result.shift + child.shift)
     }
 
