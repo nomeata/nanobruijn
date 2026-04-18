@@ -480,13 +480,14 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
     }
 
     pub(crate) fn ensure_sort(&mut self, e: ExprPtr<'t>) -> LevelPtr<'t> {
+        // Sort is always closed, so read_expr suffices.
         if let Sort { level, .. } = self.ctx.read_expr(e.core) {
             return level
         }
         let whnfd = self.whnf(e);
-        match self.ctx.view_sptr(whnfd) {
+        match self.ctx.read_expr(whnfd.core) {
             Sort { level, .. } => level,
-            _ => panic!("ensur_sort could not produce a sort"),
+            _ => panic!("ensure_sort could not produce a sort"),
         }
     }
 
@@ -505,7 +506,8 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
     pub(crate) fn infer_sort_of(&mut self, e: ExprPtr<'t>, flag: InferFlag) -> LevelPtr<'t> {
         let ty = self.infer(e, flag);
         let whnfd = self.whnf(ty);
-        match self.ctx.view_sptr(whnfd) {
+        // Sort is always closed, so read_expr suffices.
+        match self.ctx.read_expr(whnfd.core) {
             Sort { level, .. } => level,
             _ => {
                 panic!("infer_sort_of: expected Sort, got {:?} from e={:?}, infer={:?}, depth={}", self.ctx.expr_desc(whnfd.core, 5), self.ctx.expr_desc(e.core, 5), self.ctx.expr_desc(ty.core, 5), self.depth());
@@ -1103,8 +1105,16 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                 }
             }
             let (e_fun, args) = self.ctx.unfold_apps(cur);
-            match self.ctx.view_sptr(e_fun) {
-                Proj { idx, structure, .. } =>
+            // Dispatch on head constructor via read_expr (avoids body-traversal for
+            // Pi/Lambda-without-args cases). view_sptr used only when body is needed.
+            match self.ctx.read_expr(e_fun.core) {
+                Proj { idx, structure, .. } => {
+                    // Compose e_fun.shift into structure if needed.
+                    let structure = if e_fun.shift == 0 || e_fun.is_closed() {
+                        structure
+                    } else {
+                        self.ctx.sptr_shift(structure, e_fun.shift)
+                    };
                     if let Some(e) = self.reduce_proj(idx, structure, cheap_proj) {
                         let next = self.ctx.foldl_apps(e, args.into_iter());
                         if !cheap_proj { cache_entries.push(cur); }
@@ -1113,7 +1123,8 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                     } else {
                         cache_entries.push(cur);
                         break self.ctx.foldl_apps(e_fun, args.into_iter());
-                    },
+                    }
+                }
                 Sort { level, .. } => {
                     debug_assert!(args.is_empty());
                     let level = self.ctx.simplify(level);
@@ -1121,6 +1132,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                     break self.ctx.mk_sort(level);
                 }
                 Lambda { .. } if !args.is_empty() => {
+                    // Beta reduction: need body, so use view_sptr.
                     let (mut e, mut n_args) = (e_fun, 0usize);
                     while let (Lambda { body, .. }, [_arg, _rest @ ..]) = (self.ctx.view_sptr(e), &args[n_args..]) {
                         n_args += 1;
@@ -1139,14 +1151,14 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                     cache_entries.push(cur);
                     break e_fun;
                 }
-                Let { binder_type, val, body, .. } => {
+                Let { .. } => {
+                    // Need binder_type/val/body with shifts composed — use view_sptr.
+                    let (binder_type, val, body) = match self.ctx.view_sptr(e_fun) {
+                        Let { binder_type, val, body, .. } => (binder_type, val, body),
+                        _ => unreachable!(),
+                    };
                     self.ctx.trace.whnf_let_reductions += 1;
-                    // Lazy zeta: push let-binding, reduce body in extended context,
-                    // then pop and inst_beta on the (much smaller) whnf result.
                     self.push_local_let(binder_type, val);
-                    // Args from unfold_apps are in the outer context; body is in
-                    // the let-extended context (one more binder). Shift args up by 1
-                    // so their de Bruijn indices are valid under the let binder.
                     let inner = if args.is_empty() {
                         body
                     } else {
@@ -1174,7 +1186,9 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                         break self.ctx.foldl_apps(e_fun, args.into_iter());
                     },
                 Var { dbj_idx, .. } => {
-                    if let Some(val) = self.lookup_var_value(dbj_idx) {
+                    // Var always has nlbv > 0; e_fun.shift could be > 0 from unfold_apps.
+                    let idx = if e_fun.is_closed() { dbj_idx } else { dbj_idx + e_fun.shift };
+                    if let Some(val) = self.lookup_var_value(idx) {
                         self.ctx.trace.zeta_reductions += 1;
                         let next = self.ctx.foldl_apps(val, args.into_iter());
                         if !cheap_proj { cache_entries.push(cur); }
