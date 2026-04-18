@@ -1,7 +1,7 @@
 use crate::env::{ConstructorData, Declar, DeclarInfo, DeclarMap, InductiveData, RecRule, RecursorData};
 use crate::expr::{BinderStyle, Expr::*};
 use crate::tc::{InferFlag, TypeChecker};
-use crate::util::{AppArgs, ExportFile, ExprPtr, FxIndexMap, LevelPtr, LevelsPtr, NamePtr, SPtr, TcCtx};
+use crate::util::{AppArgs, ExportFile, CorePtr, FxIndexMap, LevelPtr, LevelsPtr, NamePtr, SPtr, TcCtx};
 use smallvec::SmallVec;
 use std::sync::Arc;
 
@@ -146,7 +146,7 @@ pub(crate) struct InductiveCheckState<'a> {
     /// (_nested.Array_1, (Array.[0] Lean.Syntax.[]))
     /// (_nested.List_2, (List.[0] Lean.Syntax.[]))
     /// ```
-    nested_to_unspecialized_ty_wfvars: FxIndexMap<NamePtr<'a>, ExprPtr<'a>>,
+    nested_to_unspecialized_ty_wfvars: FxIndexMap<NamePtr<'a>, CorePtr<'a>>,
     /// Maps the specialized type's fresh name to its "actual"/unspecialized type,
     /// where the type uses bound variables instead of free variables.
     ///
@@ -160,7 +160,7 @@ pub(crate) struct InductiveCheckState<'a> {
     /// (_nested.Array_1, (Array.[0] Lean.Syntax.[]))
     /// (_nested.List_2, (List.[0] Lean.Syntax.[]))
     /// ```
-    nested_to_unspecialized_ty_nofvars: FxIndexMap<NamePtr<'a>, ExprPtr<'a>>,
+    nested_to_unspecialized_ty_nofvars: FxIndexMap<NamePtr<'a>, CorePtr<'a>>,
     uparams: LevelsPtr<'a>,
     // NOTE: All of the inductives in a mutual block have to be declared with the same
     // number of parameters, and after specialization, the mutuals that are specialized
@@ -175,18 +175,18 @@ pub(crate) struct InductiveCheckState<'a> {
     /// Needs to be incrementing because you may have more than one specialized
     /// version of a given container type.
     next_ngen_idx: u64,
-    local_params: Vec<ExprPtr<'a>>,
-    local_indices: Vec<Vec<ExprPtr<'a>>>,
+    local_params: Vec<CorePtr<'a>>,
+    local_indices: Vec<Vec<CorePtr<'a>>>,
     block_codom: Option<LevelPtr<'a>>,
     is_zero: Option<bool>,
     is_nonzero: Option<bool>,
-    ind_consts: Vec<ExprPtr<'a>>,
+    ind_consts: Vec<CorePtr<'a>>,
     rec_uparams: Option<LevelsPtr<'a>>,
     elim_level: Option<LevelPtr<'a>>,
     k_target: Option<bool>,
-    majors: Vec<ExprPtr<'a>>,
-    motives: Vec<ExprPtr<'a>>,
-    minors: Vec<Vec<ExprPtr<'a>>>,
+    majors: Vec<CorePtr<'a>>,
+    motives: Vec<CorePtr<'a>>,
+    minors: Vec<Vec<CorePtr<'a>>>,
 }
 
 impl<'a> InductiveCheckState<'a> {
@@ -194,7 +194,7 @@ impl<'a> InductiveCheckState<'a> {
         info_uparams: LevelsPtr<'a>,
         num_params: u16,
         new_tys: Vec<IndTyHeader<'a>>,
-        local_params: Vec<ExprPtr<'a>>,
+        local_params: Vec<CorePtr<'a>>,
     ) -> Self {
         Self {
             nested_to_unspecialized_ty_wfvars: crate::util::new_fx_index_map(),
@@ -223,14 +223,14 @@ impl<'a> InductiveCheckState<'a> {
 #[derive(Debug, Clone)]
 struct IndTyHeader<'a> {
     name: NamePtr<'a>,
-    ty: ExprPtr<'a>,
+    ty: CorePtr<'a>,
     ctors: Vec<CtorHeader<'a>>,
 }
 
 #[derive(Debug, Clone, Copy)]
 struct CtorHeader<'a> {
     name: NamePtr<'a>,
-    ty: ExprPtr<'a>,
+    ty: CorePtr<'a>,
 }
 
 /// Condition 3:
@@ -242,7 +242,7 @@ struct CtorHeader<'a> {
 ///     {A : Sort u}
 ///     for `@eq.refl A a a`
 ///     unfolds as (Const(eq, [u]), [A, a, a])
-fn ctor_app_params_ok<'a>(ctor_apps: &[ExprPtr<'a>], local_params: &[ExprPtr<'a>]) -> bool {
+fn ctor_app_params_ok<'a>(ctor_apps: &[CorePtr<'a>], local_params: &[CorePtr<'a>]) -> bool {
     if ctor_apps.len() < local_params.len() {
         return false
     }
@@ -339,7 +339,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
     /// Return a sequence of expressions which are free variables corresponding to the
     /// inductive type's parameters, also returning the end of the telescope instantiated
     /// with the parameters.
-    fn get_local_params(&mut self, e: ExprPtr<'t>, num_params: u16) -> (Vec<ExprPtr<'t>>, SPtr<'t>) {
+    fn get_local_params(&mut self, e: CorePtr<'t>, num_params: u16) -> (Vec<CorePtr<'t>>, SPtr<'t>) {
         let mut cursor = SPtr::closed(e);
         let mut param_locals = Vec::with_capacity(num_params as usize);
         for _ in 0..num_params {
@@ -453,7 +453,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         let mut loose_bvars = false;
         let mut is_nested = false;
         for i in 0..(*num_params as usize) {
-            // Note: num_loose_bvars and find_const operate on ExprPtr (the DAG node).
+            // Note: num_loose_bvars and find_const operate on CorePtr (the DAG node).
             // For num_loose_bvars, if shift>0 but nlbv(ptr)==0, the shifted version also has 0 loose bvars.
             // If nlbv(ptr)!=0, the shifted version also has loose bvars.
             // For find_const, const names are unaffected by shift.
@@ -532,7 +532,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         // If this has been called with the constructor for an unspecialized version of a nested
         // type, for example called with `Array.mk`, the outgoing_param will be a free variable
         // of carrier type `A`, which should be replaced with whatever is being nested, like `Lean.Syntax`.
-        outgoing_param_locals: &[ExprPtr<'t>],
+        outgoing_param_locals: &[CorePtr<'t>],
     ) -> Option<SPtr<'t>> {
         // Using the `Lean.Syntax.node` constructor as an example, if `e` is the application of
         // `Array Lean.Syntax`, this variable will be the base declaration for `Array`.
@@ -621,7 +621,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         &mut self,
         e: SPtr<'t>,
         st: &mut InductiveCheckState<'t>,
-        outgoing_params: &Vec<ExprPtr<'t>>,
+        outgoing_params: &Vec<CorePtr<'t>>,
     ) -> SPtr<'t> {
         // Try to replace locally before traversing into the lower parts.
         if let Some(eprime) = self.replace_if_nested(e, st, outgoing_params) {
@@ -745,7 +745,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                 return false
             }
         }
-        let ctor_apps_ptrs: SmallVec<[ExprPtr; 8]> = ctor_apps.iter().map(|s| s.core).collect();
+        let ctor_apps_ptrs: SmallVec<[CorePtr; 8]> = ctor_apps.iter().map(|s| s.core).collect();
         ctor_app_params_ok(ctor_apps_ptrs.as_slice(), st.local_params.as_slice())
     }
 
@@ -757,7 +757,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
     // This is used in the formation of inductive types, to determine whether
     // a type is recursive, reflexive, contains only positive occurrences, and
     // has only valid applications.
-    fn has_ind_occ(&mut self, e: ExprPtr<'t>, haystack: &[ExprPtr<'t>]) -> bool {
+    fn has_ind_occ(&mut self, e: CorePtr<'t>, haystack: &[CorePtr<'t>]) -> bool {
         let f = |nptr| {
             haystack.iter().copied().any(|c| match self.ctx.read_expr(c) {
                 Const { name, .. } => name == nptr,
@@ -801,7 +801,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         &mut self,
         st: &InductiveCheckState<'t>,
         parent_ind_name: NamePtr<'t>,
-        ctor_type: ExprPtr<'t>,
+        ctor_type: CorePtr<'t>,
     ) {
         self.tc_cache.clear();
         let mut ctor_type_cursor = SPtr::closed(ctor_type);
@@ -854,7 +854,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
     // inductive MyTypeSmall (A : Type) : Nat → Prop
     // | mk (m : Nat) (n : Nat) : MyTypeSmall A n
     //```
-    fn large_elim_test_aux(&mut self, ctor_type: ExprPtr<'t>, mut rem_params: usize) -> bool {
+    fn large_elim_test_aux(&mut self, ctor_type: CorePtr<'t>, mut rem_params: usize) -> bool {
         self.tc_cache.clear();
         let mut ctor_type_cursor = SPtr::closed(ctor_type);
         let mut non_prop_ctor_telescope_elems = Vec::new();
@@ -977,7 +977,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         }
     }
 
-    fn mk_motive_dep(&mut self, st: &InductiveCheckState<'t>, major: ExprPtr<'t>, ind_type_idx: u64) -> ExprPtr<'t> {
+    fn mk_motive_dep(&mut self, st: &InductiveCheckState<'t>, major: CorePtr<'t>, ind_type_idx: u64) -> CorePtr<'t> {
         let elim_sort = self.ctx.mk_sort(st.elim_level.unwrap());
         let w_major = self.ctx.abstr_pi(major, elim_sort);
         let motive_type = self.ctx.abstr_pi_telescope(&st.local_indices[usize::try_from(ind_type_idx).unwrap()], w_major);
@@ -1013,7 +1013,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         }
     }
 
-    fn handle_rec_args_aux(&mut self, rec_arg_cursor: SPtr<'t>) -> (SPtr<'t>, Vec<ExprPtr<'t>>) {
+    fn handle_rec_args_aux(&mut self, rec_arg_cursor: SPtr<'t>) -> (SPtr<'t>, Vec<CorePtr<'t>>) {
         let mut xs = Vec::new();
         let mut cursor = rec_arg_cursor;
         while let Pi { binder_name, binder_style, binder_type, body, .. } = self.ctx.view_sptr(cursor) {
@@ -1028,9 +1028,9 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
     fn sep_nonrec_rec_ctor_args(
         &mut self,
         st: &InductiveCheckState<'t>,
-        ctor_type: ExprPtr<'t>,
-        rem_params: &[ExprPtr<'t>],
-    ) -> (SPtr<'t>, Vec<ExprPtr<'t>>, Vec<ExprPtr<'t>>) {
+        ctor_type: CorePtr<'t>,
+        rem_params: &[CorePtr<'t>],
+    ) -> (SPtr<'t>, Vec<CorePtr<'t>>, Vec<CorePtr<'t>>) {
         let mut all_args = Vec::new();
         let mut rec_args = Vec::new();
         self.tc_cache.clear();
@@ -1058,8 +1058,8 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         &mut self,
         st: &InductiveCheckState<'t>,
         ctor_idx: usize,
-        rec_args: &[ExprPtr<'t>],
-    ) -> Vec<ExprPtr<'t>> {
+        rec_args: &[CorePtr<'t>],
+    ) -> Vec<CorePtr<'t>> {
         let mut out = Vec::new();
         for (i, rec_arg) in rec_args.iter().copied().enumerate() {
             self.tc_cache.clear();
@@ -1083,7 +1083,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         out
     }
 
-    fn mk_minors1group(&mut self, st: &InductiveCheckState<'t>, ctors: &[CtorHeader<'t>]) -> Vec<ExprPtr<'t>> {
+    fn mk_minors1group(&mut self, st: &InductiveCheckState<'t>, ctors: &[CtorHeader<'t>]) -> Vec<CorePtr<'t>> {
         let mut out = Vec::new();
         for (ctor_idx, ctor) in ctors.iter().copied().enumerate() {
             let (stripd_instd_ctor_type, all_ctor_args, rec_ctor_args) =
@@ -1126,11 +1126,11 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
     fn handle_rec_ctor_args_rec_rule(
         &mut self,
         st: &InductiveCheckState<'t>,
-        rec_ctor_args: &[ExprPtr<'t>],
-    ) -> Vec<ExprPtr<'t>> {
+        rec_ctor_args: &[CorePtr<'t>],
+    ) -> Vec<CorePtr<'t>> {
         let mut out = Vec::new();
         let rec_str_ptr = self.ctx.alloc_string(std::borrow::Cow::Borrowed("rec"));
-        let flat_mapped_minors = st.minors.iter().flat_map(|v| v.iter().copied()).collect::<Vec<ExprPtr>>();
+        let flat_mapped_minors = st.minors.iter().flat_map(|v| v.iter().copied()).collect::<Vec<CorePtr>>();
         for rec_ctor_arg in rec_ctor_args.iter().copied() {
             self.tc_cache.clear();
             let u_i_ty = self.infer_then_whnf(SPtr::closed(rec_ctor_arg), InferFlag::InferOnly);
@@ -1155,8 +1155,8 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         &mut self,
         st: &InductiveCheckState<'t>,
         ctor: CtorHeader<'t>,
-        flat_mapped_minors: &[ExprPtr<'t>],
-        this_minor: ExprPtr<'t>,
+        flat_mapped_minors: &[CorePtr<'t>],
+        this_minor: CorePtr<'t>,
     ) -> RecRule<'t> {
         let (_, all_ctor_args, rec_ctor_args) = self.sep_nonrec_rec_ctor_args(st, ctor.ty, st.local_params.as_slice());
         let handled_rec_args = self.handle_rec_ctor_args_rec_rule(st, rec_ctor_args.as_slice());
@@ -1178,7 +1178,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
 
     fn mk_rec_rules(&mut self, st: &InductiveCheckState<'t>) -> Vec<Vec<RecRule<'t>>> {
         let mut rec_rules = Vec::new();
-        let minors = st.minors.iter().flat_map(|v| v.iter().copied()).collect::<Vec<ExprPtr>>();
+        let minors = st.minors.iter().flat_map(|v| v.iter().copied()).collect::<Vec<CorePtr>>();
         let mut overall_ctor_idx = 0;
         for ind_ty in st.all_inductives_incl_specialized.iter() {
             let mut grp = Vec::new();
@@ -1271,10 +1271,10 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         &mut self,
         st: &InductiveCheckState<'t>,
         ind_name: NamePtr<'t>,
-        motive: ExprPtr<'t>,
-        major: ExprPtr<'t>,
-        local_indices: &[ExprPtr<'t>],
-        flat_mapped_minors: &[ExprPtr<'t>],
+        motive: CorePtr<'t>,
+        major: CorePtr<'t>,
+        local_indices: &[CorePtr<'t>],
+        flat_mapped_minors: &[CorePtr<'t>],
         rec_rules: &[RecRule<'t>],
     ) -> Declar<'t> {
         let motive_app_base = self.ctx.foldl_apps(SPtr::closed(motive), local_indices.iter().copied().map(SPtr::closed));
@@ -1314,7 +1314,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             let motive = st.motives[i];
             let major = st.majors[i];
             let local_indices = st.local_indices.get(i).unwrap();
-            let minors = st.minors.iter().flat_map(|v| v.iter().copied()).collect::<Vec<ExprPtr>>();
+            let minors = st.minors.iter().flat_map(|v| v.iter().copied()).collect::<Vec<CorePtr>>();
             let recursor = self.mk_recursor_aux(
                 st,
                 ind.name,
@@ -1379,7 +1379,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         &mut self,
         st: &InductiveCheckState<'t>,
         c: NamePtr<'t>,
-    ) -> Option<(ExprPtr<'t>, NamePtr<'t>)> {
+    ) -> Option<(CorePtr<'t>, NamePtr<'t>)> {
         // `inductive_name`
         let ConstructorData { inductive_name, .. } = self.env.get_constructor(&c)?;
         let unspecialized_ty = st.nested_to_unspecialized_ty_nofvars.get(inductive_name).copied()?;
@@ -1404,7 +1404,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
     fn restore_replace(
         &mut self,
         e: SPtr<'t>,
-        local_params: &[ExprPtr<'t>],
+        local_params: &[CorePtr<'t>],
         st: &InductiveCheckState<'t>,
         specialized_rec_names_to_unspecialized_rec_names: &FxIndexMap<NamePtr<'t>, NamePtr<'t>>,
     ) -> SPtr<'t> {
@@ -1479,7 +1479,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
     fn replace_f(
         &mut self,
         e: SPtr<'t>,
-        local_params: &[ExprPtr<'t>],
+        local_params: &[CorePtr<'t>],
         st: &InductiveCheckState<'t>,
         specialized_rec_names_to_unspecialized_rec_names: &FxIndexMap<NamePtr<'t>, NamePtr<'t>>,
     ) -> Option<SPtr<'t>> {
@@ -1537,9 +1537,9 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
     fn restore_e(
         &mut self,
         st: &InductiveCheckState<'t>,
-        e: ExprPtr<'t>,
+        e: CorePtr<'t>,
         nested_rec_name_to_rec_name: &FxIndexMap<NamePtr<'t>, NamePtr<'t>>,
-    ) -> ExprPtr<'t> {
+    ) -> CorePtr<'t> {
         let mut cursor = SPtr::closed(e);
         let is_pi = matches!(self.ctx.view_sptr(cursor), Pi { .. });
         let mut locals = Vec::new();

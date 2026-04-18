@@ -5,7 +5,7 @@ use crate::expr::Expr;
 use crate::level::Level;
 use crate::util::{
     nat_div, nat_mod, nat_sub, nat_gcd, nat_land, nat_lor,
-    nat_xor, nat_shr, nat_shl, AppArgs, ExportFile, ExprPtr, LevelPtr,
+    nat_xor, nat_shr, nat_shl, AppArgs, ExportFile, CorePtr, LevelPtr,
     LevelsPtr, NamePtr, SPtr, TcCache, TcCtx, StringPtr,
 };
 use std::error::Error;
@@ -293,7 +293,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
     /// Encapsulates: bucket = cache_bucket(x), get(bucket, x.core), sptr_shift(result, x.shift).
     #[inline(always)]
     fn sptr_cache_get(&self, x: SPtr<'t>,
-        get: impl FnOnce(&TcCache<'t>, usize, &ExprPtr<'t>) -> Option<SPtr<'t>>
+        get: impl FnOnce(&TcCache<'t>, usize, &CorePtr<'t>) -> Option<SPtr<'t>>
     ) -> Option<SPtr<'t>> {
         let bucket = self.cache_bucket(x);
         let stored = get(&self.tc_cache, bucket, &x.core)?;
@@ -779,7 +779,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             }
         }
         let r = match self.ctx.view_sptr(e) {
-            Local { binder_type, .. } => SPtr::closed(binder_type), // binder_type is ExprPtr in Local, declaration-level
+            Local { binder_type, .. } => SPtr::closed(binder_type), // binder_type is CorePtr in Local, declaration-level
             Var { dbj_idx, .. } => {
                 self.lookup_var(dbj_idx)
             },
@@ -854,7 +854,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         self.ctx.inst_beta(fun, ctx.as_slice())
     }
 
-    //fn infer_app(&mut self, e: ExprPtr<'t>, flag: InferFlag) -> ExprPtr<'t> {
+    //fn infer_app(&mut self, e: CorePtr<'t>, flag: InferFlag) -> CorePtr<'t> {
     //    match self.ctx.read_expr(e) {
     //        App {fun, arg, ..} => {
     //            let fun_ty = self.infer_then_whnf(fun, flag);

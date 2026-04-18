@@ -6,7 +6,7 @@ use crate::hash64;
 use crate::level::Level;
 use crate::name::Name;
 use crate::util::{
-    new_fx_hash_map, new_fx_index_map, BigUintPtr, Config, DagMarker, ExprPtr, FxHashMap, FxIndexMap,
+    new_fx_hash_map, new_fx_index_map, BigUintPtr, Config, DagMarker, CorePtr, FxHashMap, FxIndexMap,
     LeanDag, LevelPtr, LevelsPtr, NamePtr, SPtr, StringPtr,
 };
 use num_bigint::BigUint;
@@ -431,14 +431,14 @@ impl<'a, R: BufRead> Parser<'a, R> {
             self.config.permitted_axioms.as_ref().map(|v| v.contains(&self.name_to_string(n))).unwrap_or(false)
     }
 
-    fn num_loose_bvars(&self, e: ExprPtr<'a>) -> u16 {
+    fn num_loose_bvars(&self, e: CorePtr<'a>) -> u16 {
         self.dag.expr_nlbv[e.idx()]
     }
 
-    fn has_fvars_ptr(&self, e: ExprPtr<'a>) -> bool { self.dag.exprs.get_index(e.idx()).unwrap().has_fvars() }
+    fn has_fvars_ptr(&self, e: CorePtr<'a>) -> bool { self.dag.exprs.get_index(e.idx()).unwrap().has_fvars() }
 
-    /// Find or create Var(0) in the DAG. Returns its ExprPtr.
-    fn find_or_insert_var0(&mut self) -> ExprPtr<'a> {
+    /// Find or create Var(0) in the DAG. Returns its CorePtr.
+    fn find_or_insert_var0(&mut self) -> CorePtr<'a> {
         let hash = hash64!(crate::expr::VAR_HASH, 0u16);
         let (dag_idx, _) = self.insert_expr(Expr::Var {
             dbj_idx: 0, hash,
@@ -500,8 +500,8 @@ impl<'a, R: BufRead> Parser<'a, R> {
         if shift == SPtr::CLOSED_SHIFT { SPtr::closed(core) } else { SPtr::new(core, shift) }
     }
 
-    /// Get the ExprPtr for a declaration type/value (must be closed, shift == CLOSED_SHIFT).
-    fn get_expr_ptr(&self, idx: u32) -> ExprPtr<'a> {
+    /// Get the CorePtr for a declaration type/value (must be closed, shift == CLOSED_SHIFT).
+    fn get_expr_ptr(&self, idx: u32) -> CorePtr<'a> {
         let (dag_idx, shift) = self.expr_remap[idx as usize];
         debug_assert!(shift == SPtr::CLOSED_SHIFT, "get_expr_ptr: expected CLOSED_SHIFT for declaration expr, got shift={}", shift);
         crate::util::Ptr::from(DagMarker::ExportFile, dag_idx)

@@ -87,13 +87,11 @@ pub type LevelsPtr<'a> = Ptr<&'a Arc<[LevelPtr<'a>]>>;
 pub type NamePtr<'a> = Ptr<&'a Name<'a>>;
 pub type LevelPtr<'a> = Ptr<&'a Level<'a>>;
 pub type CorePtr<'a> = Ptr<&'a Expr<'a>>;
-/// Backwards compatibility alias — use CorePtr for new code
-pub type ExprPtr<'a> = CorePtr<'a>;
 pub type BigUintPtr<'a> = Ptr<&'a BigUint>;
 
 /// Shifted pointer: a DAG pointer paired with a cutoff-0 shift amount.
 /// SPtr(ptr, k) represents `shift(dag[ptr], k, 0)`.
-/// - SPtr(ptr, 0) = unshifted, equivalent to bare ExprPtr
+/// - SPtr(ptr, 0) = unshifted, equivalent to bare CorePtr
 /// - For Var(0) core: SPtr(var0_ptr, k) represents Var(k)
 /// - Construction is pure value — zero DAG allocation
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -224,14 +222,14 @@ impl<K: Eq + std::hash::Hash, V> LazyMap<K, V> {
 /// Collectively pushed/popped for efficient context management.
 pub(crate) struct DepthFrame<'t> {
     pub(crate) local: (SPtr<'t>, Option<SPtr<'t>>),
-    pub(crate) whnf: LazyMap<ExprPtr<'t>, SPtr<'t>>,
-    pub(crate) wnu: LazyMap<ExprPtr<'t>, SPtr<'t>>,
-    pub(crate) infer_check: LazyMap<ExprPtr<'t>, SPtr<'t>>,
-    pub(crate) infer_no_check: LazyMap<ExprPtr<'t>, SPtr<'t>>,
+    pub(crate) whnf: LazyMap<CorePtr<'t>, SPtr<'t>>,
+    pub(crate) wnu: LazyMap<CorePtr<'t>, SPtr<'t>>,
+    pub(crate) infer_check: LazyMap<CorePtr<'t>, SPtr<'t>>,
+    pub(crate) infer_no_check: LazyMap<CorePtr<'t>, SPtr<'t>>,
     pub(crate) defeq_pos: LazyMap<(SPtr<'t>, SPtr<'t>), (SPtr<'t>, SPtr<'t>, u16)>,
     pub(crate) defeq_neg: LazyMap<(SPtr<'t>, SPtr<'t>), (SPtr<'t>, SPtr<'t>, u16)>,
     /// Per-depth weighted UF: core → SPtr(rep_core, shift_delta).
-    pub(crate) uf: LazyMap<ExprPtr<'t>, SPtr<'t>>,
+    pub(crate) uf: LazyMap<CorePtr<'t>, SPtr<'t>>,
 }
 
 impl<'t> DepthFrame<'t> {
@@ -344,19 +342,19 @@ pub(crate) fn nat_lor(x: BigUint, y: BigUint) -> BigUint {
 
 pub struct ExprCache<'t> {
     /// Caches (e, substs_id, params) |-> output for instantiation.
-    pub(crate) inst_cache: Vec<(u64, u64, ExprPtr<'t>, SPtr<'t>)>,
+    pub(crate) inst_cache: Vec<(u64, u64, CorePtr<'t>, SPtr<'t>)>,
     pub(crate) inst_substs_id: u64,
     /// Caches (e, ks, vs) |-> output for level substitution.
-    pub(crate) subst_cache: FxHashMap<(ExprPtr<'t>, LevelsPtr<'t>, LevelsPtr<'t>), SPtr<'t>>,
-    pub(crate) dsubst_cache: FxHashMap<(ExprPtr<'t>, LevelsPtr<'t>, LevelsPtr<'t>), SPtr<'t>>,
+    pub(crate) subst_cache: FxHashMap<(CorePtr<'t>, LevelsPtr<'t>, LevelsPtr<'t>), SPtr<'t>>,
+    pub(crate) dsubst_cache: FxHashMap<(CorePtr<'t>, LevelsPtr<'t>, LevelsPtr<'t>), SPtr<'t>>,
     /// Caches (e, offset) |-> output for abstraction.
-    pub(crate) abstr_cache: FxHashMap<(ExprPtr<'t>, u16), SPtr<'t>>,
+    pub(crate) abstr_cache: FxHashMap<(CorePtr<'t>, u16), SPtr<'t>>,
     /// Caches (e, amount, cutoff) |-> output for shifting.
-    pub(crate) shift_cache: FxHashMap<(ExprPtr<'t>, u16, u16), SPtr<'t>>,
+    pub(crate) shift_cache: FxHashMap<(CorePtr<'t>, u16, u16), SPtr<'t>>,
     /// Caches (e, amount, cutoff) |-> output for downward shifting.
-    pub(crate) shift_down_cache: FxHashMap<(ExprPtr<'t>, u16, u16), ExprPtr<'t>>,
+    pub(crate) shift_down_cache: FxHashMap<(CorePtr<'t>, u16, u16), CorePtr<'t>>,
     /// Cache for abstr_aux_levels (nanoda TC).
-    pub(crate) abstr_cache_levels: FxHashMap<(ExprPtr<'t>, u16, u16), SPtr<'t>>,
+    pub(crate) abstr_cache_levels: FxHashMap<(CorePtr<'t>, u16, u16), SPtr<'t>>,
     /// Direct-mapped mk_app cache.
     pub(crate) mk_app_dm_cache: Vec<(u64, SPtr<'t>, SPtr<'t>, SPtr<'t>)>,
     pub(crate) mk_app_miss_count: u32,
@@ -364,8 +362,8 @@ pub struct ExprCache<'t> {
     pub(crate) mk_pi_cache: FxHashMap<(NamePtr<'t>, BinderStyle, SPtr<'t>, SPtr<'t>), SPtr<'t>>,
     /// Memoization cache for mk_lambda: (name, style, type, body) → SPtr.
     pub(crate) mk_lambda_cache: FxHashMap<(NamePtr<'t>, BinderStyle, SPtr<'t>, SPtr<'t>), SPtr<'t>>,
-    /// Cached Var(0) ExprPtr. Only one Var exists in the DAG.
-    pub(crate) var0_ptr: Option<ExprPtr<'t>>,
+    /// Cached Var(0) CorePtr. Only one Var exists in the DAG.
+    pub(crate) var0_ptr: Option<CorePtr<'t>>,
 }
 
 impl<'t> ExprCache<'t> {
@@ -754,7 +752,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         (self.read_level(a), self.read_level(x))
     }
 
-    pub fn read_expr(&self, p: ExprPtr<'t>) -> Expr<'t> {
+    pub fn read_expr(&self, p: CorePtr<'t>) -> Expr<'t> {
         match p.dag_marker() {
             DagMarker::ExportFile => self.export_file.dag.exprs.get_index(p.idx()).copied().unwrap(),
             DagMarker::TcCtx => self.dag.exprs.get_index(p.idx()).copied().unwrap(),
@@ -762,7 +760,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
     }
 
     /// Convenience function for reading two items as a tuple.
-    pub fn read_expr_pair(&self, a: ExprPtr<'t>, x: ExprPtr<'t>) -> (Expr<'t>, Expr<'t>) {
+    pub fn read_expr_pair(&self, a: CorePtr<'t>, x: CorePtr<'t>) -> (Expr<'t>, Expr<'t>) {
         (self.read_expr(a), self.read_expr(x))
     }
 
@@ -819,7 +817,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
     /// Store an `Expr`, getting back a pointer to the allocated item. If the item was
     /// already stored, forego the allocation and return a pointer to the previously inserted
     /// element. Checks the longer-lived storage first.
-    pub fn alloc_expr(&mut self, e: Expr<'t>) -> ExprPtr<'t> {
+    pub fn alloc_expr(&mut self, e: Expr<'t>) -> CorePtr<'t> {
         self.trace.alloc_expr_calls += 1;
         if let Some(idx) = self.export_file.dag.exprs.get_index_of(&e) {
             Ptr::from(DagMarker::ExportFile, idx)
@@ -899,7 +897,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
 
     /// Compact expression descriptor for diagnostics: tag + key info.
     /// Returns e.g. "App(Const(Eq),nlbv=3,fvl={2,5})" or "Var(7)"
-    pub fn expr_desc(&self, e: ExprPtr<'t>, max_depth: u32) -> String {
+    pub fn expr_desc(&self, e: CorePtr<'t>, max_depth: u32) -> String {
         if max_depth == 0 { return "...".to_string(); }
         match self.read_expr(e) {
             Expr::Var { dbj_idx, .. } => format!("V{}", dbj_idx),
@@ -996,8 +994,8 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         self.alloc_level(Level::Param(n, hash))
     }
 
-    /// Get the canonical Var(0) ExprPtr, allocating it if needed.
-    fn var0_ptr(&mut self) -> ExprPtr<'t> {
+    /// Get the canonical Var(0) CorePtr, allocating it if needed.
+    fn var0_ptr(&mut self) -> CorePtr<'t> {
         if let Some(ptr) = self.expr_cache.var0_ptr {
             return ptr;
         }
@@ -1284,7 +1282,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         &mut self,
         binder_name: NamePtr<'t>,
         binder_style: BinderStyle,
-        binder_type: ExprPtr<'t>,
+        binder_type: CorePtr<'t>,
     ) -> SPtr<'t> {
         let unique_id = self.unique_counter;
         self.unique_counter += 1;
@@ -1299,7 +1297,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         &mut self,
         binder_name: NamePtr<'t>,
         binder_style: BinderStyle,
-        binder_type: ExprPtr<'t>,
+        binder_type: CorePtr<'t>,
     ) -> SPtr<'t> {
         let level = self.dbj_level_counter;
         self.dbj_level_counter += 1;
@@ -1314,7 +1312,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         &mut self,
         binder_name: NamePtr<'t>,
         binder_style: BinderStyle,
-        binder_type: ExprPtr<'t>,
+        binder_type: CorePtr<'t>,
         level: u16,
     ) -> SPtr<'t> {
         let id = FVarId::DbjLevel(level);
@@ -1342,7 +1340,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
     /// Create a shifted pointer: SPtr(inner, amount).
     /// Pure value construction — no DAG allocation. Collapses Var(0) shifts.
     #[inline(always)]
-    pub fn mk_shift(&self, inner: ExprPtr<'t>, amount: u16) -> SPtr<'t> {
+    pub fn mk_shift(&self, inner: CorePtr<'t>, amount: u16) -> SPtr<'t> {
         if self.num_loose_bvars(inner) == 0 { return SPtr::closed(inner); }
         SPtr::new(inner, amount)
     }
@@ -1404,12 +1402,12 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
     }
 
     /// Shift down: subtract `amount` from all free variable indices in the core expression.
-    pub fn push_shift_down(&mut self, e: ExprPtr<'t>, amount: u16) -> ExprPtr<'t> {
+    pub fn push_shift_down(&mut self, e: CorePtr<'t>, amount: u16) -> CorePtr<'t> {
         self.push_shift_down_cutoff(e, amount, 0)
     }
 
     /// Shift down with cutoff: subtract `amount` from free variable indices >= cutoff.
-    pub fn push_shift_down_cutoff(&mut self, e: ExprPtr<'t>, amount: u16, cutoff: u16) -> ExprPtr<'t> {
+    pub fn push_shift_down_cutoff(&mut self, e: CorePtr<'t>, amount: u16, cutoff: u16) -> CorePtr<'t> {
         if amount == 0 { return e; }
         let nlbv = self.num_loose_bvars(e);
         if nlbv <= cutoff { return e; }
@@ -1422,7 +1420,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         result
     }
 
-    fn push_shift_down_inner(&mut self, e: ExprPtr<'t>, amount: u16, cutoff: u16) -> ExprPtr<'t> {
+    fn push_shift_down_inner(&mut self, e: CorePtr<'t>, amount: u16, cutoff: u16) -> CorePtr<'t> {
         let nlbv = self.num_loose_bvars(e);
         if nlbv <= cutoff { return e; }
         match self.read_expr(e) {
@@ -1797,16 +1795,16 @@ pub struct NameCache<'p> {
 
 pub(crate) struct TcCache<'t> {
     /// Base caches (bucket 0): closed expressions, depth-independent.
-    pub(crate) whnf_base: LazyMap<ExprPtr<'t>, SPtr<'t>>,
-    pub(crate) wnu_base: LazyMap<ExprPtr<'t>, SPtr<'t>>,
-    pub(crate) infer_check_base: LazyMap<ExprPtr<'t>, SPtr<'t>>,
-    pub(crate) infer_no_check_base: LazyMap<ExprPtr<'t>, SPtr<'t>>,
+    pub(crate) whnf_base: LazyMap<CorePtr<'t>, SPtr<'t>>,
+    pub(crate) wnu_base: LazyMap<CorePtr<'t>, SPtr<'t>>,
+    pub(crate) infer_check_base: LazyMap<CorePtr<'t>, SPtr<'t>>,
+    pub(crate) infer_no_check_base: LazyMap<CorePtr<'t>, SPtr<'t>>,
     pub(crate) defeq_pos_base: LazyMap<(SPtr<'t>, SPtr<'t>), (SPtr<'t>, SPtr<'t>, u16)>,
     pub(crate) defeq_neg_base: LazyMap<(SPtr<'t>, SPtr<'t>), (SPtr<'t>, SPtr<'t>, u16)>,
     /// Depth-stacked weighted UF base (bucket 0): closed expressions.
-    pub(crate) uf_base: LazyMap<ExprPtr<'t>, SPtr<'t>>,
+    pub(crate) uf_base: LazyMap<CorePtr<'t>, SPtr<'t>>,
     /// Strong reduction cache (global, library feature).
-    pub(crate) strong_cache: UniqueHashMap<(ExprPtr<'t>, bool, bool), ExprPtr<'t>>,
+    pub(crate) strong_cache: UniqueHashMap<(CorePtr<'t>, bool, bool), CorePtr<'t>>,
     /// Per-depth frames: local bindings + open-expression caches.
     /// Frame at index i corresponds to binder depth i+1.
     /// Cache bucket k>0 maps to frames[k-1].
@@ -1910,22 +1908,22 @@ impl<'t> TcCache<'t> {
     }
 
     // Depth-indexed cache accessors using depth_get!/depth_insert! macros.
-    pub(crate) fn whnf_get(&self, b: usize, k: &ExprPtr<'t>) -> Option<SPtr<'t>> { depth_get!(self, b, k, whnf_base, whnf) }
-    pub(crate) fn whnf_insert(&mut self, b: usize, k: ExprPtr<'t>, v: SPtr<'t>) { depth_insert!(self, b, k, v, whnf_base, whnf) }
-    pub(crate) fn wnu_get(&self, b: usize, k: &ExprPtr<'t>) -> Option<SPtr<'t>> { depth_get!(self, b, k, wnu_base, wnu) }
-    pub(crate) fn wnu_insert(&mut self, b: usize, k: ExprPtr<'t>, v: SPtr<'t>) { depth_insert!(self, b, k, v, wnu_base, wnu) }
-    pub(crate) fn infer_check_get(&self, b: usize, k: &ExprPtr<'t>) -> Option<SPtr<'t>> { depth_get!(self, b, k, infer_check_base, infer_check) }
-    pub(crate) fn infer_check_insert(&mut self, b: usize, k: ExprPtr<'t>, v: SPtr<'t>) { depth_insert!(self, b, k, v, infer_check_base, infer_check) }
-    pub(crate) fn infer_no_check_get(&self, b: usize, k: &ExprPtr<'t>) -> Option<SPtr<'t>> { depth_get!(self, b, k, infer_no_check_base, infer_no_check) }
-    pub(crate) fn infer_no_check_insert(&mut self, b: usize, k: ExprPtr<'t>, v: SPtr<'t>) { depth_insert!(self, b, k, v, infer_no_check_base, infer_no_check) }
+    pub(crate) fn whnf_get(&self, b: usize, k: &CorePtr<'t>) -> Option<SPtr<'t>> { depth_get!(self, b, k, whnf_base, whnf) }
+    pub(crate) fn whnf_insert(&mut self, b: usize, k: CorePtr<'t>, v: SPtr<'t>) { depth_insert!(self, b, k, v, whnf_base, whnf) }
+    pub(crate) fn wnu_get(&self, b: usize, k: &CorePtr<'t>) -> Option<SPtr<'t>> { depth_get!(self, b, k, wnu_base, wnu) }
+    pub(crate) fn wnu_insert(&mut self, b: usize, k: CorePtr<'t>, v: SPtr<'t>) { depth_insert!(self, b, k, v, wnu_base, wnu) }
+    pub(crate) fn infer_check_get(&self, b: usize, k: &CorePtr<'t>) -> Option<SPtr<'t>> { depth_get!(self, b, k, infer_check_base, infer_check) }
+    pub(crate) fn infer_check_insert(&mut self, b: usize, k: CorePtr<'t>, v: SPtr<'t>) { depth_insert!(self, b, k, v, infer_check_base, infer_check) }
+    pub(crate) fn infer_no_check_get(&self, b: usize, k: &CorePtr<'t>) -> Option<SPtr<'t>> { depth_get!(self, b, k, infer_no_check_base, infer_no_check) }
+    pub(crate) fn infer_no_check_insert(&mut self, b: usize, k: CorePtr<'t>, v: SPtr<'t>) { depth_insert!(self, b, k, v, infer_no_check_base, infer_no_check) }
 
     /// Raw UF lookup at a specific bucket. Returns stored SPtr if present.
-    pub(crate) fn uf_get(&self, bucket: usize, core: &ExprPtr<'t>) -> Option<SPtr<'t>> {
+    pub(crate) fn uf_get(&self, bucket: usize, core: &CorePtr<'t>) -> Option<SPtr<'t>> {
         depth_get!(self, bucket, core, uf_base, uf)
     }
 
     /// Raw UF insert at a specific bucket.
-    pub(crate) fn uf_insert(&mut self, bucket: usize, core: ExprPtr<'t>, rep: SPtr<'t>) {
+    pub(crate) fn uf_insert(&mut self, bucket: usize, core: CorePtr<'t>, rep: SPtr<'t>) {
         depth_insert!(self, bucket, core, rep, uf_base, uf);
     }
 }

@@ -9,7 +9,7 @@ use crate::union_find::UnionFind;
 use crate::unique_hasher::UniqueHasher;
 use crate::util::{
     nat_div, nat_mod, nat_sub, nat_gcd, nat_land, nat_lor,
-    nat_xor, nat_shr, nat_shl, new_fx_hash_set, ExprPtr, FxHashSet,
+    nat_xor, nat_shr, nat_shl, new_fx_hash_set, CorePtr, FxHashSet,
     LevelPtr, LevelsPtr, NamePtr, SPtr, TcCtx, StringPtr
 };
 use std::collections::HashMap;
@@ -68,13 +68,13 @@ type UniqueHashMap<K, V> = HashMap<K, V, BuildHasherDefault<UniqueHasher>>;
 fn new_unique_hash_map<K, V>() -> UniqueHashMap<K, V> { UniqueHashMap::with_hasher(Default::default()) }
 
 pub(crate) struct NanodaTcCache<'t> {
-    pub(crate) infer_cache_check: UniqueHashMap<ExprPtr<'t>, SPtr<'t>>,
-    pub(crate) infer_cache_no_check: UniqueHashMap<ExprPtr<'t>, SPtr<'t>>,
-    pub(crate) whnf_cache: UniqueHashMap<ExprPtr<'t>, SPtr<'t>>,
-    pub(crate) whnf_no_unfolding_cache: UniqueHashMap<ExprPtr<'t>, SPtr<'t>>,
-    pub(crate) eq_cache: UnionFind<ExprPtr<'t>>,
-    pub(crate) failure_cache: FxHashSet<(ExprPtr<'t>, ExprPtr<'t>)>,
-    pub(crate) strong_cache: UniqueHashMap<(ExprPtr<'t>, bool, bool), SPtr<'t>>,
+    pub(crate) infer_cache_check: UniqueHashMap<CorePtr<'t>, SPtr<'t>>,
+    pub(crate) infer_cache_no_check: UniqueHashMap<CorePtr<'t>, SPtr<'t>>,
+    pub(crate) whnf_cache: UniqueHashMap<CorePtr<'t>, SPtr<'t>>,
+    pub(crate) whnf_no_unfolding_cache: UniqueHashMap<CorePtr<'t>, SPtr<'t>>,
+    pub(crate) eq_cache: UnionFind<CorePtr<'t>>,
+    pub(crate) failure_cache: FxHashSet<(CorePtr<'t>, CorePtr<'t>)>,
+    pub(crate) strong_cache: UniqueHashMap<(CorePtr<'t>, bool, bool), SPtr<'t>>,
 }
 
 impl<'t> NanodaTcCache<'t> {
@@ -548,7 +548,7 @@ impl<'x, 't: 'x, 'p: 't> NanodaTypeChecker<'x, 't, 'p> {
         self.ctx.inst(fun, ctx.as_slice())
     }
 
-    //fn infer_app(&mut self, e: ExprPtr<'t>, flag: InferFlag) -> ExprPtr<'t> {
+    //fn infer_app(&mut self, e: CorePtr<'t>, flag: InferFlag) -> CorePtr<'t> {
     //    match self.ctx.read_expr(e) {
     //        App {fun, arg, ..} => {
     //            let fun_ty = self.infer_then_whnf(fun, flag);

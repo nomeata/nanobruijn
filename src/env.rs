@@ -1,4 +1,4 @@
-use crate::util::{ExprPtr, FxHashMap, FxIndexMap, LevelsPtr, NamePtr};
+use crate::util::{CorePtr, FxHashMap, FxIndexMap, LevelsPtr, NamePtr};
 use std::sync::Arc;
 use serde::Deserialize;
 
@@ -36,7 +36,7 @@ impl ReducibilityHint {
 pub struct DeclarInfo<'a> {
     pub name: NamePtr<'a>,
     pub uparams: LevelsPtr<'a>,
-    pub ty: ExprPtr<'a>,
+    pub ty: CorePtr<'a>,
 }
 
 /// Computation rules for iota-reduction (pattern matching).
@@ -46,16 +46,16 @@ pub struct RecRule<'a> {
     /// the constructor's telescope size minus the params (but including indices).
     /// So a constructor with 2 params, 1 index, and 4 args is (1 + 4) = 5.
     pub ctor_telescope_size_wo_params: u16,
-    pub val: ExprPtr<'a>,
+    pub val: CorePtr<'a>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Declar<'a> {
     Axiom { info: DeclarInfo<'a> },
     Quot { info: DeclarInfo<'a> },
-    Theorem { info: DeclarInfo<'a>, val: ExprPtr<'a> },
-    Definition { info: DeclarInfo<'a>, val: ExprPtr<'a>, hint: ReducibilityHint },
-    Opaque { info: DeclarInfo<'a>, val: ExprPtr<'a> },
+    Theorem { info: DeclarInfo<'a>, val: CorePtr<'a> },
+    Definition { info: DeclarInfo<'a>, val: CorePtr<'a>, hint: ReducibilityHint },
+    Opaque { info: DeclarInfo<'a>, val: CorePtr<'a> },
     Inductive(InductiveData<'a>),
     Constructor(ConstructorData<'a>),
     Recursor(RecursorData<'a>),
@@ -275,7 +275,7 @@ impl<'x, 'a: 'x> Env<'x, 'a> {
 
     /// Get the value of a declaration, if that declaration has an associated value (only
     /// definitions and theorems have values). Also returns the declaration's universe parameters.
-    pub fn get_declar_val(&self, n: &NamePtr<'a>) -> Option<(LevelsPtr<'a>, ExprPtr<'a>)> {
+    pub fn get_declar_val(&self, n: &NamePtr<'a>) -> Option<(LevelsPtr<'a>, CorePtr<'a>)> {
         match self.get_declar(n)? {
             Declar::Definition { info, val, .. } | Declar::Theorem { info, val, .. } => Some((info.uparams, *val)),
             _ => None,

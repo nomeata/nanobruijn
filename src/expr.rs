@@ -1,5 +1,5 @@
 //! Implementation of Lean expressions
-use crate::util::{AppArgs, BigUintPtr, ExprPtr, FxHashMap, LevelPtr, LevelsPtr, NamePtr, SPtr, StringPtr, TcCtx};
+use crate::util::{AppArgs, BigUintPtr, CorePtr, FxHashMap, LevelPtr, LevelsPtr, NamePtr, SPtr, StringPtr, TcCtx};
 use num_bigint::BigUint;
 use num_traits::identities::Zero;
 use Expr::*;
@@ -97,7 +97,7 @@ pub enum Expr<'a> {
         hash: u64,
         binder_name: NamePtr<'a>,
         binder_style: BinderStyle,
-        binder_type: ExprPtr<'a>,
+        binder_type: CorePtr<'a>,
         id: FVarId,
     },
 }
@@ -213,7 +213,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
     /// `sh_amt`/`sh_cut` represent a pending outer Shift that is applied to `e` before
     /// instantiation, without creating intermediate Shift wrapper expressions.
     /// With SPtr children, the child's shift composes with the pending (sh_amt, sh_cut).
-    fn inst_aux(&mut self, e: ExprPtr<'t>, substs: &[SPtr<'t>], offset: u16, shift_down: bool, sh_amt: i16, sh_cut: u16) -> SPtr<'t> {
+    fn inst_aux(&mut self, e: CorePtr<'t>, substs: &[SPtr<'t>], offset: u16, shift_down: bool, sh_amt: i16, sh_cut: u16) -> SPtr<'t> {
         stacker::maybe_grow(64 * 1024, 2 * 1024 * 1024, || self.inst_aux_body(e, substs, offset, shift_down, sh_amt, sh_cut))
     }
 
@@ -295,7 +295,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
     /// Inlined fast path for inst_aux on children: avoids function call + stacker overhead
     /// for the common early-exit cases (closed expressions, nlbv below offset).
     #[inline(always)]
-    fn inst_aux_quick(&mut self, e: ExprPtr<'t>, substs: &[SPtr<'t>], offset: u16, shift_down: bool, sh_amt: i16, sh_cut: u16) -> SPtr<'t> {
+    fn inst_aux_quick(&mut self, e: CorePtr<'t>, substs: &[SPtr<'t>], offset: u16, shift_down: bool, sh_amt: i16, sh_cut: u16) -> SPtr<'t> {
         let nlbv = self.num_loose_bvars(e);
         let n_substs = substs.len() as u16;
         if sh_amt == 0 {
@@ -351,7 +351,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         self.inst_aux(e, substs, offset, shift_down, sh_amt, sh_cut)
     }
 
-    fn inst_aux_body(&mut self, e: ExprPtr<'t>, substs: &[SPtr<'t>], offset: u16, shift_down: bool, sh_amt: i16, sh_cut: u16) -> SPtr<'t> {
+    fn inst_aux_body(&mut self, e: CorePtr<'t>, substs: &[SPtr<'t>], offset: u16, shift_down: bool, sh_amt: i16, sh_cut: u16) -> SPtr<'t> {
         self.trace.inst_aux_calls += 1;
         if sh_amt != 0 { self.trace.inst_aux_shifted_path += 1; }
         self.check_heartbeat();
@@ -386,7 +386,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         let cache_tag = e.get_hash().wrapping_mul(0x517cc1b727220a95) ^ params;
         if self.expr_cache.inst_cache.is_empty() {
             let dummy = SPtr::closed(crate::util::Ptr::from(crate::util::DagMarker::ExportFile, 0));
-            let dummy_e: ExprPtr<'t> = crate::util::Ptr::from(crate::util::DagMarker::ExportFile, 0);
+            let dummy_e: CorePtr<'t> = crate::util::Ptr::from(crate::util::DagMarker::ExportFile, 0);
             self.expr_cache.inst_cache.resize(crate::util::INST_CACHE_SIZE, (0, 0, dummy_e, dummy));
         }
         let slot = (cache_tag as usize) & (crate::util::INST_CACHE_SIZE - 1);
@@ -499,7 +499,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
     /// Shift all free variables in `e` (those with index >= cutoff) up by `amount`.
     /// For cutoff=0, creates a lazy Shift node (O(1)).
     /// For cutoff>0, traverses and rebuilds.
-    pub fn shift_expr(&mut self, e: ExprPtr<'t>, amount: u16, cutoff: u16) -> SPtr<'t> {
+    pub fn shift_expr(&mut self, e: CorePtr<'t>, amount: u16, cutoff: u16) -> SPtr<'t> {
         let nlbv = self.num_loose_bvars(e);
         if amount == 0 || nlbv <= cutoff {
             return SPtr::from_nlbv(e, nlbv)
@@ -510,7 +510,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         self.shift_expr_aux(e, amount, cutoff)
     }
 
-    fn shift_expr_aux(&mut self, e: ExprPtr<'t>, amount: u16, cutoff: u16) -> SPtr<'t> {
+    fn shift_expr_aux(&mut self, e: CorePtr<'t>, amount: u16, cutoff: u16) -> SPtr<'t> {
         let nlbv = self.num_loose_bvars(e);
         if nlbv <= cutoff {
             return SPtr::from_nlbv(e, nlbv)
@@ -581,20 +581,20 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
     /// From `e[x_1..x_n/v_1..v_n]`, abstract and re-inst, creating `e[y_1..y_n/v_1..v_n]`.
     pub(crate) fn replace_params(
         &mut self,
-        e: ExprPtr<'t>,
-        ingoing: &[ExprPtr<'t>],
-        outgoing: &[ExprPtr<'t>],
+        e: CorePtr<'t>,
+        ingoing: &[CorePtr<'t>],
+        outgoing: &[CorePtr<'t>],
     ) -> SPtr<'t> {
         let e = self.abstr(e, outgoing);
         let ingoing_sptrs: AppArgs<'t> = ingoing.iter().map(|&p| SPtr::closed(p)).collect(); // Locals are always closed
         self.inst(e, &ingoing_sptrs)
     }
 
-    fn abstr_aux(&mut self, e: ExprPtr<'t>, locals: &[ExprPtr<'t>], offset: u16) -> SPtr<'t> {
+    fn abstr_aux(&mut self, e: CorePtr<'t>, locals: &[CorePtr<'t>], offset: u16) -> SPtr<'t> {
         stacker::maybe_grow(64 * 1024, 2 * 1024 * 1024, || self.abstr_aux_body(e, locals, offset))
     }
 
-    fn abstr_aux_body(&mut self, e: ExprPtr<'t>, locals: &[ExprPtr<'t>], offset: u16) -> SPtr<'t> {
+    fn abstr_aux_body(&mut self, e: CorePtr<'t>, locals: &[CorePtr<'t>], offset: u16) -> SPtr<'t> {
         if !self.has_fvars(e) {
             SPtr::from_nlbv(e, self.num_loose_bvars(e))
         } else if let Some(cached) = self.expr_cache.abstr_cache.get(&(e, offset)) {
@@ -645,7 +645,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
     /// Locals have nlbv=0 so they can't appear under a shift.
     /// We recurse on child.core and re-wrap with child.shift.
     /// Abstract locals in an SPtr child. Adjusts offset to account for child's shift.
-    fn abstr_aux_sptr(&mut self, child: SPtr<'t>, locals: &[ExprPtr<'t>], offset: u16) -> SPtr<'t> {
+    fn abstr_aux_sptr(&mut self, child: SPtr<'t>, locals: &[CorePtr<'t>], offset: u16) -> SPtr<'t> {
         if child.is_closed() {
             if !self.has_fvars(child.core) { return child; }
             // Closed (Local) with fvars — must check for abstraction
@@ -700,18 +700,18 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
 
     /// Abstraction of unique identifiers; replaces free variables with the appropriate
     /// bound variable, if the free variable is in `locals`.
-    pub fn abstr(&mut self, e: ExprPtr<'t>, locals: &[ExprPtr<'t>]) -> SPtr<'t> {
+    pub fn abstr(&mut self, e: CorePtr<'t>, locals: &[CorePtr<'t>]) -> SPtr<'t> {
         self.expr_cache.abstr_cache.clear();
         self.abstr_aux(e, locals, 0u16)
     }
 
     /// Abstraction by deBruijn level: converts DbjLevel locals back to Var.
     /// Used by nanoda's locally-nameless TC.
-    fn abstr_aux_levels(&mut self, e: ExprPtr<'t>, start_pos: u16, num_open_binders: u16) -> SPtr<'t> {
+    fn abstr_aux_levels(&mut self, e: CorePtr<'t>, start_pos: u16, num_open_binders: u16) -> SPtr<'t> {
         stacker::maybe_grow(64 * 1024, 2 * 1024 * 1024, || self.abstr_aux_levels_body(e, start_pos, num_open_binders))
     }
 
-    fn abstr_aux_levels_body(&mut self, e: ExprPtr<'t>, start_pos: u16, num_open_binders: u16) -> SPtr<'t> {
+    fn abstr_aux_levels_body(&mut self, e: CorePtr<'t>, start_pos: u16, num_open_binders: u16) -> SPtr<'t> {
         if !self.has_fvars(e) {
             SPtr::from_nlbv(e, self.num_loose_bvars(e))
         } else if let Some(&cached) = self.expr_cache.abstr_cache_levels.get(&(e, start_pos, num_open_binders)) {
@@ -813,16 +813,16 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
 
     /// Abstract deBruijn-level free variables back to bound variables.
     /// Used by nanoda's locally-nameless TC.
-    pub fn abstr_levels(&mut self, e: ExprPtr<'t>, start_pos: u16) -> SPtr<'t> {
+    pub fn abstr_levels(&mut self, e: CorePtr<'t>, start_pos: u16) -> SPtr<'t> {
         self.expr_cache.abstr_cache_levels.clear();
         self.abstr_aux_levels(e, start_pos, self.dbj_level_counter)
     }
 
-    fn subst_aux(&mut self, e: ExprPtr<'t>, ks: LevelsPtr<'t>, vs: LevelsPtr<'t>) -> SPtr<'t> {
+    fn subst_aux(&mut self, e: CorePtr<'t>, ks: LevelsPtr<'t>, vs: LevelsPtr<'t>) -> SPtr<'t> {
         stacker::maybe_grow(64 * 1024, 2 * 1024 * 1024, || self.subst_aux_body(e, ks, vs))
     }
 
-    fn subst_aux_body(&mut self, e: ExprPtr<'t>, ks: LevelsPtr<'t>, vs: LevelsPtr<'t>) -> SPtr<'t> {
+    fn subst_aux_body(&mut self, e: CorePtr<'t>, ks: LevelsPtr<'t>, vs: LevelsPtr<'t>) -> SPtr<'t> {
         if let Some(&cached) = self.expr_cache.subst_cache.get(&(e, ks, vs)) {
             return cached;
         }
@@ -878,7 +878,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         self.sptr_shift(result, child.shift)
     }
 
-    pub fn subst_expr_levels(&mut self, e: ExprPtr<'t>, ks: LevelsPtr<'t>, vs: LevelsPtr<'t>) -> SPtr<'t> {
+    pub fn subst_expr_levels(&mut self, e: CorePtr<'t>, ks: LevelsPtr<'t>, vs: LevelsPtr<'t>) -> SPtr<'t> {
         if let Some(&cached) = self.expr_cache.dsubst_cache.get(&(e, ks, vs)) {
             return cached;
         }
@@ -897,7 +897,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         self.subst_expr_levels(info.ty, info.uparams, in_vals)
     }
 
-    pub fn num_args(&self, e: ExprPtr<'t>) -> usize {
+    pub fn num_args(&self, e: CorePtr<'t>) -> usize {
         let (mut cursor, mut num_args) = (e, 0);
         while let App { fun, .. } = self.read_expr(cursor) {
             cursor = fun.core;
@@ -957,7 +957,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         }
     }
     /// If this is an application of `Const(name, levels)`, return `(name, levels)`
-    pub fn try_const_info(&self, e: ExprPtr<'t>) -> Option<(NamePtr<'t>, LevelsPtr<'t>)> {
+    pub fn try_const_info(&self, e: CorePtr<'t>) -> Option<(NamePtr<'t>, LevelsPtr<'t>)> {
         match self.read_expr(e) {
             Const { name, levels, .. } => Some((name, levels)),
             _ => None,
@@ -992,7 +992,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
 
     pub(crate) fn abstr_pis<I>(&mut self, mut binders: I, body: SPtr<'t>) -> SPtr<'t>
     where
-        I: Iterator<Item = ExprPtr<'t>> + DoubleEndedIterator, {
+        I: Iterator<Item = CorePtr<'t>> + DoubleEndedIterator, {
         let mut result = body;
         while let Some(local) = binders.next_back() {
             result = self.abstr_pi(local, result)
@@ -1000,25 +1000,25 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         result
     }
 
-    pub(crate) fn abstr_pi(&mut self, binder: ExprPtr<'t>, body: SPtr<'t>) -> SPtr<'t> {
+    pub(crate) fn abstr_pi(&mut self, binder: CorePtr<'t>, body: SPtr<'t>) -> SPtr<'t> {
         match self.read_expr(binder) {
             Local { binder_name, binder_style, binder_type, .. } => {
                 // Use abstr_aux_sptr to correctly handle body.shift.
                 // abstr(body.core, ...) would drop the shift, producing wrong var indices.
                 self.expr_cache.abstr_cache.clear();
                 let body = self.abstr_aux_sptr(body, &[binder], 0);
-                self.mk_pi(binder_name, binder_style, SPtr::closed(binder_type), body) // binder_type is ExprPtr from Local
+                self.mk_pi(binder_name, binder_style, SPtr::closed(binder_type), body) // binder_type is CorePtr from Local
             }
             _ => unreachable!("Cannot apply pi with non-local domain type"),
         }
     }
 
-    pub(crate) fn apply_lambda(&mut self, binder: ExprPtr<'t>, body: SPtr<'t>) -> SPtr<'t> {
+    pub(crate) fn apply_lambda(&mut self, binder: CorePtr<'t>, body: SPtr<'t>) -> SPtr<'t> {
         match self.read_expr(binder) {
             Local { binder_name, binder_style, binder_type, .. } => {
                 self.expr_cache.abstr_cache.clear();
                 let body = self.abstr_aux_sptr(body, &[binder], 0);
-                self.mk_lambda(binder_name, binder_style, SPtr::closed(binder_type), body) // binder_type is ExprPtr from Local
+                self.mk_lambda(binder_name, binder_style, SPtr::closed(binder_type), body) // binder_type is CorePtr from Local
             }
             _ => unreachable!("Cannot apply lambda with non-local domain type"),
         }
@@ -1074,7 +1074,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
     
     /// Check if `e` is an application of a specific constant with the given arity.
     /// With SPtr children, just follow the App.fun spine ignoring shifts.
-    pub(crate) fn is_app_of_const(&self, e: ExprPtr<'t>, name: NamePtr<'t>, arity: usize) -> bool {
+    pub(crate) fn is_app_of_const(&self, e: CorePtr<'t>, name: NamePtr<'t>, arity: usize) -> bool {
         let mut cur = e;
         for _ in 0..arity {
             if let App { fun, .. } = self.read_expr(cur) { cur = fun.core; } else { return false; }
@@ -1083,7 +1083,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
     }
 
     /// Return `true` iff `e` is an application of `@eagerReduce A a`
-    pub(crate) fn is_eager_reduce_app(&self, e: ExprPtr<'t>) -> bool {
+    pub(crate) fn is_eager_reduce_app(&self, e: CorePtr<'t>) -> bool {
         if let Some(eager_name) = self.export_file.name_cache.eager_reduce {
             self.is_app_of_const(e, eager_name, 2)
         } else {
@@ -1181,14 +1181,14 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         Some(self.mk_const(n, levels))
     }
 
-    /// c_nat_zero and c_nat_succ return ExprPtr for easy comparison with .core fields
-    pub(crate) fn c_nat_zero(&mut self) -> Option<ExprPtr<'t>> {
+    /// c_nat_zero and c_nat_succ return CorePtr for easy comparison with .core fields
+    pub(crate) fn c_nat_zero(&mut self) -> Option<CorePtr<'t>> {
         let n = self.export_file.name_cache.nat_zero?;
         let levels = self.alloc_levels_slice(&[]);
         Some(self.mk_const(n, levels).core)
     }
 
-    pub(crate) fn c_nat_succ(&mut self) -> Option<ExprPtr<'t>> {
+    pub(crate) fn c_nat_succ(&mut self) -> Option<CorePtr<'t>> {
         let n = self.export_file.name_cache.nat_succ?;
         let levels = self.alloc_levels_slice(&[]);
         Some(self.mk_const(n, levels).core)
@@ -1212,7 +1212,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
     /// telescope while backing out.
     ///
     /// `[a, b, c], e` ~> `(fun (a b c) => e)`
-    pub(crate) fn abstr_lambda_telescope(&mut self, mut binders: &[ExprPtr<'t>], body: SPtr<'t>) -> SPtr<'t> {
+    pub(crate) fn abstr_lambda_telescope(&mut self, mut binders: &[CorePtr<'t>], body: SPtr<'t>) -> SPtr<'t> {
         let mut result = body;
         while let [tl @ .., binder] = binders {
             result = self.apply_lambda(*binder, result);
@@ -1225,7 +1225,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
     /// telescope while backing out.
     ///
     /// `[a, b, c], e` ~> `(Pi (a b c) => e)`
-    pub(crate) fn abstr_pi_telescope(&mut self, mut binders: &[ExprPtr<'t>], body: SPtr<'t>) -> SPtr<'t> {
+    pub(crate) fn abstr_pi_telescope(&mut self, mut binders: &[CorePtr<'t>], body: SPtr<'t>) -> SPtr<'t> {
         let mut result = body;
         while let [tl @ .., binder] = binders {
             result = self.abstr_pi(*binder, result);
@@ -1234,14 +1234,14 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         result
     }
 
-    pub(crate) fn find_const<F>(&self, e: ExprPtr<'t>, pred: F) -> bool
+    pub(crate) fn find_const<F>(&self, e: CorePtr<'t>, pred: F) -> bool
     where
         F: FnOnce(NamePtr<'t>) -> bool + Copy, {
         let mut cache = crate::util::new_fx_hash_map();
         self.find_const_aux(e, pred, &mut cache)
     }
 
-    fn find_const_aux<F>(&self, e: ExprPtr<'t>, pred: F, cache: &mut FxHashMap<ExprPtr<'t>, bool>) -> bool
+    fn find_const_aux<F>(&self, e: CorePtr<'t>, pred: F, cache: &mut FxHashMap<CorePtr<'t>, bool>) -> bool
     where
         F: FnOnce(NamePtr<'t>) -> bool + Copy, {
         if let Some(cached) = cache.get(&e) {
@@ -1328,19 +1328,19 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
     /// in an expression which are boudn by something above it.
     /// Fast num_loose_bvars lookup via parallel Vec (avoids reading the full 48-byte Expr).
     #[inline(always)]
-    pub(crate) fn num_loose_bvars(&self, e: ExprPtr<'t>) -> u16 {
+    pub(crate) fn num_loose_bvars(&self, e: CorePtr<'t>) -> u16 {
         match e.dag_marker() {
             crate::util::DagMarker::ExportFile => self.export_file.dag.expr_nlbv[e.idx()],
             crate::util::DagMarker::TcCtx => self.dag.expr_nlbv[e.idx()],
         }
     }
 
-    pub(crate) fn has_fvars(&self, e: ExprPtr<'t>) -> bool { self.read_expr(e).has_fvars() }
+    pub(crate) fn has_fvars(&self, e: CorePtr<'t>) -> bool { self.read_expr(e).has_fvars() }
 
-    /// With SPtr, fvar_lb of a DAG ExprPtr is always 0 (cores are OSNF-normalized).
+    /// With SPtr, fvar_lb of a DAG CorePtr is always 0 (cores are OSNF-normalized).
     /// The effective fvar_lb of an SPtr is sptr.shift.
     #[inline(always)]
-    pub(crate) fn fvar_lb(&self, _e: ExprPtr<'t>) -> u16 {
+    pub(crate) fn fvar_lb(&self, _e: CorePtr<'t>) -> u16 {
         0
     }
 

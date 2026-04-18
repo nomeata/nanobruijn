@@ -3,7 +3,7 @@ use crate::expr::{BinderStyle, Expr::*, FVarId};
 use crate::hash64;
 use crate::level::Level;
 use crate::name::Name;
-use crate::util::{ExportFile, ExprPtr, LevelPtr, LevelsPtr, NamePtr, SPtr, StringPtr, TcCtx};
+use crate::util::{ExportFile, CorePtr, LevelPtr, LevelsPtr, NamePtr, SPtr, StringPtr, TcCtx};
 use serde::Deserialize;
 use std::error::Error;
 use std::rc::Rc;
@@ -307,12 +307,12 @@ struct ParsedBinder<'a> {
     occurs_in_body: bool,
     is_anon: bool,
     has_macro_scopes: bool,
-    local_const: ExprPtr<'a>,
+    local_const: CorePtr<'a>,
     // Keep the name, style, and type inline so we don't have to read
     // the pointer to get that info.
     binder_name: NamePtr<'a>,
     binder_style: BinderStyle,
-    binder_type: ExprPtr<'a>,
+    binder_type: CorePtr<'a>,
 }
 
 impl<'a> ParsedBinder<'a> {
@@ -420,7 +420,7 @@ impl<'x, 't, 'p> PrettyPrinter<'x, 't, 'p> {
         is_pi: bool,
         occurs_in_body: bool,
         is_anon: bool,
-        local_const: ExprPtr<'t>,
+        local_const: CorePtr<'t>,
     ) -> ParsedBinder<'t> {
         if let Local { binder_name, binder_style, binder_type, .. } = self.ctx.read_expr(local_const) {
             let has_macro_scopes = self.ctx.has_macro_scopes(binder_name);
@@ -439,7 +439,7 @@ impl<'x, 't, 'p> PrettyPrinter<'x, 't, 'p> {
         }
     }
 
-    fn pp_bare_binder(&mut self, binder_name: NamePtr<'t>, binder_type: ExprPtr<'t>) -> DocPtr {
+    fn pp_bare_binder(&mut self, binder_name: NamePtr<'t>, binder_type: CorePtr<'t>) -> DocPtr {
         let ty = self.pp_expr_aux(binder_type).parens(1).group();
         self.pp_name_safe(binder_name).concat_w_space(":").concat_line(ty)
     }
@@ -525,7 +525,7 @@ impl<'x, 't, 'p> PrettyPrinter<'x, 't, 'p> {
     /// The parsed binder elements are free variables with the binder types, and
     /// they carry information about whether they're a pi or lambda, if they're seen
     /// later, etc.
-    fn parse_binders(&mut self, mut e: ExprPtr<'t>) -> (Vec<ParsedBinder<'t>>, ExprPtr<'t>) {
+    fn parse_binders(&mut self, mut e: CorePtr<'t>) -> (Vec<ParsedBinder<'t>>, CorePtr<'t>) {
         let (mut binders, mut binder_tys) = (Vec::<ParsedBinder>::new(), Vec::<SPtr>::new());
         while let Pi { binder_name, binder_style, binder_type, body, .. }
         | Lambda { binder_name, binder_style, binder_type, body, .. } = self.ctx.read_expr(e)
@@ -611,7 +611,7 @@ impl<'x, 't, 'p> PrettyPrinter<'x, 't, 'p> {
     }
 
     /// Does this expression infer as a `Pi` with any binder style other than `Default`
-    fn is_implicit_fun(&mut self, fun: ExprPtr<'t>) -> bool {
+    fn is_implicit_fun(&mut self, fun: CorePtr<'t>) -> bool {
         self.ctx.with_tc(crate::env::EnvLimit::PpUnlimited, |tc| {
             let ty = tc.infer_then_whnf(SPtr::closed(fun), crate::tc::InferFlag::InferOnly);
             match tc.ctx.read_expr(ty.core) {
@@ -621,7 +621,7 @@ impl<'x, 't, 'p> PrettyPrinter<'x, 't, 'p> {
         })
     }
 
-    fn pp_fun_app(&mut self, f: ExprPtr<'t>, apps: &Vec<ExprPtr<'t>>) -> Parenable {
+    fn pp_fun_app(&mut self, f: CorePtr<'t>, apps: &Vec<CorePtr<'t>>) -> Parenable {
         let mut docs = vec![self.pp_expr_aux(f).parens(MAX_LEVEL - 1).group()];
         for arg in apps {
             docs.push(self.pp_expr_aux(*arg).parens(MAX_LEVEL).group());
@@ -629,7 +629,7 @@ impl<'x, 't, 'p> PrettyPrinter<'x, 't, 'p> {
         Parenable::new(tile_docs(docs.iter().cloned()).nest_group(self.options().indent), MAX_LEVEL - 1)
     }
 
-    fn unfold_apps_pp(&mut self, e: ExprPtr<'t>) -> (ExprPtr<'t>, Vec<ExprPtr<'t>>) {
+    fn unfold_apps_pp(&mut self, e: CorePtr<'t>) -> (CorePtr<'t>, Vec<CorePtr<'t>>) {
         match self.ctx.read_expr(e) {
             App { fun, arg, .. } => {
                 let (f, mut out) = self.unfold_apps_pp(fun.core);
@@ -642,7 +642,7 @@ impl<'x, 't, 'p> PrettyPrinter<'x, 't, 'p> {
         }
     }
 
-    fn pp_app(&mut self, e: ExprPtr<'t>) -> Parenable {
+    fn pp_app(&mut self, e: CorePtr<'t>) -> Parenable {
         use crate::env::Notation::*;
         let (f, args) = self.unfold_apps_pp(e);
         match self.ctx.read_expr(f) {
@@ -706,9 +706,9 @@ impl<'x, 't, 'p> PrettyPrinter<'x, 't, 'p> {
     fn pp_let(
         &mut self,
         binder_name: NamePtr<'t>,
-        binder_type: ExprPtr<'t>,
-        val: ExprPtr<'t>,
-        body: ExprPtr<'t>,
+        binder_type: CorePtr<'t>,
+        val: CorePtr<'t>,
+        body: CorePtr<'t>,
     ) -> Parenable {
         let suggestion = self.ctx.mk_unique(binder_name, BinderStyle::Default, binder_type);
         let fresh_lc_name = binder_name;
@@ -733,7 +733,7 @@ impl<'x, 't, 'p> PrettyPrinter<'x, 't, 'p> {
             .as_parenable(0)
     }
 
-    fn pp_expr_aux(&mut self, e: ExprPtr<'t>) -> Parenable {
+    fn pp_expr_aux(&mut self, e: CorePtr<'t>) -> Parenable {
         if !self.options().proofs && self.ctx.with_tc(crate::env::EnvLimit::PpUnlimited, |tc| tc.is_proof(crate::util::SPtr::closed(e)).0) {
             DocPtr::from("_").as_unparenable()
         } else {
@@ -779,7 +779,7 @@ impl<'x, 't, 'p> PrettyPrinter<'x, 't, 'p> {
     }
 
     /// Pretty print theorems, definitions, and opaques.
-    fn main_def(&mut self, declar: &Declar<'t>, mut val: ExprPtr<'t>) -> DocPtr {
+    fn main_def(&mut self, declar: &Declar<'t>, mut val: CorePtr<'t>) -> DocPtr {
         let (binders, ty) = self.parse_binders(declar.info().ty);
         // inlined parse_params
         let mut slice_split_idx = 0usize;
@@ -890,14 +890,14 @@ impl<'x, 't, 'p> PrettyPrinter<'x, 't, 'p> {
     }
 
     /// Pretty print an expression. If this is  part of a larger declaration, use `pp_declar`
-    pub fn pp_expr(&mut self, e: ExprPtr<'t>) -> String {
+    pub fn pp_expr(&mut self, e: CorePtr<'t>) -> String {
         self.pp_expr_aux(e).parens(0).group().render(self.options().width)
     }
 }
 
 impl<'t, 'p: 't> TcCtx<'t, 'p> {
     /// Does `e` contain a bound variable with deBruijn index `i`.
-    fn has_var(&self, e: ExprPtr<'t>, i: u16) -> bool {
+    fn has_var(&self, e: CorePtr<'t>, i: u16) -> bool {
         if self.num_loose_bvars(e) <= i {
             return false
         }
@@ -914,7 +914,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         }
     }
 
-    fn swap_local_binding_name(&mut self, e: ExprPtr<'t>, new_name: NamePtr<'t>) -> ExprPtr<'t> {
+    fn swap_local_binding_name(&mut self, e: CorePtr<'t>, new_name: NamePtr<'t>) -> CorePtr<'t> {
         match self.read_expr(e) {
             Local { binder_style, binder_type, id: id @ FVarId::Unique(_), .. } => {
                 let hash = hash64!(crate::expr::LOCAL_HASH, new_name, binder_style, binder_type, id);

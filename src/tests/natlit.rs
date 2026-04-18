@@ -727,7 +727,7 @@ fn nat_mod_eq_sub_mod() {
 //
 //#[cfg(test)]
 //impl<'t, 'p> TcCtx<'t, 'p> {
-//    fn nat_binop(&mut self, l: ExprPtr<'t>, op: NatBinOp, r: ExprPtr<'t>) -> ExprPtr<'t> {
+//    fn nat_binop(&mut self, l: CorePtr<'t>, op: NatBinOp, r: CorePtr<'t>) -> CorePtr<'t> {
 //        let op_name = match op {
 //            NatBinOp::Add => self.export_file.name_cache.nat_add.unwrap(),
 //            NatBinOp::Sub => self.export_file.name_cache.nat_sub.unwrap(),
@@ -753,20 +753,20 @@ fn nat_mod_eq_sub_mod() {
 //
 //#[cfg(test)]
 //impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
-//    fn assert_eq_beq(&mut self, x: ExprPtr<'t>, y: ExprPtr<'t>) {
+//    fn assert_eq_beq(&mut self, x: CorePtr<'t>, y: CorePtr<'t>) {
 //        self.tc_cache.clear();
 //        assert!(self.def_eq(x, y));
 //        self.assert_beq(x, y)
 //    }
 //
-//    fn assert_beq(&mut self, x: ExprPtr<'t>, y: ExprPtr<'t>) {
+//    fn assert_beq(&mut self, x: CorePtr<'t>, y: CorePtr<'t>) {
 //        self.tc_cache.clear();
 //        let bool_true = self.ctx.bool_to_expr(true).unwrap();
 //        let beq = self.ctx.nat_binop(x, NatBinOp::Beq, y);
 //        assert!(self.def_eq(beq, bool_true))
 //    }
 //
-//    fn assert_not_beq(&mut self, x: ExprPtr<'t>, y: ExprPtr<'t>) {
+//    fn assert_not_beq(&mut self, x: CorePtr<'t>, y: CorePtr<'t>) {
 //        self.tc_cache.clear();
 //        let beq = self.ctx.nat_binop(x, NatBinOp::Beq, y);
 //        let bool_false = self.ctx.bool_to_expr(false).unwrap();
@@ -774,7 +774,7 @@ fn nat_mod_eq_sub_mod() {
 //    }
 //
 //    #[allow(dead_code)]
-//    fn assert_ble(&mut self, x: ExprPtr<'t>, y: ExprPtr<'t>) {
+//    fn assert_ble(&mut self, x: CorePtr<'t>, y: CorePtr<'t>) {
 //        self.tc_cache.clear();
 //        let bool_true = self.ctx.bool_to_expr(true).unwrap();
 //        let ble = self.ctx.nat_binop(x, NatBinOp::Ble, y);
