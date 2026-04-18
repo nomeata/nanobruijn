@@ -1515,6 +1515,66 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
     }
 
 
+    /// Cheap head-constructor checks. These just read the DAG node tag — shifts
+    /// don't change the head constructor, so no shift work is needed.
+    #[inline] pub fn is_app(&self, s: ExprPtr<'t>) -> bool { matches!(self.read_expr(s.core), Expr::App { .. }) }
+    #[inline] pub fn is_pi(&self, s: ExprPtr<'t>) -> bool { matches!(self.read_expr(s.core), Expr::Pi { .. }) }
+    #[inline] pub fn is_lambda(&self, s: ExprPtr<'t>) -> bool { matches!(self.read_expr(s.core), Expr::Lambda { .. }) }
+    #[inline] pub fn is_let(&self, s: ExprPtr<'t>) -> bool { matches!(self.read_expr(s.core), Expr::Let { .. }) }
+    #[inline] pub fn is_sort(&self, s: ExprPtr<'t>) -> bool { matches!(self.read_expr(s.core), Expr::Sort { .. }) }
+    #[inline] pub fn is_const(&self, s: ExprPtr<'t>) -> bool { matches!(self.read_expr(s.core), Expr::Const { .. }) }
+    #[inline] pub fn is_proj(&self, s: ExprPtr<'t>) -> bool { matches!(self.read_expr(s.core), Expr::Proj { .. }) }
+    #[inline] pub fn is_var(&self, s: ExprPtr<'t>) -> bool { matches!(self.read_expr(s.core), Expr::Var { .. }) }
+    #[inline] pub fn is_local(&self, s: ExprPtr<'t>) -> bool { matches!(self.read_expr(s.core), Expr::Local { .. }) }
+    #[inline] pub fn is_nat_lit(&self, s: ExprPtr<'t>) -> bool { matches!(self.read_expr(s.core), Expr::NatLit { .. }) }
+    #[inline] pub fn is_string_lit(&self, s: ExprPtr<'t>) -> bool { matches!(self.read_expr(s.core), Expr::StringLit { .. }) }
+
+    /// View an App's children with shifts composed. Returns None if not an App.
+    /// O(1) — App children only need sptr_shift which is a shift-arithmetic no-op
+    /// for closed children.
+    pub fn view_app(&self, s: ExprPtr<'t>) -> Option<(ExprPtr<'t>, ExprPtr<'t>)> {
+        match self.read_expr(s.core) {
+            Expr::App { fun, arg, .. } => {
+                if s.shift == 0 || s.is_closed() {
+                    Some((fun, arg))
+                } else {
+                    Some((self.sptr_shift(fun, s.shift), self.sptr_shift(arg, s.shift)))
+                }
+            }
+            _ => None,
+        }
+    }
+
+    /// View a Proj's structure with shifts composed. Returns None if not a Proj.
+    /// Also returns (ty_name, idx) for matching.
+    pub fn view_proj(&self, s: ExprPtr<'t>) -> Option<(NamePtr<'t>, u32, ExprPtr<'t>)> {
+        match self.read_expr(s.core) {
+            Expr::Proj { ty_name, idx, structure, .. } => {
+                let structure = if s.shift == 0 || s.is_closed() { structure } else { self.sptr_shift(structure, s.shift) };
+                Some((ty_name, idx, structure))
+            }
+            _ => None,
+        }
+    }
+
+    /// View a Const. Returns None if not a Const. Const is closed so shift doesn't matter.
+    pub fn view_const(&self, s: ExprPtr<'t>) -> Option<(NamePtr<'t>, LevelsPtr<'t>)> {
+        match self.read_expr(s.core) {
+            Expr::Const { name, levels, .. } => Some((name, levels)),
+            _ => None,
+        }
+    }
+
+    /// View a Var. Returns the shifted dbj_idx. Var is always open, shift applies directly.
+    pub fn view_var(&self, s: ExprPtr<'t>) -> Option<u16> {
+        match self.read_expr(s.core) {
+            Expr::Var { dbj_idx, .. } => {
+                if s.is_closed() { None } else { Some(dbj_idx + s.shift) }
+            }
+            _ => None,
+        }
+    }
+
     /// View an ExprPtr as a materialized Expr.
     /// If shift==0, returns read_expr(ptr) directly.
     /// If shift>0, adjusts children by composing shifts.
