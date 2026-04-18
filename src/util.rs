@@ -1575,6 +1575,31 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         }
     }
 
+    /// View a Pi's binder head (name, style, binder_type) without composing body shifts.
+    /// The expensive body-traversal of view_sptr is skipped. Returns None if not a Pi.
+    /// binder_type has shift composed (O(1)).
+    pub fn view_pi_head(&self, s: ExprPtr<'t>) -> Option<(NamePtr<'t>, BinderStyle, ExprPtr<'t>)> {
+        match self.read_expr(s.core) {
+            Expr::Pi { binder_name, binder_style, binder_type, .. } => {
+                let bt = if s.shift == 0 || s.is_closed() { binder_type } else { self.sptr_shift(binder_type, s.shift) };
+                Some((binder_name, binder_style, bt))
+            }
+            _ => None,
+        }
+    }
+
+    /// View a Lambda's binder head (name, style, binder_type) without composing body shifts.
+    /// Returns None if not a Lambda.
+    pub fn view_lambda_head(&self, s: ExprPtr<'t>) -> Option<(NamePtr<'t>, BinderStyle, ExprPtr<'t>)> {
+        match self.read_expr(s.core) {
+            Expr::Lambda { binder_name, binder_style, binder_type, .. } => {
+                let bt = if s.shift == 0 || s.is_closed() { binder_type } else { self.sptr_shift(binder_type, s.shift) };
+                Some((binder_name, binder_style, bt))
+            }
+            _ => None,
+        }
+    }
+
     /// View an ExprPtr as a materialized Expr.
     /// If shift==0, returns read_expr(ptr) directly.
     /// If shift>0, adjusts children by composing shifts.

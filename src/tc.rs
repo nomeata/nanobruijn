@@ -491,13 +491,14 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
     }
 
     fn ensure_pi(&mut self, e: ExprPtr<'t>) -> ExprPtr<'t> {
-        if let Pi { .. } = self.ctx.view_sptr(e) {
+        if self.ctx.is_pi(e) {
             return e
         }
         let whnfd = self.whnf(e);
-        match self.ctx.view_sptr(whnfd) {
-            Pi { .. } => whnfd,
-            _ => panic!("ensure_pi could not produce a pi"),
+        if self.ctx.is_pi(whnfd) {
+            whnfd
+        } else {
+            panic!("ensure_pi could not produce a pi")
         }
     }
 
@@ -540,7 +541,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
     }
 
     fn try_string_lit_expansion_aux(&mut self, x: ExprPtr<'t>, y: ExprPtr<'t>) -> Option<bool> {
-        if let (StringLit { ptr, .. }, App { fun, .. }) = (self.ctx.read_expr(x.core), self.ctx.view_sptr(y)) {
+        if let (StringLit { ptr, .. }, Some((fun, _))) = (self.ctx.read_expr(x.core), self.ctx.view_app(y)) {
             if let Some((name, _levels)) = self.ctx.try_const_info(fun.core) {
                 if name == self.ctx.export_file.name_cache.string_of_list? {
                     // levels should be empty
@@ -656,7 +657,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
 
     fn reduce_proj(&mut self, idx: u32, structure: ExprPtr<'t>, cheap: bool) -> Option<ExprPtr<'t>> {
         let mut structure = if cheap { self.whnf_no_unfolding_cheap_proj(structure) } else { self.whnf(structure) };
-        if let StringLit { ptr, .. } = self.ctx.view_sptr(structure) {
+        if let StringLit { ptr, .. } = self.ctx.read_expr(structure.core) {
             if let Some(s) = self.str_lit_to_ctor_reducing(ptr) {
                 structure = s;
             }
@@ -840,14 +841,9 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                 _ => {
                     let as_pi = self.ctx.inst_beta(fun, ctx.as_slice());
                     let as_pi = self.ensure_pi(as_pi);
-                    match self.ctx.view_sptr(as_pi) {
-                        Pi { .. } => {
-                            // Only clear what we just instantiated.
-                            ctx.clear();
-                            fun = as_pi;
-                        }
-                        _ => panic!(),
-                    }
+                    // ensure_pi guarantees Pi; no further check needed.
+                    ctx.clear();
+                    fun = as_pi;
                 }
             }
         }
@@ -1225,7 +1221,8 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
     }
 
     fn def_eq_binder_multi(&mut self, x: ExprPtr<'t>, y: ExprPtr<'t>) -> Option<bool> {
-        if matches!(self.ctx.view_sptr_pair(x, y), (Pi { .. }, Pi { .. }) | (Lambda { .. }, Lambda { .. })) {
+        // Cheap head check — avoid expensive view_sptr body traversal if not both binders.
+        if (self.ctx.is_pi(x) && self.ctx.is_pi(y)) || (self.ctx.is_lambda(x) && self.ctx.is_lambda(y)) {
             self.def_eq_binder_aux(x, y)
         } else {
             None
@@ -1443,7 +1440,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         // Speculative app congruence: if both sides are applications, try comparing
         // their spines via cheap O(1) checks (ptr_eq + caches) before doing whnf.
         // Avoids expensive whnf/delta steps for cases resolvable by structural congruence.
-        if matches!((self.ctx.view_sptr(x), self.ctx.view_sptr(y)), (App { .. }, App { .. })) {
+        if self.ctx.is_app(x) && self.ctx.is_app(y) {
             if let Some(true) = self.spec_app_congruence(x, y) {
                 // Cache the result for future lookups
                 self.eq_cache_insert(x, y);
@@ -1473,7 +1470,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         }
 
         // Second speculative app congruence on whnf-reduced forms (x_n, y_n)
-        if (x_n != x || y_n != y) && matches!((self.ctx.view_sptr(x_n), self.ctx.view_sptr(y_n)), (App { .. }, App { .. })) {
+        if (x_n != x || y_n != y) && self.ctx.is_app(x_n) && self.ctx.is_app(y_n) {
             self.ctx.trace.spec_app2_tried += 1;
             let spec_result = {
                 let (mut fx, mut fy) = (x_n, y_n);
@@ -1611,7 +1608,8 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         let major = args.get(rec.major_idx()).copied()?;
         let major = self.to_ctor_when_k(major, rec).unwrap_or(major);
         let major = self.whnf(major);
-        let major = match self.ctx.view_sptr(major) {
+        // NatLit and StringLit are always closed, so read_expr suffices.
+        let major = match self.ctx.read_expr(major.core) {
             NatLit { ptr, .. } => self.ctx.nat_lit_to_constructor(ptr).unwrap_or(major),
             StringLit { ptr, .. } => self.str_lit_to_ctor_reducing(ptr).unwrap_or(major),
             _ => {
@@ -1655,10 +1653,8 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             };
         }
         let f = args.get(3).copied()?;
-        let appd = match self.ctx.view_sptr(qmk) {
-            App { arg, .. } => self.ctx.mk_app(f, arg),
-            _ => panic!("Quot iota"),
-        };
+        let (_, arg) = self.ctx.view_app(qmk).expect("Quot iota");
+        let appd = self.ctx.mk_app(f, arg);
         Some(self.ctx.foldl_apps(appd, args.iter().copied().skip(rest_idx)))
     }
 
@@ -1872,7 +1868,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
 
     fn try_unfold_proj_app(&mut self, e: ExprPtr<'t>) -> Option<ExprPtr<'t>> {
         let f = self.ctx.unfold_apps_fun(e);
-        if let Proj { .. } = self.ctx.view_sptr(f) {
+        if self.ctx.is_proj(f) {
             let eprime = self.whnf_no_unfolding(e);
             if eprime != e {
                 return Some(eprime)
@@ -1946,7 +1942,8 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
 
     pub fn is_sort_zero(&mut self, e: ExprPtr<'t>) -> bool {
         let e = self.whnf(e);
-        match self.ctx.view_sptr(e) {
+        // Sort is always closed, so read_expr is equivalent to view_sptr but cheaper.
+        match self.ctx.read_expr(e.core) {
             Sort { level, .. } => self.ctx.read_level(level) == Level::Zero,
             _ => false,
         }
@@ -1976,9 +1973,9 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
     }
 
     fn try_eta_expansion_aux(&mut self, x: ExprPtr<'t>, y: ExprPtr<'t>) -> bool {
-        if let Lambda { .. } = self.ctx.view_sptr(x) {
+        if self.ctx.is_lambda(x) {
             let y_ty = self.infer_then_whnf(y, InferOnly);
-            if let Pi { binder_name, binder_type, binder_style, .. } = self.ctx.view_sptr(y_ty) {
+            if let Some((binder_name, binder_style, binder_type)) = self.ctx.view_pi_head(y_ty) {
                 // Shift y up by 1 since it will be placed inside a new lambda body
                 let y_shifted = self.ctx.sptr_shift(y, 1);
                 let v0 = self.ctx.mk_var(0);
