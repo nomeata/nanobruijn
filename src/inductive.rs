@@ -1166,7 +1166,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         let comp_rhs = self.ctx.abstr_lambda_telescope(flat_mapped_minors, comp_rhs);
         let comp_rhs = self.ctx.abstr_lambda_telescope(st.motives.as_slice(), comp_rhs);
         let comp_rhs = self.ctx.abstr_lambda_telescope(st.local_params.as_slice(), comp_rhs);
-        debug_assert!(comp_rhs.shift == 0, "mk_rec_rule1: comp_rhs has shift={}", comp_rhs.shift);
+        debug_assert!(comp_rhs.shift == 0 || comp_rhs.is_closed(), "mk_rec_rule1: comp_rhs has shift={}", comp_rhs.shift);
         let comp_rhs = comp_rhs.core;
         let num_fields = self.ctx.pi_telescope_size(ExprPtr::closed(ctor.ty)) as usize - st.local_params.len();
         RecRule {
