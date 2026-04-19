@@ -458,6 +458,27 @@ These approaches were tried and found counterproductive, unsound, or out of scop
   instruction counts are the honest metric. Always re-measure both with and without the
   change using `perf stat -e instructions` before committing.
 
+- **Cached `bvars: CorePtr → Bitvector` (precise free-bvar set).** Follow-up to the
+  has_bvar experiment: store the *entire* set of free bvar indices (`SmallVec<[u64; 1]>`)
+  for each core, so one call answers all `has_bvar` queries — including multi-element
+  substitution ranges. Wired into `inst_aux_quick_core`'s sh_amt==0 path via
+  `bvars_intersects_range(offset, offset+n_substs)`, replacing the dead `fvar_lb >= …`
+  check. Tried both eager (parallel `Vec<BVarSet>` in `LeanDag`, populated at
+  `alloc_expr`) and lazy (memoized `expr_cache.bvars_cache`). Results:
+  - Eager: cascade N=1000 1.10B → **2.05B (+87%)**, Init 225.7B → 241.4B (+7%).
+  - Lazy: cascade N=1000 1.10B → **2.74B (+149%)**.
+  Both regress. The precise range check doesn't fire meaningfully on cascade (bvar 0 is
+  always present in the let body, so `intersects_range(0,1)` returns true; no skip) and
+  adds a range scan on every `inst_aux_quick_core` hit. Storage materialization is the
+  killer: deep cascade exprs need up to 16 u64 words → heap spill on each `shift_up`/
+  `union_into`. has_bvar's per-`(e, idx)` bool cache is much cheaper per query than a
+  full bitvector, even though it recomputes the same subtree multiple times. Reverted
+  without committing.
+  **Lesson:** "bulk compute once" only helps if each computation is cheap, which fails
+  when the structure materialized is O(depth) and the query space is narrow (usually
+  just one index). Narrow, lazy, per-query caches beat wide, eager, per-expr tables for
+  bvar presence.
+
 - **Lazy `infer_let`** (push let onto local_ctx, infer body, pop, inst_beta on result):
   fixes `perf/shift-cascade` (1000 nested lets) dramatically — **1.12B → 41M instructions,
   27× faster, ahead of nanoda's 53M** on that test. But blows up Init: one declaration
