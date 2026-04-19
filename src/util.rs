@@ -630,8 +630,6 @@ pub struct TcTrace {
     pub alloc_mk_proj: u64,
     pub alloc_mk_other: u64,
     pub alloc_mk_app_cache_hit: u64,
-    pub alloc_mk_pi_cache_hit: u64,
-    pub alloc_mk_lambda_cache_hit: u64,
     // wnu cache store breakdown
     pub wnu_cache_new_inserts: u64,
     pub wnu_cache_update_lower: u64,
@@ -677,10 +675,9 @@ impl std::fmt::Display for TcTrace {
                 self.eq_cache_cross_depth_hits)?;
         }
         write!(f, " | wnu_st={}/{}/{}/{}", self.wnu_cache_new_inserts, self.wnu_cache_update_lower, self.wnu_cache_update_higher, self.wnu_cache_update_skip)?;
-        write!(f, " | mka={}/{} mkp={}/{} mkl={}/{} mklt={} mkv={} mkpr={} mko={} fr={}/{}",
+        write!(f, " | mka={}/{} mkp={} mkl={} mklt={} mkv={} mkpr={} mko={} fr={}/{}",
             self.alloc_mk_app, self.alloc_mk_app_cache_hit,
-            self.alloc_mk_pi, self.alloc_mk_pi_cache_hit,
-            self.alloc_mk_lambda, self.alloc_mk_lambda_cache_hit, self.alloc_mk_let,
+            self.alloc_mk_pi, self.alloc_mk_lambda, self.alloc_mk_let,
             self.alloc_mk_var, self.alloc_mk_proj, self.alloc_mk_other,
             self.frame_reuse, self.frame_new)?;
         Ok(())
