@@ -296,6 +296,18 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
                     return ExprPtr::from_nlbv(e, nlbv);
                 }
             }
+            // Precise has_bvar skip: if none of the substituted bvars are present,
+            // the subst is a no-op (but we still need shift-down in inst_beta mode).
+            // Currently only checks single-element substs (n_substs == 1) for cheapness.
+            if n_substs == 1 && !self.has_bvar(e, offset) {
+                if shift_down {
+                    let r = self.push_shift_down_cutoff(e, 1, offset);
+                    let r_nlbv = self.num_loose_bvars(r);
+                    return ExprPtr::from_nlbv(r, r_nlbv);
+                } else {
+                    return ExprPtr::from_nlbv(e, nlbv);
+                }
+            }
         } else {
             if nlbv == 0 { return ExprPtr::closed(e); }
             let effective_nlbv = if nlbv <= sh_cut { nlbv as i16 } else { nlbv as i16 + sh_amt };
@@ -1326,6 +1338,43 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
     #[inline(always)]
     pub(crate) fn fvar_lb(&self, _e: CorePtr<'t>) -> u16 {
         0
+    }
+
+    /// Memoized: does the core `e` reference a free bvar at index `idx`?
+    /// Returns false immediately if idx >= nlbv(e). Otherwise caches per (e, idx).
+    pub(crate) fn has_bvar(&mut self, e: CorePtr<'t>, idx: u16) -> bool {
+        let nlbv = self.num_loose_bvars(e);
+        if idx >= nlbv { return false; }
+        if let Some(&cached) = self.expr_cache.has_bvar_cache.get(&(e, idx)) {
+            self.expr_cache.has_bvar_cache_hits += 1;
+            return cached;
+        }
+        self.expr_cache.has_bvar_cache_misses += 1;
+        let result = stacker::maybe_grow(64 * 1024, 2 * 1024 * 1024, || self.compute_has_bvar(e, idx));
+        self.expr_cache.has_bvar_cache.insert((e, idx), result);
+        result
+    }
+
+    fn compute_has_bvar(&mut self, e: CorePtr<'t>, idx: u16) -> bool {
+        match self.read_expr(e) {
+            Var { dbj_idx } => dbj_idx == idx,
+            Sort { .. } | Const { .. } | Local { .. } | StringLit { .. } | NatLit { .. } => false,
+            App { fun, arg } => self.has_bvar_sptr(fun, idx) || self.has_bvar_sptr(arg, idx),
+            Pi { binder_type, body, .. }
+            | Lambda { binder_type, body, .. } =>
+                self.has_bvar_sptr(binder_type, idx) || self.has_bvar_sptr(body, idx + 1),
+            Let { binder_type, val, body, .. } =>
+                self.has_bvar_sptr(binder_type, idx) || self.has_bvar_sptr(val, idx) || self.has_bvar_sptr(body, idx + 1),
+            Proj { structure, .. } => self.has_bvar_sptr(structure, idx),
+        }
+    }
+
+    /// has_bvar on an ExprPtr child: accounts for the child's shift.
+    /// Child's outer-context bvar(idx) corresponds to core's bvar(idx - shift) if idx >= shift.
+    fn has_bvar_sptr(&mut self, child: ExprPtr<'t>, idx: u16) -> bool {
+        if child.is_closed() { return false; }
+        if idx < child.shift { return false; }
+        self.has_bvar(child.core, idx - child.shift)
     }
 
 }
