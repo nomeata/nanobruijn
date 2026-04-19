@@ -444,6 +444,20 @@ These approaches were tried and found counterproductive, unsound, or out of scop
   work. Reverted. The redundancy caught by mk_app_dm_cache is NOT unchanged-identity;
   see above.
 
+- **Memoized `has_bvar(core, idx)` predicate** wired into `inst_aux_quick_core`'s
+  sh_amt==0 path: if the specific bvar at `offset` isn't in the subtree, take the cheaper
+  `push_shift_down_cutoff` path (cached) instead of the full `inst_aux` recursion. Results:
+  - perf/shift-cascade N=1000: 1.10B → 887M (−19%). Still O(N²).
+  - perf/shift-cascade "full" variant: unchanged (has_bvar returns true everywhere).
+  - Init: 226.3B → 224.7B (noise-level).
+  - **Mathlib 8 threads: 9.87T → 9.81T instructions (−0.7%, measured by perf).**
+  Reverted. The cascade win doesn't generalize — real-world code (Init, Mathlib) rarely
+  hits the "let-var absent in subtree" pattern that the has_bvar skip catches. The added
+  HashMap cache + predicate call in a hot path isn't worth 0.7% on Mathlib.
+  **Lesson:** wall-clock time on Mathlib is wobbly (showed phantom 4–5% delta);
+  instruction counts are the honest metric. Always re-measure both with and without the
+  change using `perf stat -e instructions` before committing.
+
 - **Lazy `infer_let`** (push let onto local_ctx, infer body, pop, inst_beta on result):
   fixes `perf/shift-cascade` (1000 nested lets) dramatically — **1.12B → 41M instructions,
   27× faster, ahead of nanoda's 53M** on that test. But blows up Init: one declaration
