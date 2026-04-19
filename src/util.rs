@@ -229,7 +229,6 @@ pub(crate) struct DepthFrame<'t> {
     pub(crate) wnu: LazyMap<CorePtr<'t>, ExprPtr<'t>>,
     pub(crate) infer_check: LazyMap<CorePtr<'t>, ExprPtr<'t>>,
     pub(crate) infer_no_check: LazyMap<CorePtr<'t>, ExprPtr<'t>>,
-    pub(crate) defeq_pos: LazyMap<(ExprPtr<'t>, ExprPtr<'t>), (ExprPtr<'t>, ExprPtr<'t>, u16)>,
     pub(crate) defeq_neg: LazyMap<(ExprPtr<'t>, ExprPtr<'t>), (ExprPtr<'t>, ExprPtr<'t>, u16)>,
     /// Per-depth weighted UF: core → ExprPtr(rep_core, shift_delta).
     pub(crate) uf: LazyMap<CorePtr<'t>, ExprPtr<'t>>,
@@ -241,7 +240,7 @@ impl<'t> DepthFrame<'t> {
             local: (ty, val),
             whnf: LazyMap::new(), wnu: LazyMap::new(),
             infer_check: LazyMap::new(), infer_no_check: LazyMap::new(),
-            defeq_pos: LazyMap::new(), defeq_neg: LazyMap::new(),
+            defeq_neg: LazyMap::new(),
             uf: LazyMap::new(),
         }
     }
@@ -1886,7 +1885,6 @@ pub(crate) struct TcCache<'t> {
     pub(crate) wnu_base: LazyMap<CorePtr<'t>, ExprPtr<'t>>,
     pub(crate) infer_check_base: LazyMap<CorePtr<'t>, ExprPtr<'t>>,
     pub(crate) infer_no_check_base: LazyMap<CorePtr<'t>, ExprPtr<'t>>,
-    pub(crate) defeq_pos_base: LazyMap<(ExprPtr<'t>, ExprPtr<'t>), (ExprPtr<'t>, ExprPtr<'t>, u16)>,
     pub(crate) defeq_neg_base: LazyMap<(ExprPtr<'t>, ExprPtr<'t>), (ExprPtr<'t>, ExprPtr<'t>, u16)>,
     /// Depth-stacked weighted UF base (bucket 0): closed expressions.
     pub(crate) uf_base: LazyMap<CorePtr<'t>, ExprPtr<'t>>,
@@ -1905,7 +1903,7 @@ impl<'t> TcCache<'t> {
         Self {
             whnf_base: LazyMap::new(), wnu_base: LazyMap::new(),
             infer_check_base: LazyMap::new(), infer_no_check_base: LazyMap::new(),
-            defeq_pos_base: LazyMap::new(), defeq_neg_base: LazyMap::new(),
+            defeq_neg_base: LazyMap::new(),
             uf_base: LazyMap::new(),
             frames: Vec::new(),
             depth: 0,

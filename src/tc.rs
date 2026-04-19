@@ -1273,12 +1273,10 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         Some(true)
     }
 
-    /// O(1) equality check: pointer eq + depth-indexed defeq cache + UF (closed).
+    /// O(1) equality check: pointer eq + UF transitive closure.
     /// Never calls def_eq recursively.
     fn cheap_eq(&mut self, x: ExprPtr<'t>, y: ExprPtr<'t>) -> bool {
-        x == y
-            || self.uf_check_eq(x, y)
-            || self.eq_cache_contains(x, y)
+        x == y || self.uf_check_eq(x, y)
     }
 
     fn def_eq_app(&mut self, x: ExprPtr<'t>, y: ExprPtr<'t>) -> bool {
@@ -1406,9 +1404,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         // Avoids expensive whnf/delta steps for cases resolvable by structural congruence.
         if self.ctx.is_app(x) && self.ctx.is_app(y) {
             if let Some(true) = self.spec_app_congruence(x, y) {
-                // Cache the result for future lookups
-                self.eq_cache_insert(x, y);
-                self.defeq_open_store_pos(x, y);
+                // Cache the result via UF (subsumes the old eq_cache/defeq_pos).
                 self.uf_union(x, y);
                 return true;
             }
@@ -1452,9 +1448,6 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             };
             if let Some(true) = spec_result {
                 self.ctx.trace.spec_app2_hit += 1;
-                self.eq_cache_insert(x, y);
-                self.eq_cache_insert(x_n, y_n);
-                self.defeq_open_store_pos(x, y);
                 self.uf_union(x, y);
                 self.uf_union(x_n, y_n);
                 return true;
@@ -1488,8 +1481,6 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             }
         };
         if result {
-            self.eq_cache_insert(x, y);
-            self.defeq_open_store_pos(x, y);
             self.uf_union(x, y);
         }
         result
@@ -1674,40 +1665,25 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             self.ctx.trace.eq_cache_uf_hits += 1;
             return Some(true)
         }
-        // Depth-stacked defeq_pos cache (checked after UF).
-        if self.eq_cache_contains(x, y) {
-            return Some(true)
-        }
         if let Some(r) = self.def_eq_sort(x, y) {
-            if r { self.eq_cache_insert(x, y); self.uf_union(x, y); }
+            if r { self.uf_union(x, y); }
             return Some(r)
         }
         if let Some(r) = self.def_eq_binder_multi(x, y) {
-            if r { self.eq_cache_insert(x, y); self.uf_union(x, y); }
+            if r { self.uf_union(x, y); }
             return Some(r)
         }
         None
     }
 
     fn failure_cache_contains(&mut self, x: ExprPtr<'t>, y: ExprPtr<'t>) -> bool {
-        self.defeq_open_lookup(false, x, y)
+        self.defeq_neg_lookup(x, y)
     }
 
     fn failure_cache_insert(&mut self, x: ExprPtr<'t>, y: ExprPtr<'t>) {
-        self.defeq_open_store_neg(x, y);
+        self.defeq_neg_store(x, y);
     }
 
-    fn eq_cache_contains(&mut self, x: ExprPtr<'t>, y: ExprPtr<'t>) -> bool {
-        if self.defeq_open_lookup(true, x, y) {
-            self.ctx.trace.eq_cache_hits += 1;
-            return true;
-        }
-        false
-    }
-
-    fn eq_cache_insert(&mut self, x: ExprPtr<'t>, y: ExprPtr<'t>) {
-        self.defeq_open_store_pos(x, y);
-    }
 
     /// Normalize a pair of ExprPtrs for def_eq caching.
     /// Subtracts the common min shift, returning normalized ExprPtrs and bucket index.
@@ -1743,47 +1719,26 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         }
     }
 
-    /// Look up in a pointer-based def_eq cache (positive or negative).
-    fn defeq_open_lookup(
-        &mut self,
-        is_pos: bool,
-        x: ExprPtr<'t>,
-        y: ExprPtr<'t>,
-    ) -> bool {
+    /// Look up in the negative def_eq cache (failure cache).
+    fn defeq_neg_lookup(&mut self, x: ExprPtr<'t>, y: ExprPtr<'t>) -> bool {
         let (nx, ny, bucket_idx) = self.defeq_normalize_pair(x, y);
         let (key, _) = self.defeq_canon_key_open(nx, ny);
-        let result = if is_pos {
-            depth_get!(ref self.tc_cache, bucket_idx, &key, defeq_pos_base, defeq_pos)
-        } else {
-            depth_get!(ref self.tc_cache, bucket_idx, &key, defeq_neg_base, defeq_neg)
-        };
-        let Some(&(_, _, _)) = result else { return false };
-        if is_pos { self.ctx.trace.defeq_open_pos_hits += 1; } else { self.ctx.trace.defeq_open_neg_hits += 1; }
-        true
+        let result = depth_get!(ref self.tc_cache, bucket_idx, &key, defeq_neg_base, defeq_neg);
+        if result.is_some() {
+            self.ctx.trace.defeq_open_neg_hits += 1;
+            true
+        } else { false }
     }
 
-    /// Store in a pointer-based def_eq cache (positive or negative).
-    fn defeq_open_store_pos(&mut self, x: ExprPtr<'t>, y: ExprPtr<'t>) {
-        self.defeq_open_store_impl(true, x, y);
-    }
-
-    fn defeq_open_store_neg(&mut self, x: ExprPtr<'t>, y: ExprPtr<'t>) {
-        self.defeq_open_store_impl(false, x, y);
-    }
-
-    fn defeq_open_store_impl(&mut self, is_pos: bool, x: ExprPtr<'t>, y: ExprPtr<'t>) {
+    /// Store in the negative def_eq cache (failure cache).
+    fn defeq_neg_store(&mut self, x: ExprPtr<'t>, y: ExprPtr<'t>) {
         let depth = self.depth() as u16;
         let (nx, ny, bucket_idx) = self.defeq_normalize_pair(x, y);
         let (key, swapped) = self.defeq_canon_key_open(nx, ny);
         let (sx, sy) = if swapped { (ny, nx) } else { (nx, ny) };
-        let existing = if is_pos {
-            depth_get!(ref self.tc_cache, bucket_idx, &key, defeq_pos_base, defeq_pos)
-        } else {
-            depth_get!(ref self.tc_cache, bucket_idx, &key, defeq_neg_base, defeq_neg)
-        };
+        let existing = depth_get!(ref self.tc_cache, bucket_idx, &key, defeq_neg_base, defeq_neg);
         if existing.map_or(true, |&(_, _, sd)| depth < sd) {
-            if is_pos { depth_insert!(self.tc_cache, bucket_idx, key, (sx, sy, depth), defeq_pos_base, defeq_pos); }
-            else { depth_insert!(self.tc_cache, bucket_idx, key, (sx, sy, depth), defeq_neg_base, defeq_neg); }
+            depth_insert!(self.tc_cache, bucket_idx, key, (sx, sy, depth), defeq_neg_base, defeq_neg);
         }
     }
 
