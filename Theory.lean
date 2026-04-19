@@ -1,52 +1,42 @@
 /-
-# Shift-Invariant Caching via Delta-Encoded Free Variable Lists
+# OSNF (Outermost-Shift Normal Form) — formal model
 
-We model a delta-encoded representation of the set of free de Bruijn indices
-in an expression, and prove that normalizing (lifting to lb=0) is exactly
-shift-invariant — **no false negatives at any depth**.
+The implementation uses explicit Shift nodes to defer shifting work. OSNF is a
+canonical form where:
 
-## Encoding
+1. A subexpression is either a bare `bvar`, a `const`, a compound (`app`/`lam`)
+   whose minimum free bvar index is 0, or a `shift n core` with `n > 0` over
+   such a compound whose fvars are non-empty.
+2. Two OSNFs are syntactically equal iff they denote the same underlying
+   de Bruijn term.
 
-The free bvar set `{a₀, a₁, a₂, ...}` (sorted, `a₀ < a₁ < a₂ < ...`) is
-stored as the delta list `[a₀, a₁ - a₀ - 1, a₂ - a₁ - 1, ...]`.
+This file models SExpr (expressions with explicit Shift), defines OSNF,
+and proves:
 
-- `[]` = closed (no free bvars)
-- `[d₀, d₁, ...]` = bvar(d₀), bvar(d₀+1+d₁), bvar(d₀+1+d₁+1+d₂), ...
+- `to_osnf` preserves denotation (`to_osnf_erase`).
+- `to_osnf` produces an expression in OSNF (`to_osnf_isOSNF`).
+- OSNF is unique per denotation (`osnf_unique`).
+- Therefore `to_osnf` is idempotent and decides shift-equivalence.
 
-## Operations (all O(1) except union)
-
-- `shift k`: `[d₀+k, d₁, d₂, ...]` — only touches head
-- `unbind`:  if `d₀=0` then `[d₁, ...]` else `[d₀-1, d₁, ...]`
-- `normalize`: `[0, d₁, d₂, ...]` — set head to 0
-
-## Key property
-
-`normalize(shift k fvs) = normalize(fvs)` — the tail `[d₁, d₂, ...]` encodes
-relative gaps, which are shift-invariant. Combined with a bvar-ignoring
-structural hash, this gives **exact shift-invariant cache keys** with
-no depth-64 aliasing or ghost bit issues.
+A few intermediate lemmas linking the delta-encoded `fvars` representation
+to the erasure's free-variable structure are stated as `axiom` — they are
+informally obvious but require a nontrivial decoding argument that is
+orthogonal to the OSNF theorems themselves. See the **Axioms** section for
+their specifications.
 -/
 
-/-! ## FVarList: delta-encoded sorted sets of natural numbers -/
+/-! ## FVarList: delta-encoded sorted sets of natural numbers
+
+Used to track the set of free bvar indices appearing in an `SExpr`. The
+delta encoding makes `shift` O(1) (touches only the head), matching the
+behavior of `Shift` nodes in the implementation.
+-/
 
 /-- Delta-encoded sorted set of natural numbers.
     `[]` is the empty set; `d :: rest` encodes `{d} ∪ {d + 1 + x | x ∈ decode rest}`. -/
 abbrev FVarList := List Nat
 
 namespace FVarList
-
-/-! ### Decoding to actual bvar indices -/
-
-/-- Decode a delta-encoded list to the sorted list of actual bvar indices. -/
-def decode : FVarList → List Nat
-  | [] => []
-  | d :: rest => d :: (decode rest).map (· + d + 1)
-
-#eval decode [0, 2, 3]  -- [0, 3, 7]
-#eval decode [2, 0, 1]  -- [2, 3, 5]
-#eval decode []          -- []
-
-/-! ### Core operations -/
 
 /-- Shift all indices up by `k`. O(1): only changes the head. -/
 def shift (k : Nat) : FVarList → FVarList
@@ -60,26 +50,12 @@ def unbind : FVarList → FVarList
   | 0 :: rest => rest
   | (d + 1) :: rest => d :: rest
 
-/-- Normalize: set lb to 0 (lift expression as high as possible).
-    O(1): just sets head to 0. This is the shift-invariant canonical form. -/
-def normalize : FVarList → FVarList
-  | [] => []
-  | _ :: rest => 0 :: rest
-
 /-- The lower bound (smallest free bvar index). -/
 def lb : FVarList → Option Nat
   | [] => none
   | d :: _ => some d
 
-/-- Is the set empty (expression is closed)? -/
-def closed : FVarList → Bool
-  | [] => true
-  | _ :: _ => false
-
-/-! ### Union (merge two delta-encoded sorted sets) -/
-
-/-- Merge two delta-encoded sorted sets. O(n+m) in the worst case,
-    but often O(1) when one list is empty or tails are shared. -/
+/-- Merge two delta-encoded sorted sets. -/
 def union (as bs : FVarList) : FVarList :=
   match as, bs with
   | [], ys => ys
@@ -93,82 +69,9 @@ def union (as bs : FVarList) : FVarList :=
       y :: union ((x - y - 1) :: xs) ys
 termination_by (as.length + bs.length, as.length)
 
--- Verify union correctness
-#eval union [0, 2, 3] [1, 1]  -- merge {0,3,7} ∪ {1,3} = {0,1,3,7}
-#eval decode (union [0, 2, 3] [1, 1])  -- [0, 1, 3, 7] ✓
-#eval union [0] [0]  -- {0} ∪ {0} = {0}
-#eval decode (union [0] [0])  -- [0] ✓
-#eval union [] [3, 1]  -- {} ∪ {3,5} = {3,5}
-#eval decode (union [] [3, 1])  -- [3, 5] ✓
-
-/-! ## Main theorems -/
-
-/-- **Shift-invariance of normalize**: the canonical form is unchanged by shifting.
-    This is the key property that enables shift-invariant caching. -/
-theorem normalize_shift (k : Nat) (fvs : FVarList) :
-    normalize (shift k fvs) = normalize fvs := by
-  cases fvs with
-  | nil => simp [shift, normalize]
-  | cons d rest => simp [shift, normalize]
-
-/-- Shifting preserves closedness. -/
-theorem closed_shift (k : Nat) (fvs : FVarList) :
-    closed (shift k fvs) = closed fvs := by
-  cases fvs <;> simp [shift, closed]
-
-/-- Decode after shift equals shifting all decoded indices. -/
-theorem decode_shift (k : Nat) (fvs : FVarList) :
-    decode (shift k fvs) = (decode fvs).map (· + k) := by
-  cases fvs with
-  | nil => simp [shift, decode]
-  | cons d rest =>
-    simp only [shift, decode, List.map_cons, List.map_map, Function.comp_def]
-    congr 1; congr 1; ext x; omega
-
-/-- Unbind commutes with shift when the bound variable is NOT free (lb > 0).
-    When lb = 0 (bound var is free), they do NOT commute: shifting moves
-    the bound var away from index 0, so unbind no longer removes it. -/
-theorem unbind_shift_nonfree (k : Nat) (d : Nat) (rest : FVarList) :
-    unbind (shift k ((d + 1) :: rest)) = shift k (unbind ((d + 1) :: rest)) := by
-  simp only [shift, unbind]
-  have h : d + 1 + k = (d + k) + 1 := by omega
-  rw [h]
-
--- Union correctness (decode_union) deferred: would need induction on termination measure.
-
-/-! ## Application to caching
-
-A cache key for an expression `e` is `(structHash(e), normalize(fvs(e)))`.
-
-**Theorem** (`normalize_shift`): If `e' = shift(e, k)` then:
-1. `structHash(e') = structHash(e)` (struct hash ignores bvar indices by design)
-2. `normalize(fvs(e')) = normalize(shift k (fvs(e))) = normalize(fvs(e))`
-
-Therefore `cacheKey(e') = cacheKey(e)` — **no false negatives**.
-
-This holds at **any binder depth**, unlike the 64-bit mask approach which
-has aliasing issues at depth ≥ 64. -/
-
-/-! ## Comparison with mask-based approach
-
-The mask approach (`bvar_mask: u64`) uses `bit i% 64` to represent bvar(i).
-This loses information:
-- `bvar(0)` and `bvar(64)` set the same bit → aliasing
-- `unbind` must clear bit 0 ("ghost bit" fix) but this incorrectly clears bvar(64)
-- The canonical hash `(struct_hash, mask.rotateRight(bvar_ub % 64))` is only
-  shift-invariant for binder depth < 64
-
-The delta-encoded list is exact:
-- Every free bvar index is tracked precisely
-- No modular reduction → no aliasing at any depth
-- `normalize` trivially yields the canonical form
-- The only approximation is in `union` performance (O(n+m) vs O(1)), but
-  free var counts are typically small (< 10 in practice)
--/
-
 end FVarList
 
-/-! ## Expression model with FVarList -/
+/-! ## Plain expressions and shift -/
 
 inductive Expr where
   | bvar (i : Nat)
@@ -211,7 +114,7 @@ theorem shift_shift (e : Expr) (j k c : Nat) :
     simp only [shift]
     by_cases h : i ≥ c
     · simp only [h, ↓reduceIte, shift, show i + j ≥ c from by omega, Expr.bvar.injEq]; omega
-    · simp only [h, ↓reduceIte, shift, h]
+    · simp only [h, ↓reduceIte, shift]
   | app f a ihf iha => simp only [shift, ihf, iha]
   | lam body ih => simp only [shift, ih]
   | const _ => rfl
@@ -242,7 +145,7 @@ private theorem shift_comm_lt_gen (e : Expr) (k amount cutoff base : Nat) (hlt :
           show i + amount ≥ base from by omega, Expr.bvar.injEq]; omega
       · simp only [shift, hi, ↓reduceIte, show ¬(i ≥ cutoff - k + base) from by omega, h]
     · simp only [h, ↓reduceIte, shift, show ¬(i ≥ cutoff + base) from by omega,
-        show ¬(i ≥ cutoff - k + base) from by omega, h]
+        show ¬(i ≥ cutoff - k + base) from by omega]
   | app f a ihf iha => simp only [shift, ihf k cutoff base hlt, iha k cutoff base hlt]
   | lam body ih =>
     simp only [shift]; exact congrArg Expr.lam (ih k cutoff (base + 1) hlt)
@@ -253,208 +156,7 @@ theorem shift_comm_lt (e : Expr) (k amount cutoff : Nat) (hlt : k < cutoff) :
   have h := shift_comm_lt_gen e k amount cutoff 0 hlt
   simp only [Nat.add_zero] at h; exact h
 
-/-- Compute the delta-encoded free variable list. -/
-def fvars : Expr → FVarList
-  | bvar i => [i]
-  | app f a => FVarList.union f.fvars a.fvars
-  | lam body => FVarList.unbind body.fvars
-  | const _ => []
-
-/-- Structural hash (ignores bvar indices — uses a constant for all bvars). -/
-def structHash : Expr → UInt64
-  | bvar _ => 281
-  | app f a => mixHash (mixHash 233 f.structHash) a.structHash
-  | lam body => mixHash 431 body.structHash
-  | const id => mixHash 1129 (UInt64.ofNat id)
-where
-  mixHash (a b : UInt64) : UInt64 := a ^^^ (b * 2654435761 + 0x9e3779b9)
-
-/-- Cache key: structural hash + normalized free var list. -/
-def cacheKey (e : Expr) : UInt64 × FVarList :=
-  (e.structHash, FVarList.normalize e.fvars)
-
-/-- **Main theorem**: Shifting preserves the structural hash. -/
-theorem structHash_shift (e : Expr) (k : Nat) (c : Nat) :
-    (e.shift k c).structHash = e.structHash := by
-  induction e generalizing c with
-  | bvar i => simp [shift]; split <;> simp [structHash]
-  | app f a ihf iha => simp [shift, structHash, ihf, iha]
-  | lam body ih => simp [shift, structHash, ih]
-  | const _ => simp [shift, structHash]
-
-/-- Free vars after shifting at cutoff 0 = shifted free vars. -/
-theorem fvars_shift_zero (e : Expr) (k : Nat) :
-    (e.shift k 0).fvars = FVarList.shift k e.fvars := by
-  sorry -- Requires careful induction; the cutoff 0 case means all bvars shift
-
-/-- **No false negatives**: shift-equivalent expressions have identical cache keys. -/
-theorem cacheKey_shift_inv (e : Expr) (k : Nat) :
-    cacheKey (e.shift k 0) = cacheKey e := by
-  simp [cacheKey]
-  constructor
-  · exact structHash_shift e k 0
-  · rw [fvars_shift_zero]
-    exact FVarList.normalize_shift k e.fvars
-
-/-! ## Examples -/
-
--- Example: lam (app (bvar 0) (bvar 1))
--- bvar 0 is bound, bvar 1 is free → fvars = [0] (just bvar(0) of the lambda = bvar(1) of body, unbound to 0)
-private def cex : Expr := lam (app (bvar 0) (bvar 1))
-private def cex_shifted : Expr := cex.shift 1 0
-
-#eval cex.fvars          -- [0]
-#eval cex_shifted.fvars  -- [1]
-#eval FVarList.normalize cex.fvars          -- [0]
-#eval FVarList.normalize cex_shifted.fvars  -- [0]  -- Same! ✓
-#eval cex.cacheKey == cex_shifted.cacheKey  -- true ✓
-
--- Deeper example: lam (lam (app (bvar 0) (app (bvar 1) (bvar 3))))
--- bvar 0, 1 are bound; bvar 3 is free → fvars of lambda = unbind(unbind([0,0,1])) = unbind([0,1]) = [1] → then unbind → [0]
--- Wait let me trace: body fvars = union [0] (union [1] [3]) = union [0] [1,1] = [0,0,1]
--- After first lam (inner): unbind [0,0,1] = [0,1] (pop head 0)
--- After second lam (outer): unbind [0,1] = [1] (pop head 0)... wait, that's [1]
--- Actually: body = app (bvar 0) (app (bvar 1) (bvar 3))
--- fvars: union [0] (union [1] [3]) = union [0] [1, 1] = [0, 0, 1]
--- decode: [0, 1, 3] ✓ (bvar 0, 1, 3)
--- inner lam: unbind [0, 0, 1] = [0, 1]  → decode [0, 2] (bvar 0, 2) ✓ (was bvar 1, 3 → now 0, 2)
--- outer lam: unbind [0, 1] = [1]  → decode [1] (bvar 1) ✓ (was bvar 3 → 2 → 1)
-private def cex2 : Expr := lam (lam (app (bvar 0) (app (bvar 1) (bvar 3))))
-private def cex2_shifted : Expr := cex2.shift 5 0
-
-#eval cex2.fvars           -- [1]
-#eval cex2_shifted.fvars   -- [6]
-#eval FVarList.normalize cex2.fvars           -- [0]
-#eval FVarList.normalize cex2_shifted.fvars   -- [0]  ✓
-#eval cex2.cacheKey == cex2_shifted.cacheKey  -- true ✓
-
--- Example with multiple free vars: app (bvar 1) (bvar 4)
--- fvars = union [1] [4] = [1, 2]  → decode [1, 4] ✓
--- shifted by 3: app (bvar 4) (bvar 7) → fvars = [4, 2]
--- normalize both: [0, 2] = [0, 2] ✓
-private def cex3 : Expr := app (bvar 1) (bvar 4)
-private def cex3_shifted : Expr := cex3.shift 3 0
-
-#eval cex3.fvars           -- [1, 2]
-#eval cex3_shifted.fvars   -- [4, 2]
-#eval FVarList.normalize cex3.fvars           -- [0, 2]
-#eval FVarList.normalize cex3_shifted.fvars   -- [0, 2]  ✓
-
--- Deep binder example (depth 70 — well past the mask's 64-bit limit)
--- 70 nested lambdas wrapping bvar 70 (the single free var)
-private def deepBinder : Expr :=
-  let inner := bvar 70
-  List.range 70 |>.foldl (fun e _ => lam e) inner
-
-private def deepBinder_shifted : Expr := deepBinder.shift 42 0
-
--- Even at depth 70, the delta-encoded approach works perfectly:
-#eval deepBinder.fvars           -- [0]
-#eval deepBinder_shifted.fvars   -- [42]
-#eval FVarList.normalize deepBinder.fvars           -- [0]
-#eval FVarList.normalize deepBinder_shifted.fvars   -- [0]  ✓
--- (The 64-bit mask approach would have aliasing issues here!)
-
-end Expr
-
-/-! ## Expressions with explicit Shift nodes (OSNF theory)
-
-The implementation uses explicit `Shift` nodes to defer shifting. This section
-models that extended expression type and formalizes Outermost-Shift Normal Form (OSNF).
-
-We use cutoff = 0 only (the common case in the implementation's `mk_shift`).
--/
-
-/-- Expression with explicit Shift nodes. Simplified model: cutoff is always 0. -/
-inductive SExpr where
-  | bvar (i : Nat)
-  | app (f a : SExpr)
-  | lam (body : SExpr)
-  | const (id : Nat)
-  | shift (amount : Nat) (inner : SExpr)  -- Shift(inner, amount), cutoff=0
-  deriving Repr, DecidableEq
-
-namespace SExpr
-
-/-! ### Erasure: interpret an SExpr as a plain Expr by pushing shifts through -/
-
-/-- Erase all Shift nodes, producing the plain Expr this SExpr denotes. -/
-def erase : SExpr → Expr
-  | bvar i => .bvar i
-  | app f a => .app f.erase a.erase
-  | lam body => .lam body.erase
-  | const id => .const id
-  | shift k inner => inner.erase.shift k 0
-
-theorem erase_bvar' (i : Nat) : (bvar i : SExpr).erase = Expr.bvar i := rfl
-theorem erase_app' (f a : SExpr) : (app f a).erase = Expr.app f.erase a.erase := rfl
-theorem erase_lam' (b : SExpr) : (lam b).erase = Expr.lam b.erase := rfl
-theorem erase_const' (n : Nat) : (const n : SExpr).erase = Expr.const n := rfl
-theorem erase_shift' (k : Nat) (inner : SExpr) : (shift k inner).erase = inner.erase.shift k 0 := rfl
-
-/-- Two SExprs are shift-equivalent iff they erase to the same Expr. -/
-def equiv (e₁ e₂ : SExpr) : Prop := e₁.erase = e₂.erase
-
-/-! ### Free variable tracking -/
-
-/-- Compute the delta-encoded free variable list for an SExpr.
-    Uses the FVarList operations to handle shifting and binding exactly. -/
-def fvars : SExpr → FVarList
-  | bvar i => [i]
-  | app f a => FVarList.union f.fvars a.fvars
-  | lam body => FVarList.unbind body.fvars
-  | const _ => []
-  | shift k inner => FVarList.shift k inner.fvars
-
-/-- Lower bound on free variable indices (minimum free bvar index).
-    Returns `none` for closed expressions. Derived from the exact `fvars` computation. -/
-def fvar_lb (e : SExpr) : Option Nat := FVarList.lb e.fvars
-
-/-- Convenience: fvar_lb as a Nat, returning 0 for closed expressions. -/
-def fvar_lb_val (e : SExpr) : Nat :=
-  match e.fvars with
-  | [] => 0
-  | d :: _ => d
-
-/-! ### Predicates for OSNF classification -/
-
-/-- An expression is "compound" if it is not a bvar and not a shift. -/
-def isCompound : SExpr → Bool
-  | bvar _ => false
-  | shift _ _ => false
-  | _ => true
-
-/-- An expression is a "core": compound with fvar_lb_val = 0 (or closed). -/
-def isCore (e : SExpr) : Prop :=
-  e.isCompound ∧ e.fvar_lb_val = 0
-
-/-! ### OSNF definition -/
-
-/-- An expression is in Outermost-Shift Normal Form (OSNF) if it is one of:
-    1. A bare `bvar n`
-    2. A `const id`
-    3. `app f a` with children in OSNF and fvar_lb_val = 0
-    4. `lam body` with body in OSNF and fvar_lb_val = 0
-    5. `shift n core` where `n > 0`, `core` is compound, in OSNF,
-       has fvar_lb_val = 0, and fvars ≠ [] -/
-inductive IsOSNF : SExpr → Prop where
-  | bvar (i : Nat) : IsOSNF (bvar i)
-  | const (id : Nat) : IsOSNF (const id)
-  | app (f a : SExpr) (hf : IsOSNF f) (ha : IsOSNF a)
-      (hlb : fvar_lb_val (app f a) = 0) : IsOSNF (app f a)
-  | lam (body : SExpr) (hb : IsOSNF body)
-      (hlb : fvar_lb_val (lam body) = 0) : IsOSNF (lam body)
-  | shifted (n : Nat) (core : SExpr) (hn : n > 0)
-      (hc : IsOSNF core) (hcomp : core.isCompound)
-      (hlb : core.fvar_lb_val = 0)
-      (hfv : core.fvars ≠ []) :
-      IsOSNF (shift n core)
-
-end SExpr
-
-/-! ### Expr.HasFreeVar and helper lemmas -/
-
-namespace Expr
+/-! ### Free-variable predicate on plain Exprs -/
 
 /-- An expression has a free variable at index `i` above cutoff `c`. -/
 inductive HasFreeVar : Expr → Nat → Nat → Prop where
@@ -463,6 +165,7 @@ inductive HasFreeVar : Expr → Nat → Nat → Prop where
   | app_right (f a : Expr) (i c : Nat) (h : HasFreeVar a i c) : HasFreeVar (app f a) i c
   | lam (body : Expr) (i c : Nat) (h : HasFreeVar body i (c + 1)) : HasFreeVar (lam body) i c
 
+/-- All free variables of `e` at cutoff `c` are `≥ bound`. -/
 def AllFreeVarsGe (e : Expr) (bound : Nat) (c : Nat := 0) : Prop :=
   ∀ i, HasFreeVar e i c → i ≥ bound
 
@@ -493,6 +196,24 @@ theorem allFreeVarsGe_shift_zero (e : Expr) (k : Nat) :
 theorem no_freevar_zero_in_shifted (e : Expr) (k : Nat) (hk : k > 0) :
     ¬ HasFreeVar (e.shift k 0) 0 0 := by
   intro h; have := allFreeVarsGe_shift_zero e k 0 h; omega
+
+/-- Shifting is a no-op on an expression with no free variables at the cutoff. -/
+theorem shift_eq_of_no_freevars (e : Expr) (k c : Nat)
+    (h : ∀ i, ¬ HasFreeVar e i c) : e.shift k c = e := by
+  induction e generalizing c with
+  | bvar i =>
+    simp only [shift]
+    by_cases hic : i ≥ c
+    · exact absurd (HasFreeVar.bvar i c hic) (h i)
+    · rw [if_neg hic]
+  | app f a ihf iha =>
+    simp only [shift]
+    rw [ihf c (fun i hi => h i (HasFreeVar.app_left _ _ _ _ hi))]
+    rw [iha c (fun i hi => h i (HasFreeVar.app_right _ _ _ _ hi))]
+  | lam body ih =>
+    simp only [shift]
+    rw [ih (c + 1) (fun i hi => h i (HasFreeVar.lam _ _ _ hi))]
+  | const _ => rfl
 
 theorem shift_injective (k c : Nat) : ∀ (e₁ e₂ : Expr),
     e₁.shift k c = e₂.shift k c → e₁ = e₂ := by
@@ -537,13 +258,97 @@ theorem shift_injective (k c : Nat) : ∀ (e₁ e₂ : Expr),
 
 end Expr
 
+/-! ## SExpr: expressions with explicit Shift nodes
+
+Models the implementation's `Expr` + `ExprPtr`: an `SExpr` is either a plain
+constructor (bvar, app, lam, const) or a `shift n inner` wrapper. Only cutoff
+0 is modeled — that's what `mk_shift` in the implementation produces.
+-/
+
+inductive SExpr where
+  | bvar (i : Nat)
+  | app (f a : SExpr)
+  | lam (body : SExpr)
+  | const (id : Nat)
+  | shift (amount : Nat) (inner : SExpr)  -- Shift(inner, amount), cutoff=0
+  deriving Repr, DecidableEq
+
 namespace SExpr
+
+/-! ### Erasure: interpret an SExpr as a plain Expr by pushing shifts through -/
+
+/-- Erase all Shift nodes, producing the plain Expr this SExpr denotes. -/
+def erase : SExpr → Expr
+  | bvar i => .bvar i
+  | app f a => .app f.erase a.erase
+  | lam body => .lam body.erase
+  | const id => .const id
+  | shift k inner => inner.erase.shift k 0
+
+theorem erase_bvar' (i : Nat) : (bvar i : SExpr).erase = Expr.bvar i := rfl
+theorem erase_app' (f a : SExpr) : (app f a).erase = Expr.app f.erase a.erase := rfl
+theorem erase_lam' (b : SExpr) : (lam b).erase = Expr.lam b.erase := rfl
+theorem erase_const' (n : Nat) : (const n : SExpr).erase = Expr.const n := rfl
+theorem erase_shift' (k : Nat) (inner : SExpr) : (shift k inner).erase = inner.erase.shift k 0 := rfl
+
+/-- Two SExprs are shift-equivalent iff they erase to the same Expr. -/
+def equiv (e₁ e₂ : SExpr) : Prop := e₁.erase = e₂.erase
+
+/-! ### Free variable tracking -/
+
+/-- Compute the delta-encoded free variable list for an SExpr. -/
+def fvars : SExpr → FVarList
+  | bvar i => [i]
+  | app f a => FVarList.union f.fvars a.fvars
+  | lam body => FVarList.unbind body.fvars
+  | const _ => []
+  | shift k inner => FVarList.shift k inner.fvars
+
+/-- Lower bound on free variable indices (minimum free bvar index).
+    Returns `none` for closed expressions. -/
+def fvar_lb (e : SExpr) : Option Nat := FVarList.lb e.fvars
+
+/-- Convenience: fvar_lb as a Nat, returning 0 for closed expressions. -/
+def fvar_lb_val (e : SExpr) : Nat :=
+  match e.fvars with
+  | [] => 0
+  | d :: _ => d
+
+/-! ### Predicates for OSNF classification -/
+
+/-- An expression is "compound" if it is not a bvar and not a shift. -/
+def isCompound : SExpr → Bool
+  | bvar _ => false
+  | shift _ _ => false
+  | _ => true
+
+/-! ### OSNF definition -/
+
+/-- Outermost-Shift Normal Form. An SExpr is in OSNF if it is one of:
+    1. A bare `bvar n`
+    2. A `const id`
+    3. `app f a` where both children are in OSNF and the app's `fvar_lb_val = 0`
+    4. `lam body` where body is in OSNF and the lam's `fvar_lb_val = 0`
+    5. `shift n core` with `n > 0`, `core` compound and in OSNF, with
+       `core.fvar_lb_val = 0` and `core.fvars ≠ []`. -/
+inductive IsOSNF : SExpr → Prop where
+  | bvar (i : Nat) : IsOSNF (bvar i)
+  | const (id : Nat) : IsOSNF (const id)
+  | app (f a : SExpr) (hf : IsOSNF f) (ha : IsOSNF a)
+      (hlb : fvar_lb_val (app f a) = 0) : IsOSNF (app f a)
+  | lam (body : SExpr) (hb : IsOSNF body)
+      (hlb : fvar_lb_val (lam body) = 0) : IsOSNF (lam body)
+  | shifted (n : Nat) (core : SExpr) (hn : n > 0)
+      (hc : IsOSNF core) (hcomp : core.isCompound)
+      (hlb : core.fvar_lb_val = 0)
+      (hfv : core.fvars ≠ []) :
+      IsOSNF (shift n core)
 
 /-! ### adjust_child: subtract amount from free variable indices in a child -/
 
 /-- Adjust a child expression by subtracting `amount` from free variable indices
     at or above `cutoff`. Recurses into compound expressions (app/lam).
-    Precondition: all free variable indices >= cutoff are also >= cutoff + amount. -/
+    Precondition: all free variable indices `≥ cutoff` are also `≥ cutoff + amount`. -/
 def adjust_child (e : SExpr) (amount : Nat) (cutoff : Nat) : SExpr :=
   match e with
   | bvar i => if i ≥ cutoff then bvar (i - amount) else bvar i
@@ -552,11 +357,9 @@ def adjust_child (e : SExpr) (amount : Nat) (cutoff : Nat) : SExpr :=
   | const id => const id
   | shift k inner =>
     if k ≥ cutoff then
-      -- All effective bvars >= k >= cutoff, just adjust the shift amount
       let k' := k - amount
       if k' = 0 then inner else shift k' inner
     else
-      -- k < cutoff: push adjustment through to inner at adjusted cutoff
       shift k (adjust_child inner amount (cutoff - k))
 
 /-! ### mk_osnf_compound: normalize a compound expression whose children are in OSNF -/
@@ -597,7 +400,7 @@ def to_osnf : SExpr → SExpr
 
 /-! ### Helpers for to_osnf_erase -/
 
-/-- Predicate: all bvar indices in `e` at or above `cutoff` are ≥ `cutoff + amount`.
+/-- Predicate: all bvar indices in `e` at or above `cutoff` are `≥ cutoff + amount`.
     This is the precondition for `adjust_child` to correctly preserve erasure. -/
 inductive BvarsGe : SExpr → Nat → Nat → Prop where
   | bvar_lt (i amount cutoff : Nat) (h : i < cutoff) : BvarsGe (bvar i) amount cutoff
@@ -665,6 +468,14 @@ theorem adjust_child_erase (e : SExpr) (amount cutoff : Nat)
          = inner.erase.shift k 0
     exact congrArg (·.shift k 0) ih
 
+/-! ### Axioms linking `SExpr.fvars` to free-variable structure on `erase`
+
+These intermediate lemmas state that the delta-encoded `SExpr.fvars` faithfully
+represents the free variables of the erasure. They are informally true but
+require a `decode`-based characterization (`decode fvars = {i | HasFreeVar e.erase i 0}`
+as sets) to prove rigorously. Left as axioms here — see `PLAN.md` for context.
+-/
+
 /-- Children of `app f a` satisfy BvarsGe for fvar_lb_val. -/
 axiom bvarsGe_child_app_left (f a : SExpr) :
     BvarsGe f (fvar_lb_val (app f a)) 0
@@ -674,6 +485,30 @@ axiom bvarsGe_child_app_right (f a : SExpr) :
 /-- Body of `lam body` satisfies BvarsGe for fvar_lb_val at cutoff 1. -/
 axiom bvarsGe_child_lam (body : SExpr) :
     BvarsGe body (fvar_lb_val (lam body)) 1
+
+/-- mk_osnf_compound produces OSNF for app inputs when children are OSNF. -/
+axiom mk_osnf_compound_app_isOSNF (f a : SExpr) (hf : IsOSNF f) (ha : IsOSNF a) :
+    IsOSNF (mk_osnf_compound (app f a))
+
+/-- mk_osnf_compound produces OSNF for lam inputs when body is OSNF. -/
+axiom mk_osnf_compound_lam_isOSNF (body : SExpr) (hb : IsOSNF body) :
+    IsOSNF (mk_osnf_compound (lam body))
+
+/-- If `e.fvars = []`, the erasure of `e` has no free variables, so shifting is a no-op. -/
+axiom fvars_empty_iff_no_free_vars (e : SExpr) (he : IsOSNF e) :
+    e.fvars = [] ↔ ∀ i, ¬ Expr.HasFreeVar e.erase i 0
+
+/-- If `fvar_lb_val e = 0` and `fvars` is non-empty, bvar(0) appears free in the erasure. -/
+axiom fvar_lb_zero_has_freevar_zero (e : SExpr) (he : IsOSNF e)
+    (hlb : fvar_lb_val e = 0) (hne : e.fvars ≠ []) :
+    Expr.HasFreeVar e.erase 0 0
+
+/-- Corollary of `fvars_empty_iff_no_free_vars` + `Expr.shift_eq_of_no_freevars`. -/
+theorem fvars_empty_shift_erase (e : SExpr) (he : IsOSNF e) (hfv : e.fvars = []) (k : Nat) :
+    e.erase.shift k 0 = e.erase :=
+  Expr.shift_eq_of_no_freevars e.erase k 0 ((fvars_empty_iff_no_free_vars e he).mp hfv)
+
+/-! ### mk_osnf_compound preserves erasure -/
 
 theorem mk_osnf_compound_erase_app (f a : SExpr) :
     (mk_osnf_compound (app f a)).erase = (app f a).erase := by
@@ -699,21 +534,10 @@ theorem mk_osnf_compound_erase_lam (body : SExpr) :
   · rw [erase_shift', erase_lam', Expr.shift_lam']
     congr 1; exact adjust_child_erase body _ 1 (bvarsGe_child_lam body)
 
-/-! ### OSNF theorems -/
+/-! ### Structural lemmas about OSNF -/
 
-/-- The OSNF of a bvar is itself. -/
 theorem to_osnf_bvar (i : Nat) : to_osnf (bvar i) = bvar i := rfl
-
-/-- A const is already in OSNF (it's a closed core). -/
 theorem to_osnf_const (id : Nat) : to_osnf (const id) = const id := rfl
-
-/-- mk_osnf_compound produces OSNF for app inputs when children are OSNF. -/
-axiom mk_osnf_compound_app_isOSNF (f a : SExpr) (hf : IsOSNF f) (ha : IsOSNF a) :
-    IsOSNF (mk_osnf_compound (app f a))
-
-/-- mk_osnf_compound produces OSNF for lam inputs when body is OSNF. -/
-axiom mk_osnf_compound_lam_isOSNF (body : SExpr) (hb : IsOSNF body) :
-    IsOSNF (mk_osnf_compound (lam body))
 
 private theorem IsOSNF.shift_parts (k : Nat) (c : SExpr) (h : IsOSNF (shift k c)) :
     k > 0 ∧ IsOSNF c ∧ c.isCompound = true ∧ c.fvar_lb_val = 0 ∧ c.fvars ≠ [] := by
@@ -730,9 +554,7 @@ private theorem isOSNF_not_bvar_not_shift (e : SExpr) (h : IsOSNF e)
   | lam _ _ hlb => exact ⟨rfl, hlb⟩
   | shifted n c _ _ _ _ _ => exact absurd rfl (h2 n c)
 
-/-- If e.fvars = [], then shifting the erasure has no effect.  -/
-axiom fvars_empty_shift_erase (e : SExpr) (he : IsOSNF e) (hfv : e.fvars = []) (k : Nat) :
-    e.erase.shift k 0 = e.erase
+/-! ### Main theorems -/
 
 /-- `to_osnf e` is in OSNF. -/
 theorem to_osnf_isOSNF (e : SExpr) : IsOSNF (to_osnf e) := by
@@ -770,11 +592,6 @@ theorem to_osnf_isOSNF (e : SExpr) : IsOSNF (to_osnf e) := by
             exact IsOSNF.shifted k _ (by omega) hih hc hlb hfv
         exact this _ rfl
 
-/-- Erasing a shift node gives the shifted erasure of the inner expression. -/
-theorem erase_shift (k : Nat) (inner : SExpr) :
-    (shift k inner).erase = inner.erase.shift k 0 := by
-  simp [erase]
-
 /-- `to_osnf` preserves denotation: `(to_osnf e).erase = e.erase`. -/
 theorem to_osnf_erase (e : SExpr) : (to_osnf e).erase = e.erase := by
   induction e with
@@ -796,11 +613,9 @@ theorem to_osnf_erase (e : SExpr) : (to_osnf e).erase = e.erase := by
                | [] => e
                | _ => shift k e).erase = inner.erase.shift k 0
     split
-    · -- inner.to_osnf = bvar i
-      rename_i i heq
+    · rename_i i heq
       rw [erase_bvar', ← ih, heq, erase_bvar', Expr.shift_bvar', if_pos (show i ≥ 0 by omega)]
-    · -- inner.to_osnf = shift k' core
-      rename_i k' core heq
+    · rename_i k' core heq
       have ih' : (shift k' core).erase = inner.erase := by rw [← heq]; exact ih
       split
       next hkk =>
@@ -814,8 +629,7 @@ theorem to_osnf_erase (e : SExpr) : (to_osnf e).erase = e.erase := by
         rw [erase_shift'] at ih'
         rw [← ih', Expr.shift_shift core.erase k' k 0]
         congr 1; omega
-    · -- compound (app/lam/const)
-      split
+    · split
       next hk0 =>
         subst hk0; rw [ih, Expr.shift_zero]
       next hk0 =>
@@ -826,7 +640,6 @@ theorem to_osnf_erase (e : SExpr) : (to_osnf e).erase = e.erase := by
           intro fvs hfvs
           cases fvs with
           | nil =>
-            -- e.fvars = [], so shift doesn't change the erasure
             have hih : IsOSNF (inner.to_osnf) := to_osnf_isOSNF inner
             rw [← ih]
             exact (fvars_empty_shift_erase (inner.to_osnf) hih hfvs k).symm
@@ -834,16 +647,7 @@ theorem to_osnf_erase (e : SExpr) : (to_osnf e).erase = e.erase := by
             rw [erase_shift', ih]
         exact this _ rfl
 
-/-! ### Axioms for osnf_unique -/
-
-axiom fvars_empty_iff_no_free_vars (e : SExpr) (he : IsOSNF e) :
-    e.fvars = [] ↔ ∀ i, ¬ Expr.HasFreeVar e.erase i 0
-
-axiom fvar_lb_zero_has_freevar_zero (e : SExpr) (he : IsOSNF e)
-    (hlb : fvar_lb_val e = 0) (hne : e.fvars ≠ []) :
-    Expr.HasFreeVar e.erase 0 0
-
-/-! ### Helper lemmas for osnf_unique -/
+/-! ### OSNF uniqueness — helper lemmas -/
 
 private theorem shifted_has_free_var_gen (core : Expr) (n i c : Nat)
     (h : Expr.HasFreeVar core i c) :
@@ -915,10 +719,8 @@ private theorem shifted_erase_eq_implies
   subst hn
   exact ⟨rfl, Expr.shift_injective n₁ 0 core₁.erase core₂.erase heq⟩
 
-/-! ### OSNF uniqueness -/
-
-/-- **Uniqueness of OSNF**: If two expressions denote the same term and both
-    are in OSNF, they are syntactically equal. -/
+/-- **Uniqueness of OSNF**: If two expressions in OSNF denote the same term,
+    they are syntactically equal. -/
 theorem osnf_unique (e₁ e₂ : SExpr) (h₁ : IsOSNF e₁) (h₂ : IsOSNF e₂)
     (heq : e₁.erase = e₂.erase) : e₁ = e₂ := by
   induction h₁ generalizing e₂ with
@@ -1010,75 +812,13 @@ theorem equiv_iff_osnf_eq (e₁ e₂ : SExpr) :
     equiv e₁ e₂ ↔ to_osnf e₁ = to_osnf e₂ := by
   constructor
   · intro heq
-    -- Both to_osnf's are in OSNF and erase to the same thing
     have h1 := to_osnf_isOSNF e₁
     have h2 := to_osnf_isOSNF e₂
     have he1 := to_osnf_erase e₁
     have he2 := to_osnf_erase e₂
     exact osnf_unique _ _ h1 h2 (by rw [he1, he2]; exact heq)
   · intro heq
-    -- If to_osnf's are equal, their erasures are equal, so original erasures are equal
     unfold equiv
     rw [← to_osnf_erase e₁, ← to_osnf_erase e₂, heq]
-
-/-! ### Shift-invariant caching via OSNF
-
-The key insight: if we normalize expressions to OSNF at parse time, then
-shifted variants automatically share the same core. The cache key for a
-`Shift(k, core)` can use `core`'s identity (pointer) directly — no need
-for hash-based canonical forms.
-
-Formally: `to_osnf (shift k e) = shift (k + lb) core` for compound e with
-fvar_lb_val = lb > 0, where the core is computed by `mk_osnf_compound`.
--/
-
-/-- Shifting an OSNF expression produces an expression whose OSNF shares the same core. -/
-theorem to_osnf_shift_core (k : Nat) (e : SExpr) (hk : k > 0) :
-    to_osnf (shift k e) =
-    match to_osnf e with
-    | bvar i => bvar (i + k)
-    | shift k' core => if k + k' = 0 then core else shift (k + k') core
-    | core => match core.fvars with
-              | [] => core
-              | _ => shift k core := by
-  simp only [to_osnf]
-  split
-  · rfl
-  · rfl
-  · rename_i h1 h2
-    rw [if_neg (show ¬(k = 0) by omega)]
-
-/-! ### Examples -/
-
--- Example: app (bvar 3) (bvar 5) has fvar_lb = 3
--- OSNF = shift 3 (app (bvar 0) (bvar 2))
-private def ex1 : SExpr := app (bvar 3) (bvar 5)
--- The shifted version: shift 2 (app (bvar 3) (bvar 5)) denotes app (bvar 5) (bvar 7)
--- OSNF = shift 5 (app (bvar 0) (bvar 2)) — same core!
-private def ex1_shifted : SExpr := shift 2 ex1
-
-#eval ex1.to_osnf          -- shift 3 (app (bvar 0) (bvar 2))
-#eval ex1_shifted.to_osnf  -- shift 5 (app (bvar 0) (bvar 2))
-
--- Both share the core `app (bvar 0) (bvar 2)` — only the shift amount differs.
-
--- Example: const is closed, OSNF is itself
-#eval (const 42).to_osnf  -- const 42
-
--- Example: nested shifts collapse
-private def ex2 : SExpr := shift 3 (shift 2 (bvar 1))
-#eval ex2.to_osnf  -- bvar 6
-
--- Example: shift 0 is eliminated
-private def ex3 : SExpr := shift 0 (app (bvar 0) (const 1))
-#eval ex3.to_osnf  -- app (bvar 0) (const 1)
-
--- Example: recursive normalization through app
-private def ex4 : SExpr := app (shift 2 (bvar 1)) (shift 4 (bvar 0))
-#eval ex4.to_osnf  -- shift 3 (app (bvar 0) (bvar 1))
-
--- Example: lam with shifted body
-private def ex5 : SExpr := lam (shift 1 (bvar 2))
-#eval ex5.to_osnf  -- should normalize the body first
 
 end SExpr

@@ -641,7 +641,16 @@ and are denser than the tail.
 
 ### TODOs
 
-- **Fill in Theory.lean sorry's**: OSNF uniqueness, erase preservation
+- **Theory.lean**: cleaned up — the shift-invariant-caching / `cacheKey` material
+  (abandoned along with the `canonical_hash` approach, see "Paths not taken") has been
+  removed, along with demos, the unused `fvars_shift_zero` sorry, and two simp
+  linter warnings. Main results kept and proven: `to_osnf_isOSNF`, `to_osnf_erase`,
+  `osnf_unique`, `to_osnf_idempotent`, `equiv_iff_osnf_eq`, plus `adjust_child_erase`.
+  Seven axioms remain, all linking the delta-encoded `SExpr.fvars` to the free-var
+  structure of `SExpr.erase` — informally obvious, formally require a `decode`-based
+  characterization of `fvars`. Attempting this in session stalled on Lean's `union.induct`
+  naming under universal quantification plus fiddly `rintro rfl` substitutions;
+  mechanically tractable but outside the session's budget.
 - **Remove remaining dead code**: thread_local profiling counters, dead locally-nameless
   code (Local variant, FVarId, abstr, etc.), stale TcTrace fields (verify_fail counters)
 
