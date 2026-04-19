@@ -448,6 +448,23 @@ These approaches were tried and found counterproductive, unsound, or out of scop
   fixes `perf/shift-cascade` (1000 nested lets) dramatically — **1.12B → 41M instructions,
   27× faster, ahead of nanoda's 53M** on that test. But blows up Init: one declaration
   at ~#19500 hits the 10s per-decl timeout, DAG bloats to 4.5M+ entries in that window.
+
+  **Context:** `perf/shift-cascade` is pathological for pure de Bruijn specifically
+  because each let-var `f_k` appears *only* in `f_{k+1}`'s value, nowhere else in the
+  body. Scaling measurements at N ∈ {250, 500, 1000, 2000}:
+  - Original cascade: nanobruijn O(N²) (ratios 3.38, 3.80, 3.92), nanoda O(N) (ratios
+    1.41, 1.60, 1.76). Linear fit for nanoda: `0.039·N + 13.2`.
+  - "Full" variant with body `f_1 (f_2 (… (f_N 0)))` (every let-var referenced
+    everywhere): both quadratic. nanobruijn ratios 3.62, 3.85; nanoda ratios 3.35,
+    3.73. Gap closes from 21× to ~1.6×.
+
+  Nanoda's O(N) win comes from locally-nameless fvar-ification of the outer `fun a`
+  in `infer_lambda`. After that single traversal, every `v_k` has `nlbv = 1` (only
+  references `f_{k-1}`). At each subsequent `infer_let` level, `inst(body, [val])`'s
+  `nlbv ≤ offset` fast-path skips every val at depth ≥ 1 — per-level cost becomes
+  O(1). Without fvar-ification, `nlbv` stays high (bvar-indexed outer refs), the
+  skip never fires, and we pay O(N-k) per level = O(N²) total. A more general
+  dependent-let workload defeats both designs.
   **Not a frame-invalidation issue**: lazy frame invalidation preserves entries on pop.
   **Not a cache-bucketing-slack issue either**: OSNF guarantees that any freshly-allocated
   core at shift=0 inside the let references the let var (at least one child has shift=0
