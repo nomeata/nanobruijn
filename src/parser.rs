@@ -435,8 +435,6 @@ impl<'a, R: BufRead> Parser<'a, R> {
         self.dag.expr_nlbv[e.idx()]
     }
 
-    fn has_fvars_ptr(&self, e: CorePtr<'a>) -> bool { self.dag.exprs.get_index(e.idx()).unwrap().has_fvars() }
-
     /// Find or create Var(0) in the DAG. Returns its CorePtr.
     fn find_or_insert_var0(&mut self) -> CorePtr<'a> {
         let (dag_idx, _) = self.insert_expr(Expr::Var { dbj_idx: 0 });
@@ -483,9 +481,30 @@ impl<'a, R: BufRead> Parser<'a, R> {
         LevelsPtr::from(DagMarker::ExportFile, self.dag.uparams.insert_full(Arc::from(levels)).0)
     }
 
+    /// Compute nlbv for a parser Expr by reading children's nlbv from the parallel Vec.
+    fn compute_nlbv(&self, e: &Expr<'a>) -> u16 {
+        let eff = |c: ExprPtr<'a>| -> u16 {
+            if c.is_closed() { return 0; }
+            let cn = self.num_loose_bvars(c.core);
+            if cn == 0 { 0 } else { cn + c.shift }
+        };
+        match e {
+            Expr::Sort { .. } | Expr::Const { .. } | Expr::Local { .. }
+            | Expr::StringLit { .. } | Expr::NatLit { .. } => 0,
+            Expr::Var { dbj_idx } => dbj_idx + 1,
+            Expr::App { fun, arg } => eff(*fun).max(eff(*arg)),
+            Expr::Pi { binder_type, body, .. }
+            | Expr::Lambda { binder_type, body, .. } =>
+                eff(*binder_type).max(eff(*body).saturating_sub(1)),
+            Expr::Let { binder_type, val, body, .. } =>
+                eff(*binder_type).max(eff(*val)).max(eff(*body).saturating_sub(1)),
+            Expr::Proj { structure, .. } => eff(*structure),
+        }
+    }
+
     /// Insert an expression and track its nlbv in the parallel Vec.
     fn insert_expr(&mut self, e: Expr<'a>) -> (usize, bool) {
-        let nlbv = e.num_loose_bvars();
+        let nlbv = self.compute_nlbv(&e);
         let result = self.dag.exprs.insert_full(e);
         if result.1 { self.dag.expr_nlbv.push(nlbv); }
         result
@@ -647,29 +666,18 @@ impl<'a, R: BufRead> Parser<'a, R> {
             ExprApp {fun, arg} => {
                 let fun_e = self.get_expr_ptr(fun);
                 let arg_e = self.get_expr_ptr(arg);
-                // Effective nlbv for an ExprPtr child:
-                // if core nlbv == 0 then 0, else core_nlbv + shift
                 let fun_core_nlbv = self.num_loose_bvars(fun_e.core);
                 let arg_core_nlbv = self.num_loose_bvars(arg_e.core);
                 let fun_eff_nlbv = if fun_core_nlbv == 0 { 0 } else { fun_core_nlbv + fun_e.shift };
                 let arg_eff_nlbv = if arg_core_nlbv == 0 { 0 } else { arg_core_nlbv + arg_e.shift };
-                // Compute min_shift from open children for OSNF. CLOSED_SHIFT = all closed.
                 let min_shift = if fun_eff_nlbv == 0 && arg_eff_nlbv == 0 { ExprPtr::CLOSED_SHIFT }
                     else if fun_eff_nlbv == 0 { arg_e.shift }
                     else if arg_eff_nlbv == 0 { fun_e.shift }
                     else { fun_e.shift.min(arg_e.shift) };
                 if min_shift > 0 && min_shift != ExprPtr::CLOSED_SHIFT { self.osnf_count += 1; }
-                // Build core children with min_shift subtracted (only for open children)
                 let core_fun = if fun_eff_nlbv == 0 { fun_e } else { ExprPtr::new(fun_e.core, fun_e.shift - min_shift) };
                 let core_arg = if arg_eff_nlbv == 0 { arg_e } else { ExprPtr::new(arg_e.core, arg_e.shift - min_shift) };
-                let core_fun_nlbv = if fun_core_nlbv == 0 { 0 } else { fun_core_nlbv + core_fun.shift };
-                let core_arg_nlbv = if arg_core_nlbv == 0 { 0 } else { arg_core_nlbv + core_arg.shift };
-                let core_nlbv = core_fun_nlbv.max(core_arg_nlbv);
-                let locals = self.has_fvars_ptr(fun_e.core) || self.has_fvars_ptr(arg_e.core);
-                let (core_idx, _) = self.insert_expr(Expr::App {
-                    fun: core_fun, arg: core_arg, num_loose_bvars: core_nlbv,
-                    has_fvars: locals,
-                });
+                let (core_idx, _) = self.insert_expr(Expr::App { fun: core_fun, arg: core_arg });
                 self.record_expr(core_idx, min_shift);
             }
             ExprBVar(dbj_idx) => {
@@ -685,14 +693,6 @@ impl<'a, R: BufRead> Parser<'a, R> {
                 let body_core_nlbv = self.num_loose_bvars(body_e.core);
                 let ty_eff_nlbv = if ty_core_nlbv == 0 { 0 } else { ty_core_nlbv + ty_e.shift };
                 let body_eff_nlbv = if body_core_nlbv == 0 { 0 } else { body_core_nlbv + body_e.shift };
-                // For binder body: outer contribution is body_eff_nlbv.saturating_sub(1)
-                // min_shift from open children: ty's shift vs body's shift.saturating_sub(1)
-                // But we need to be careful: the body is under a binder, so its shift
-                // contributes (shift - 1) to the outer expression's fvar_lb.
-                // For OSNF, we want min_shift = min of effective fvar_lb contributions.
-                // ty contribution: ty_e.shift (if ty is open)
-                // body contribution: body_e.shift.saturating_sub(1) (if body has nlbv > 1,
-                //   or body_e.shift > 0 when body has nlbv == 1)
                 let body_outer_shift = if body_eff_nlbv <= 1 { None }
                     else { Some(body_e.shift.saturating_sub(1)) };
                 let min_shift = match (ty_eff_nlbv > 0, body_outer_shift) {
@@ -702,16 +702,10 @@ impl<'a, R: BufRead> Parser<'a, R> {
                     (true, Some(bs)) => ty_e.shift.min(bs),
                 };
                 if min_shift > 0 && min_shift != ExprPtr::CLOSED_SHIFT { self.osnf_count += 1; }
-                // Build core children: only adjust shifts for open children that contributed
                 let core_ty = if ty_eff_nlbv == 0 { ty_e } else { ExprPtr::new(ty_e.core, ty_e.shift - min_shift) };
                 let core_body = if body_eff_nlbv > 1 { ExprPtr::new(body_e.core, body_e.shift - min_shift) } else { body_e };
-                let core_ty_nlbv = if ty_core_nlbv == 0 { 0 } else { ty_core_nlbv + core_ty.shift };
-                let core_body_nlbv = if body_core_nlbv == 0 { 0 } else { body_core_nlbv + core_body.shift };
-                let core_nlbv = core_ty_nlbv.max(core_body_nlbv.saturating_sub(1));
-                let locals = self.has_fvars_ptr(ty_e.core) || self.has_fvars_ptr(body_e.core);
                 let (core_idx, _) = self.insert_expr(Expr::Lambda {
                     binder_name, binder_style: binder_info, binder_type: core_ty, body: core_body,
-                    num_loose_bvars: core_nlbv, has_fvars: locals,
                 });
                 self.record_expr(core_idx, min_shift);
             }
@@ -734,13 +728,8 @@ impl<'a, R: BufRead> Parser<'a, R> {
                 if min_shift > 0 && min_shift != ExprPtr::CLOSED_SHIFT { self.osnf_count += 1; }
                 let core_ty = if ty_eff_nlbv == 0 { ty_e } else { ExprPtr::new(ty_e.core, ty_e.shift - min_shift) };
                 let core_body = if body_eff_nlbv > 1 { ExprPtr::new(body_e.core, body_e.shift - min_shift) } else { body_e };
-                let core_ty_nlbv = if ty_core_nlbv == 0 { 0 } else { ty_core_nlbv + core_ty.shift };
-                let core_body_nlbv = if body_core_nlbv == 0 { 0 } else { body_core_nlbv + core_body.shift };
-                let core_nlbv = core_ty_nlbv.max(core_body_nlbv.saturating_sub(1));
-                let locals = self.has_fvars_ptr(ty_e.core) || self.has_fvars_ptr(body_e.core);
                 let (core_idx, _) = self.insert_expr(Expr::Pi {
                     binder_name, binder_style: binder_info, binder_type: core_ty, body: core_body,
-                    num_loose_bvars: core_nlbv, has_fvars: locals,
                 });
                 self.record_expr(core_idx, min_shift);
             }
@@ -755,31 +744,21 @@ impl<'a, R: BufRead> Parser<'a, R> {
                 let ty_eff_nlbv = if ty_core_nlbv == 0 { 0 } else { ty_core_nlbv + ty_e.shift };
                 let val_eff_nlbv = if val_core_nlbv == 0 { 0 } else { val_core_nlbv + val_e.shift };
                 let body_eff_nlbv = if body_core_nlbv == 0 { 0 } else { body_core_nlbv + body_e.shift };
-                // Body is under a binder; its outer contribution is body_eff_nlbv.saturating_sub(1)
                 let body_outer_shift = if body_eff_nlbv <= 1 { None }
                     else { Some(body_e.shift.saturating_sub(1)) };
-                // min_shift = min of all open children's effective shifts
                 let mut min_shift = u16::MAX;
                 if ty_eff_nlbv > 0 { min_shift = min_shift.min(ty_e.shift); }
                 if val_eff_nlbv > 0 { min_shift = min_shift.min(val_e.shift); }
                 if let Some(bs) = body_outer_shift { min_shift = min_shift.min(bs); }
-                // min_shift == CLOSED_SHIFT means all children are closed
                 if min_shift > 0 && min_shift != ExprPtr::CLOSED_SHIFT { self.osnf_count += 1; }
                 let core_ty = if ty_eff_nlbv == 0 { ty_e } else { ExprPtr::new(ty_e.core, ty_e.shift - min_shift) };
                 let core_val = if val_eff_nlbv == 0 { val_e } else { ExprPtr::new(val_e.core, val_e.shift - min_shift) };
                 let core_body = if body_eff_nlbv > 1 { ExprPtr::new(body_e.core, body_e.shift - min_shift) } else { body_e };
-                let core_ty_nlbv = if ty_core_nlbv == 0 { 0 } else { ty_core_nlbv + core_ty.shift };
-                let core_val_nlbv = if val_core_nlbv == 0 { 0 } else { val_core_nlbv + core_val.shift };
-                let core_body_nlbv = if body_core_nlbv == 0 { 0 } else { body_core_nlbv + core_body.shift };
-                let core_nlbv = core_ty_nlbv.max(core_val_nlbv.max(core_body_nlbv.saturating_sub(1)));
-                let locals = self.has_fvars_ptr(ty_e.core) || self.has_fvars_ptr(val_e.core) || self.has_fvars_ptr(body_e.core);
                 let (core_idx, _) = self.insert_expr(Expr::Let {
                     binder_name,
                     binder_type: core_ty,
                     val: core_val,
                     body: core_body,
-                    num_loose_bvars: core_nlbv,
-                    has_fvars: locals,
                     nondep,
                 });
                 self.record_expr(core_idx, min_shift);
@@ -792,14 +771,10 @@ impl<'a, R: BufRead> Parser<'a, R> {
                 let min_shift = if struct_eff_nlbv == 0 { ExprPtr::CLOSED_SHIFT } else { struct_e.shift };
                 if min_shift > 0 && min_shift != ExprPtr::CLOSED_SHIFT { self.osnf_count += 1; }
                 let core_struct = if struct_eff_nlbv == 0 { struct_e } else { ExprPtr::new(struct_e.core, struct_e.shift - min_shift) };
-                let core_struct_nlbv = if struct_core_nlbv == 0 { 0 } else { struct_core_nlbv + core_struct.shift };
-                let locals = self.has_fvars_ptr(struct_e.core);
                 let (core_idx, _) = self.insert_expr(Expr::Proj {
                     ty_name,
                     idx,
                     structure: core_struct,
-                    num_loose_bvars: core_struct_nlbv,
-                    has_fvars: locals,
                 });
                 self.record_expr(core_idx, min_shift);
             }

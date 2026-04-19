@@ -169,18 +169,11 @@ impl<'a> ExprPtr<'a> {
     }
 
     /// OSNF child adjustment: reduce shift by `amount` for an open child,
-    /// or normalize to CLOSED_SHIFT if closed (nlbv==0).
-    /// `nlbv` is the effective nlbv of this ExprPtr (from nlbv).
+    /// closed expressions (CLOSED_SHIFT) pass through unchanged.
     #[inline(always)]
-    pub fn osnf_adj(self, nlbv: u16, amount: u16) -> Self {
-        if nlbv == 0 {
-            assert!(self.is_closed(),
-                "CLOSED_SHIFT invariant violated in osnf_adj: shift={} core={:?}@{} amount={}",
-                self.shift, self.core.dag_marker(), self.core.idx(), amount);
-            self
-        } else {
-            Self::new(self.core, self.shift - amount)
-        }
+    pub fn osnf_adj(self, amount: u16) -> Self {
+        if self.is_closed() { self }
+        else { Self::new(self.core, self.shift - amount) }
     }
 }
 
@@ -362,6 +355,9 @@ pub struct ExprCache<'t> {
     pub(crate) mk_app_miss_count: u32,
     /// Cached Var(0) CorePtr. Only one Var exists in the DAG.
     pub(crate) var0_ptr: Option<CorePtr<'t>>,
+    /// Lazy memoized has_fvars: CorePtr → has-a-Local-in-subtree.
+    /// Populated on demand; pure function of core.
+    pub(crate) has_fvars_cache: FxHashMap<CorePtr<'t>, bool>,
 }
 
 impl<'t> ExprCache<'t> {
@@ -378,6 +374,7 @@ impl<'t> ExprCache<'t> {
             mk_app_dm_cache: Vec::new(),
             mk_app_miss_count: 0,
             var0_ptr: None,
+            has_fvars_cache: new_fx_hash_map(),
         }
     }
 
@@ -815,6 +812,24 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         }
     }
 
+    /// Compute the number of loose bvars of a new Expr from its ExprPtr children.
+    /// Reads children's nlbv via expr_nlbv Vec — O(1) per child.
+    #[inline]
+    pub(crate) fn compute_nlbv(&self, e: &Expr<'t>) -> u16 {
+        match e {
+            Expr::Sort { .. } | Expr::Const { .. } | Expr::Local { .. }
+            | Expr::StringLit { .. } | Expr::NatLit { .. } => 0,
+            Expr::Var { dbj_idx } => dbj_idx + 1,
+            Expr::App { fun, arg } => self.nlbv(*fun).max(self.nlbv(*arg)),
+            Expr::Pi { binder_type, body, .. }
+            | Expr::Lambda { binder_type, body, .. } =>
+                self.nlbv(*binder_type).max(self.nlbv(*body).saturating_sub(1)),
+            Expr::Let { binder_type, val, body, .. } =>
+                self.nlbv(*binder_type).max(self.nlbv(*val)).max(self.nlbv(*body).saturating_sub(1)),
+            Expr::Proj { structure, .. } => self.nlbv(*structure),
+        }
+    }
+
     /// Store an `Expr`, getting back a pointer to the allocated item. If the item was
     /// already stored, forego the allocation and return a pointer to the previously inserted
     /// element. Checks the longer-lived storage first.
@@ -823,7 +838,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         if let Some(idx) = self.export_file.dag.exprs.get_index_of(&e) {
             Ptr::from(DagMarker::ExportFile, idx)
         } else {
-            let nlbv = e.num_loose_bvars();
+            let nlbv = self.compute_nlbv(&e);
             let (idx, inserted) = self.dag.exprs.insert_full(e);
             if inserted { self.dag.expr_nlbv.push(nlbv); }
             Ptr::from(DagMarker::TcCtx, idx)
@@ -1033,30 +1048,6 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         if core_nlbv == 0 { 0 } else { core_nlbv + s.shift }
     }
 
-    /// Compute the minimum shift to extract from a binder (Pi/Lambda/Let) with
-    /// a non-binder child (type) and a binder child (body, under cutoff=1).
-    /// Body contributes body.shift only if body_nlbv > 1 (body_nlbv == 1 means
-    /// only bvar 0 is free in body, which is bound by this binder — so shift is irrelevant).
-    #[inline]
-    /// Compute min_shift for binder expressions (Pi, Lambda).
-    /// The body is under a binder, so its effective fvar_lb in the outer context
-    /// is body_shift - 1 (body_shift accounts for cutoff=0, minus 1 for the binder).
-    /// body_nlbv <= 1 means body only has Var(0) (bound by this binder), no contribution.
-    /// CLOSED_SHIFT acts as +infinity: closed children don't contribute to min.
-    fn binder_min_shift(&self, ty_nlbv: u16, ty_shift: u16, body_nlbv: u16, body_shift: u16) -> u16 {
-        // Body's outer contribution: body.shift.saturating_sub(1)
-        // (body.shift == 0 means body has free vars at outer index 0, so contribution = 0)
-        // CLOSED_SHIFT.saturating_sub(1) = CLOSED_SHIFT - 1, which is still huge, acting as +inf
-        if ty_nlbv == 0 && body_nlbv <= 1 { ExprPtr::CLOSED_SHIFT }
-        else if ty_nlbv == 0 {
-            body_shift.saturating_sub(1)
-        }
-        else if body_nlbv <= 1 { ty_shift }
-        else {
-            ty_shift.min(body_shift.saturating_sub(1))
-        }
-    }
-
     pub fn mk_app(&mut self, fun: ExprPtr<'t>, arg: ExprPtr<'t>) -> ExprPtr<'t> {
         // 2-way set-associative cache keyed by (fun, arg) — stores result directly.
         let tag = hash64!(fun, arg);
@@ -1080,29 +1071,16 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
             }
         }
         self.trace.alloc_mk_app += 1;
-        // Compute effective nlbv for each child
-        let fun_nlbv = self.nlbv(fun);
-        let arg_nlbv = self.nlbv(arg);
-        // Extract min_shift from open children. CLOSED_SHIFT acts as +infinity.
-        let min_shift = if fun_nlbv == 0 && arg_nlbv == 0 { ExprPtr::CLOSED_SHIFT }
-            else if fun_nlbv == 0 { arg.shift }
-            else if arg_nlbv == 0 { fun.shift }
-            else { fun.shift.min(arg.shift) };
-        // Adjust children: extract min_shift from open children, normalize closed.
-        let adj_fun = fun.osnf_adj(fun_nlbv, min_shift);
-        let adj_arg = arg.osnf_adj(arg_nlbv, min_shift);
-        // Compute core nlbv and has_fvars
-        let adj_fun_nlbv = self.nlbv(adj_fun);
-        let adj_arg_nlbv = self.nlbv(adj_arg);
-        let core_nlbv = adj_fun_nlbv.max(adj_arg_nlbv);
-        let has_fvars = self.has_fvars(fun.core) || self.has_fvars(arg.core);
-        let app_expr = Expr::App { fun: adj_fun, arg: adj_arg, num_loose_bvars: core_nlbv, has_fvars };
-        // OSNF check: min_shift of adjusted open children should be 0
-        debug_assert!({
-            let f_s = if adj_fun.is_closed() { ExprPtr::CLOSED_SHIFT } else { adj_fun.shift };
-            let a_s = if adj_arg.is_closed() { ExprPtr::CLOSED_SHIFT } else { adj_arg.shift };
-            f_s.min(a_s) == 0 || (f_s == ExprPtr::CLOSED_SHIFT && a_s == ExprPtr::CLOSED_SHIFT)
-        }, "mk_app OSNF violation: adj_fun.shift={} adj_arg.shift={}", adj_fun.shift, adj_arg.shift);
+        // Extract min_shift from open children. Closed children contribute +infinity.
+        let min_shift = match (fun.is_closed(), arg.is_closed()) {
+            (true, true) => ExprPtr::CLOSED_SHIFT,
+            (true, false) => arg.shift,
+            (false, true) => fun.shift,
+            (false, false) => fun.shift.min(arg.shift),
+        };
+        let adj_fun = fun.osnf_adj(min_shift);
+        let adj_arg = arg.osnf_adj(min_shift);
+        let app_expr = Expr::App { fun: adj_fun, arg: adj_arg };
         let core = self.alloc_expr(app_expr);
         let result = if min_shift == ExprPtr::CLOSED_SHIFT { ExprPtr::closed(core) } else { ExprPtr::new(core, min_shift) };
         // Update DM cache
@@ -1123,6 +1101,17 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         result
     }
 
+    /// For binders (Pi/Lambda/Let): body's outer contribution to min_shift.
+    /// Returns None if body doesn't contribute (closed or only has Var(0)).
+    /// Otherwise returns body.shift.saturating_sub(1) (the outer fvar_lb from body).
+    #[inline]
+    fn body_outer_shift(&self, body: ExprPtr<'t>) -> Option<u16> {
+        if body.is_closed() { return None; }
+        // body contributes iff it has free vars at index > 0 (not just Var(0))
+        if self.nlbv(body) <= 1 { return None; }
+        Some(body.shift.saturating_sub(1))
+    }
+
     pub fn mk_lambda(
         &mut self,
         binder_name: NamePtr<'t>,
@@ -1131,21 +1120,17 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         body: ExprPtr<'t>,
     ) -> ExprPtr<'t> {
         self.trace.alloc_mk_lambda += 1;
-        let ty_nlbv = self.nlbv(binder_type);
-        let body_nlbv = self.nlbv(body);
-        // Compute min_shift: body contributes (body.shift - 1) if body_nlbv > 1
-        // (body_nlbv == 1 means only bvar 0, which is bound by this lambda)
-        // CLOSED_SHIFT means all-closed → result is closed
-        let min_shift = self.binder_min_shift(ty_nlbv, binder_type.shift, body_nlbv, body.shift);
-        let adj_ty = binder_type.osnf_adj(ty_nlbv, min_shift);
-        // Body: extract min_shift only when body contributes (nlbv > 1).
-        // nlbv <= 1 means body is closed or only has Var(0) — no extraction needed.
-        let adj_body = body.osnf_adj(body_nlbv, if body_nlbv > 1 { min_shift } else { 0 });
-        let adj_ty_nlbv = self.nlbv(adj_ty);
-        let adj_body_nlbv = self.nlbv(adj_body);
-        let core_nlbv = adj_ty_nlbv.max(adj_body_nlbv.saturating_sub(1));
-        let has_fvars = self.has_fvars(binder_type.core) || self.has_fvars(body.core);
-        let lambda_expr = Expr::Lambda { binder_name, binder_style, binder_type: adj_ty, body: adj_body, num_loose_bvars: core_nlbv, has_fvars };
+        let ty_open_shift = if binder_type.is_closed() { None } else { Some(binder_type.shift) };
+        let body_outer = self.body_outer_shift(body);
+        let min_shift = match (ty_open_shift, body_outer) {
+            (None, None) => ExprPtr::CLOSED_SHIFT,
+            (Some(ts), None) => ts,
+            (None, Some(bs)) => bs,
+            (Some(ts), Some(bs)) => ts.min(bs),
+        };
+        let adj_ty = binder_type.osnf_adj(min_shift);
+        let adj_body = if body_outer.is_some() { body.osnf_adj(min_shift) } else { body };
+        let lambda_expr = Expr::Lambda { binder_name, binder_style, binder_type: adj_ty, body: adj_body };
         let core = self.alloc_expr(lambda_expr);
         if min_shift == ExprPtr::CLOSED_SHIFT { ExprPtr::closed(core) } else { ExprPtr::new(core, min_shift) }
     }
@@ -1158,16 +1143,17 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         body: ExprPtr<'t>,
     ) -> ExprPtr<'t> {
         self.trace.alloc_mk_pi += 1;
-        let ty_nlbv = self.nlbv(binder_type);
-        let body_nlbv = self.nlbv(body);
-        let min_shift = self.binder_min_shift(ty_nlbv, binder_type.shift, body_nlbv, body.shift);
-        let adj_ty = binder_type.osnf_adj(ty_nlbv, min_shift);
-        let adj_body = body.osnf_adj(body_nlbv, if body_nlbv > 1 { min_shift } else { 0 });
-        let adj_ty_nlbv = self.nlbv(adj_ty);
-        let adj_body_nlbv = self.nlbv(adj_body);
-        let core_nlbv = adj_ty_nlbv.max(adj_body_nlbv.saturating_sub(1));
-        let has_fvars = self.has_fvars(binder_type.core) || self.has_fvars(body.core);
-        let pi_expr = Expr::Pi { binder_name, binder_style, binder_type: adj_ty, body: adj_body, num_loose_bvars: core_nlbv, has_fvars };
+        let ty_open_shift = if binder_type.is_closed() { None } else { Some(binder_type.shift) };
+        let body_outer = self.body_outer_shift(body);
+        let min_shift = match (ty_open_shift, body_outer) {
+            (None, None) => ExprPtr::CLOSED_SHIFT,
+            (Some(ts), None) => ts,
+            (None, Some(bs)) => bs,
+            (Some(ts), Some(bs)) => ts.min(bs),
+        };
+        let adj_ty = binder_type.osnf_adj(min_shift);
+        let adj_body = if body_outer.is_some() { body.osnf_adj(min_shift) } else { body };
+        let pi_expr = Expr::Pi { binder_name, binder_style, binder_type: adj_ty, body: adj_body };
         let core = self.alloc_expr(pi_expr);
         if min_shift == ExprPtr::CLOSED_SHIFT { ExprPtr::closed(core) } else { ExprPtr::new(core, min_shift) }
     }
@@ -1181,27 +1167,15 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         nondep: bool
     ) -> ExprPtr<'t> {
         self.trace.alloc_mk_let += 1;
-        let ty_nlbv = self.nlbv(binder_type);
-        let val_nlbv = self.nlbv(val);
-        let body_nlbv = self.nlbv(body);
-        // Compute min_shift across all open children.
-        // Body contributes body.shift - 1 (under a binder) when body_nlbv > 1.
-        // CLOSED_SHIFT acts as +infinity (start with it, min only with open children).
+        let body_outer = self.body_outer_shift(body);
         let mut min_shift = ExprPtr::CLOSED_SHIFT;
-        if ty_nlbv > 0 { min_shift = min_shift.min(binder_type.shift); }
-        if val_nlbv > 0 { min_shift = min_shift.min(val.shift); }
-        if body_nlbv > 1 {
-            min_shift = min_shift.min(body.shift.saturating_sub(1));
-        }
-        let adj_ty = binder_type.osnf_adj(ty_nlbv, min_shift);
-        let adj_val = val.osnf_adj(val_nlbv, min_shift);
-        let adj_body = body.osnf_adj(body_nlbv, if body_nlbv > 1 { min_shift } else { 0 });
-        let adj_ty_nlbv = self.nlbv(adj_ty);
-        let adj_val_nlbv = self.nlbv(adj_val);
-        let adj_body_nlbv = self.nlbv(adj_body);
-        let core_nlbv = adj_ty_nlbv.max(adj_val_nlbv.max(adj_body_nlbv.saturating_sub(1)));
-        let has_fvars = self.has_fvars(binder_type.core) || self.has_fvars(val.core) || self.has_fvars(body.core);
-        let let_expr = Expr::Let { binder_name, binder_type: adj_ty, val: adj_val, body: adj_body, num_loose_bvars: core_nlbv, has_fvars, nondep };
+        if !binder_type.is_closed() { min_shift = min_shift.min(binder_type.shift); }
+        if !val.is_closed() { min_shift = min_shift.min(val.shift); }
+        if let Some(bs) = body_outer { min_shift = min_shift.min(bs); }
+        let adj_ty = binder_type.osnf_adj(min_shift);
+        let adj_val = val.osnf_adj(min_shift);
+        let adj_body = if body_outer.is_some() { body.osnf_adj(min_shift) } else { body };
+        let let_expr = Expr::Let { binder_name, binder_type: adj_ty, val: adj_val, body: adj_body, nondep };
         let core = self.alloc_expr(let_expr);
         if min_shift == ExprPtr::CLOSED_SHIFT { ExprPtr::closed(core) } else { ExprPtr::new(core, min_shift) }
     }
@@ -1209,18 +1183,13 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
     pub fn mk_proj(&mut self, ty_name: NamePtr<'t>, idx: u32, structure: ExprPtr<'t>) -> ExprPtr<'t> {
         self.trace.alloc_mk_proj += 1;
         if structure.is_closed() {
-            // Closed structure → closed proj
-            let adj_s_nlbv = 0u16;
-            let has_fvars = self.has_fvars(structure.core);
-            let proj_expr = Expr::Proj { ty_name, idx, structure, num_loose_bvars: adj_s_nlbv, has_fvars };
+            let proj_expr = Expr::Proj { ty_name, idx, structure };
             let core = self.alloc_expr(proj_expr);
             return ExprPtr::closed(core);
         }
         let min_shift = structure.shift;
         let adj_s = ExprPtr::new(structure.core, 0);
-        let adj_s_nlbv = self.nlbv(adj_s);
-        let has_fvars = self.has_fvars(structure.core);
-        let proj_expr = Expr::Proj { ty_name, idx, structure: adj_s, num_loose_bvars: adj_s_nlbv, has_fvars };
+        let proj_expr = Expr::Proj { ty_name, idx, structure: adj_s };
         let core = self.alloc_expr(proj_expr);
         ExprPtr::new(core, min_shift)
     }
@@ -1626,46 +1595,32 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
                 let new_idx = dbj_idx + amount;
                 Expr::Var { dbj_idx: new_idx }
             }
-            Expr::App { fun, arg, has_fvars, .. } => {
+            Expr::App { fun, arg } => {
                 let new_fun = fun.shift_up(amount);
                 let new_arg = arg.shift_up(amount);
-                let fun_nlbv = self.nlbv(new_fun);
-                let arg_nlbv = self.nlbv(new_arg);
-                let num_loose_bvars = fun_nlbv.max(arg_nlbv);
-                Expr::App { fun: new_fun, arg: new_arg, num_loose_bvars, has_fvars }
+                Expr::App { fun: new_fun, arg: new_arg }
             }
-            Expr::Pi { binder_name, binder_style, binder_type, body, has_fvars, .. } => {
+            Expr::Pi { binder_name, binder_style, binder_type, body } => {
                 let new_type = binder_type.shift_up(amount);
                 // Body is under a binder (cutoff=1). Must do full traversal to match
                 // old view_expr behavior and prevent shift accumulation in loops.
                 let new_body = self.shift_expr_aux(body, amount, 1);
-                let ty_nlbv = self.nlbv(new_type);
-                let body_nlbv = self.nlbv(new_body);
-                let num_loose_bvars = ty_nlbv.max(body_nlbv.saturating_sub(1));
-                Expr::Pi { binder_name, binder_style, binder_type: new_type, body: new_body, num_loose_bvars, has_fvars }
+                Expr::Pi { binder_name, binder_style, binder_type: new_type, body: new_body }
             }
-            Expr::Lambda { binder_name, binder_style, binder_type, body, has_fvars, .. } => {
+            Expr::Lambda { binder_name, binder_style, binder_type, body } => {
                 let new_type = binder_type.shift_up(amount);
                 let new_body = self.shift_expr_aux(body, amount, 1);
-                let ty_nlbv = self.nlbv(new_type);
-                let body_nlbv = self.nlbv(new_body);
-                let num_loose_bvars = ty_nlbv.max(body_nlbv.saturating_sub(1));
-                Expr::Lambda { binder_name, binder_style, binder_type: new_type, body: new_body, num_loose_bvars, has_fvars }
+                Expr::Lambda { binder_name, binder_style, binder_type: new_type, body: new_body }
             }
-            Expr::Let { binder_name, binder_type, val, body, nondep, has_fvars, .. } => {
+            Expr::Let { binder_name, binder_type, val, body, nondep } => {
                 let new_type = binder_type.shift_up(amount);
                 let new_val = val.shift_up(amount);
                 let new_body = self.shift_expr_aux(body, amount, 1);
-                let ty_nlbv = self.nlbv(new_type);
-                let val_nlbv = self.nlbv(new_val);
-                let body_nlbv = self.nlbv(new_body);
-                let num_loose_bvars = ty_nlbv.max(val_nlbv.max(body_nlbv.saturating_sub(1)));
-                Expr::Let { binder_name, binder_type: new_type, val: new_val, body: new_body, num_loose_bvars, has_fvars, nondep }
+                Expr::Let { binder_name, binder_type: new_type, val: new_val, body: new_body, nondep }
             }
-            Expr::Proj { ty_name, idx, structure, has_fvars, .. } => {
+            Expr::Proj { ty_name, idx, structure } => {
                 let new_s = structure.shift_up(amount);
-                let s_nlbv = self.nlbv(new_s);
-                Expr::Proj { ty_name, idx, structure: new_s, num_loose_bvars: s_nlbv, has_fvars }
+                Expr::Proj { ty_name, idx, structure: new_s }
             }
         }
     }

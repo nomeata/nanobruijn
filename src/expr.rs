@@ -36,8 +36,6 @@ pub enum Expr<'a> {
         /// `q` will have idx 1.
         idx: u32,
         structure: ExprPtr<'a>,
-        num_loose_bvars: u16,
-        has_fvars: bool,
     },
     /// A bound variable represented by a deBruijn index.
     /// In the DAG, only Var { dbj_idx: 0 } exists. All variable references
@@ -55,32 +53,24 @@ pub enum Expr<'a> {
     App {
         fun: ExprPtr<'a>,
         arg: ExprPtr<'a>,
-        num_loose_bvars: u16,
-        has_fvars: bool,
     },
     Pi {
         binder_name: NamePtr<'a>,
         binder_style: BinderStyle,
         binder_type: ExprPtr<'a>,
         body: ExprPtr<'a>,
-        num_loose_bvars: u16,
-        has_fvars: bool,
     },
     Lambda {
         binder_name: NamePtr<'a>,
         binder_style: BinderStyle,
         binder_type: ExprPtr<'a>,
         body: ExprPtr<'a>,
-        num_loose_bvars: u16,
-        has_fvars: bool,
     },
     Let {
         binder_name: NamePtr<'a>,
         binder_type: ExprPtr<'a>,
         val: ExprPtr<'a>,
         body: ExprPtr<'a>,
-        num_loose_bvars: u16,
-        has_fvars: bool,
         nondep: bool
     },
     /// A free variable with binder information and a unique identifier.
@@ -1310,7 +1300,26 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         }
     }
 
-    pub(crate) fn has_fvars(&self, e: CorePtr<'t>) -> bool { self.read_expr(e).has_fvars() }
+    /// Lazy memoized has_fvars: computes whether a core expression references any Local.
+    /// Result is stable (pure function of core), so memoized globally in `expr_cache.has_fvars_cache`.
+    pub(crate) fn has_fvars(&mut self, e: CorePtr<'t>) -> bool {
+        if let Some(&cached) = self.expr_cache.has_fvars_cache.get(&e) { return cached; }
+        let result = stacker::maybe_grow(64 * 1024, 2 * 1024 * 1024, || self.compute_has_fvars(e));
+        self.expr_cache.has_fvars_cache.insert(e, result);
+        result
+    }
+
+    fn compute_has_fvars(&mut self, e: CorePtr<'t>) -> bool {
+        match self.read_expr(e) {
+            Local { .. } => true,
+            Var { .. } | Sort { .. } | Const { .. } | NatLit { .. } | StringLit { .. } => false,
+            App { fun, arg } => self.has_fvars(fun.core) || self.has_fvars(arg.core),
+            Pi { binder_type, body, .. }
+            | Lambda { binder_type, body, .. } => self.has_fvars(binder_type.core) || self.has_fvars(body.core),
+            Let { binder_type, val, body, .. } => self.has_fvars(binder_type.core) || self.has_fvars(val.core) || self.has_fvars(body.core),
+            Proj { structure, .. } => self.has_fvars(structure.core),
+        }
+    }
 
     /// With ExprPtr, fvar_lb of a DAG CorePtr is always 0 (cores are OSNF-normalized).
     /// The effective fvar_lb of an ExprPtr is e.shift.
@@ -1321,32 +1330,5 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
 
 }
 
-impl<'t> Expr<'t> {
-    /// The number of "loose" bound variables in this core expression.
-    /// For compound expressions with ExprPtr children, this accounts for children's shifts.
-    pub(crate) fn num_loose_bvars(&self) -> u16 {
-        match self {
-            Sort { .. } | Const { .. } | Local { .. } | StringLit { .. } | NatLit { .. } => 0,
-            Var { dbj_idx, .. } => dbj_idx + 1,
-            App { num_loose_bvars, .. }
-            | Pi { num_loose_bvars, .. }
-            | Lambda { num_loose_bvars, .. }
-            | Let { num_loose_bvars, .. }
-            | Proj { num_loose_bvars, .. } => *num_loose_bvars,
-        }
-    }
-
-    pub(crate) fn has_fvars(&self) -> bool {
-        match self {
-            Local { .. } => true,
-            Var { .. } | Sort { .. } | Const { .. } | NatLit { .. } | StringLit { .. } => false,
-            App { has_fvars, .. }
-            | Pi { has_fvars, .. }
-            | Lambda { has_fvars, .. }
-            | Let { has_fvars, .. }
-            | Proj { has_fvars, .. } => *has_fvars,
-        }
-    }
-}
 
 

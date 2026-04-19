@@ -276,9 +276,9 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
 
         // No stray free variables.
         for ind in st.all_inductives_incl_specialized.iter() {
-            assert!(!self.ctx.read_expr(ind.ty).has_fvars());
+            assert!(!self.ctx.has_fvars(ind.ty));
             for c in ind.ctors.iter() {
-                assert!(!self.ctx.read_expr(c.ty).has_fvars());
+                assert!(!self.ctx.has_fvars(c.ty));
             }
         }
         st
@@ -310,7 +310,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                 let replaced_ctor_wo_params = self.replace_all_nested(ctor_type_instd, st, &ctor_local_params);
                 let replaced_ctor_w_params =
                     self.ctx.abstr_pis(ctor_local_params.iter().copied(), replaced_ctor_wo_params).core;
-                assert!(!self.ctx.read_expr(replaced_ctor_w_params).has_fvars());
+                assert!(!self.ctx.has_fvars(replaced_ctor_w_params));
                 // Push the constructor with the params put back, free variables abstracted,
                 // and ococurrences of nested inductives replaced with specialized types.
                 new_ctors_for_i.push(CtorHeader { name: adjusted_ctor.name, ty: replaced_ctor_w_params });
