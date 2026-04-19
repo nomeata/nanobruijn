@@ -630,6 +630,8 @@ pub struct TcTrace {
     pub alloc_mk_proj: u64,
     pub alloc_mk_other: u64,
     pub alloc_mk_app_cache_hit: u64,
+    pub subst_cache_hit: u64, pub subst_cache_miss: u64,
+    pub dsubst_cache_hit: u64, pub dsubst_cache_miss: u64,
     // wnu cache store breakdown
     pub wnu_cache_new_inserts: u64,
     pub wnu_cache_update_lower: u64,
@@ -680,6 +682,9 @@ impl std::fmt::Display for TcTrace {
             self.alloc_mk_pi, self.alloc_mk_lambda, self.alloc_mk_let,
             self.alloc_mk_var, self.alloc_mk_proj, self.alloc_mk_other,
             self.frame_reuse, self.frame_new)?;
+        write!(f, " | subst={}/{} dsubst={}/{}",
+            self.subst_cache_hit, self.subst_cache_miss,
+            self.dsubst_cache_hit, self.dsubst_cache_miss)?;
         Ok(())
     }
 }

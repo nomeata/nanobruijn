@@ -820,8 +820,10 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
 
     fn subst_aux_body(&mut self, e: CorePtr<'t>, ks: LevelsPtr<'t>, vs: LevelsPtr<'t>) -> ExprPtr<'t> {
         if let Some(&cached) = self.expr_cache.subst_cache.get(&(e, ks, vs)) {
+            self.trace.subst_cache_hit += 1;
             return cached;
         }
+        self.trace.subst_cache_miss += 1;
         // Level substitution commutes with variable shifting (they operate on
         // independent parts: levels vs. bvar indices). For ExprPtr children,
         // we recurse on child.core and preserve child.shift.
@@ -876,8 +878,10 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
 
     pub fn subst_expr_levels(&mut self, e: CorePtr<'t>, ks: LevelsPtr<'t>, vs: LevelsPtr<'t>) -> ExprPtr<'t> {
         if let Some(&cached) = self.expr_cache.dsubst_cache.get(&(e, ks, vs)) {
+            self.trace.dsubst_cache_hit += 1;
             return cached;
         }
+        self.trace.dsubst_cache_miss += 1;
         self.expr_cache.subst_cache.clear();
         assert_eq!(self.read_levels(ks).len(), self.read_levels(vs).len());
         let out = self.subst_aux_core(e, ks, vs);
