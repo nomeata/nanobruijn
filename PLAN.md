@@ -419,6 +419,14 @@ These approaches were tried and found counterproductive, unsound, or out of scop
   declarations creates L2/L3 cache pressure without enough mk_app calls to amortize it.
 - **view_expr #[inline]**: 10% regression on Init from instruction cache pressure.
   The compiler's default inlining decisions are already optimal.
+- **view_expr result cache** (direct-mapped 4K entries, keyed on (core, shift)):
+  60% cache hit rate on Init. But the cache overhead (hash computation + indirect
+  memory access + Expr copy + cache insert) outweighs the saved work, yielding
+  ~1% slower on Init (245B vs 242B). The underlying `shift_expr_aux` cache already
+  captures the expensive part; the rest of `view_expr` is too cheap to benefit
+  from caching. Key insight: `unfold_pi_step`/`unfold_lambda_step` calls are 99.8%
+  on unshifted inputs (shift=0 or closed), so those paths don't need caching
+  either.
 - **target-cpu=native**: Regression. Generic x86-64 code performs better, likely because
   the wider AVX-512 instructions cause frequency throttling on this CPU.
 - **Trace counter removal**: Commenting out all 116 `self.trace.xxx += 1` increments.
