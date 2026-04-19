@@ -446,24 +446,26 @@ These approaches were tried and found counterproductive, unsound, or out of scop
 
 - **Lazy `infer_let`** (push let onto local_ctx, infer body, pop, inst_beta on result):
   fixes `perf/shift-cascade` (1000 nested lets) dramatically — **1.12B → 41M instructions,
-  27× faster, ahead of nanoda's 53M** on that test. But blows up Init: stuck for >500s on
-  some declaration with `dag=650M` entries, 1.5T+ instructions, OOM-killed. A narrower
-  conditional "lazy only when body is a Let" didn't help — the Init diverger is also a
-  nested-let shape.
-  **Root cause of divergence:** with the let in context, whnf during infer repeatedly
-  zeta-reduces Var(k) → val lookups. Each pop discards the depth frame's cached whnf
-  entries. For declarations where inferred types reference let vars (true dependent-type
-  cases, common in Init's Grind/Ordered tactics), the lost cache + repeated zeta makes
-  the whole infer 1000× slower than eager's pre-substituted path.
-  Cascade-vs-Init diverges because cascade's body type is `Nat` (closed, trivial
-  inst_beta) while Init divergers have body types that reference the let var and suffer
-  downstream cache-miss cascades. A real fix needs either (a) context-spanning whnf
-  cache keyed on something stable across pop, or (b) a heuristic that detects the
-  cascade shape upfront (e.g. val is a Lambda with no calls and body is Let with
-  identical shape). Out of scope for now. **Trade-off: we lose big on `perf/shift-cascade`
-  compared to the official kernel and nanoda; the pure de Bruijn + shift-in-pointer design
-  is fundamentally handicapped on deeply nested let chains with cross-let value
-  references.**
+  27× faster, ahead of nanoda's 53M** on that test. But blows up Init: one declaration
+  at ~#19500 hits the 10s per-decl timeout, DAG bloats to 4.5M+ entries in that window.
+  **Not a frame-invalidation issue**: lazy frame invalidation preserves entries on pop.
+  **Root cause is cache bucketing.** `cache_bucket(e) = depth - e.shift` buckets an
+  expression at its "core's natural depth." In eager mode (no let push), every
+  computation happens at bucket `d` and repeat whnfs on the same core hit. In lazy mode
+  at depth `d+1`, new sub-expressions get `shift=0` and bucket `d+1`, even when they
+  don't reference the let var (`nlbv << d+1`). They can't share cache with their
+  equivalents that were seen outside the let at bucket `d`. Measured whnf hit rate on
+  the diverging Init decl: **174 / 364024 = 0.05%** (eager baseline: ~70%). Every
+  whnf becomes fresh work; the DAG grows explosively.
+  **Proposed real fix (future work):** redefine `cache_bucket(e)` to use
+  `min(depth - shift, effective_nlbv)` where `effective_nlbv = nlbv(core) + shift`.
+  Expressions with slack (`nlbv < natural_depth`) would bucket at their minimum valid
+  depth — locally-nameless-style sharing for free. Needs careful review of cache
+  semantics: lookups/inserts must agree on bucketing, and the local_ctx[0..bucket]
+  invariant (unchanged across pushes/pops above `bucket`) must still hold.
+  **Trade-off for now:** we lose on `perf/shift-cascade` vs the official kernel and
+  nanoda. Eager-only `infer_let` keeps Init fast but pays O(N²) on deeply nested let
+  chains with cross-let value references.
 - **target-cpu=native**: Regression. Generic x86-64 code performs better, likely because
   the wider AVX-512 instructions cause frequency throttling on this CPU.
 - **Trace counter removal**: Commenting out all 116 `self.trace.xxx += 1` increments.
