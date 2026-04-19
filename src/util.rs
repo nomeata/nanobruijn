@@ -361,10 +361,6 @@ pub struct ExprCache<'t> {
     /// Direct-mapped mk_app cache.
     pub(crate) mk_app_dm_cache: Vec<(u64, ExprPtr<'t>, ExprPtr<'t>, ExprPtr<'t>)>,
     pub(crate) mk_app_miss_count: u32,
-    /// Memoization cache for mk_pi: (name, style, type, body) → ExprPtr.
-    pub(crate) mk_pi_cache: FxHashMap<(NamePtr<'t>, BinderStyle, ExprPtr<'t>, ExprPtr<'t>), ExprPtr<'t>>,
-    /// Memoization cache for mk_lambda: (name, style, type, body) → ExprPtr.
-    pub(crate) mk_lambda_cache: FxHashMap<(NamePtr<'t>, BinderStyle, ExprPtr<'t>, ExprPtr<'t>), ExprPtr<'t>>,
     /// Cached Var(0) CorePtr. Only one Var exists in the DAG.
     pub(crate) var0_ptr: Option<CorePtr<'t>>,
 }
@@ -382,8 +378,6 @@ impl<'t> ExprCache<'t> {
             abstr_cache_levels: new_fx_hash_map(),
             mk_app_dm_cache: Vec::new(),
             mk_app_miss_count: 0,
-            mk_pi_cache: new_fx_hash_map(),
-            mk_lambda_cache: new_fx_hash_map(),
             var0_ptr: None,
         }
     }
@@ -636,6 +630,8 @@ pub struct TcTrace {
     pub alloc_mk_proj: u64,
     pub alloc_mk_other: u64,
     pub alloc_mk_app_cache_hit: u64,
+    pub alloc_mk_pi_cache_hit: u64,
+    pub alloc_mk_lambda_cache_hit: u64,
     // wnu cache store breakdown
     pub wnu_cache_new_inserts: u64,
     pub wnu_cache_update_lower: u64,
@@ -681,9 +677,10 @@ impl std::fmt::Display for TcTrace {
                 self.eq_cache_cross_depth_hits)?;
         }
         write!(f, " | wnu_st={}/{}/{}/{}", self.wnu_cache_new_inserts, self.wnu_cache_update_lower, self.wnu_cache_update_higher, self.wnu_cache_update_skip)?;
-        write!(f, " | mka={}/{} mkp={} mkl={} mklt={} mkv={} mkpr={} mko={} fr={}/{}",
+        write!(f, " | mka={}/{} mkp={}/{} mkl={}/{} mklt={} mkv={} mkpr={} mko={} fr={}/{}",
             self.alloc_mk_app, self.alloc_mk_app_cache_hit,
-            self.alloc_mk_pi, self.alloc_mk_lambda, self.alloc_mk_let,
+            self.alloc_mk_pi, self.alloc_mk_pi_cache_hit,
+            self.alloc_mk_lambda, self.alloc_mk_lambda_cache_hit, self.alloc_mk_let,
             self.alloc_mk_var, self.alloc_mk_proj, self.alloc_mk_other,
             self.frame_reuse, self.frame_new)?;
         Ok(())
@@ -1132,10 +1129,6 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         binder_type: ExprPtr<'t>,
         body: ExprPtr<'t>,
     ) -> ExprPtr<'t> {
-        let key = (binder_name, binder_style, binder_type, body);
-        if let Some(&cached) = self.expr_cache.mk_lambda_cache.get(&key) {
-            return cached;
-        }
         self.trace.alloc_mk_lambda += 1;
         let ty_nlbv = self.nlbv(binder_type);
         let body_nlbv = self.nlbv(body);
@@ -1153,9 +1146,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         let has_fvars = self.has_fvars(binder_type.core) || self.has_fvars(body.core);
         let lambda_expr = Expr::Lambda { binder_name, binder_style, binder_type: adj_ty, body: adj_body, num_loose_bvars: core_nlbv, has_fvars };
         let core = self.alloc_expr(lambda_expr);
-        let result = if min_shift == ExprPtr::CLOSED_SHIFT { ExprPtr::closed(core) } else { ExprPtr::new(core, min_shift) };
-        self.expr_cache.mk_lambda_cache.insert(key, result);
-        result
+        if min_shift == ExprPtr::CLOSED_SHIFT { ExprPtr::closed(core) } else { ExprPtr::new(core, min_shift) }
     }
 
     pub fn mk_pi(
@@ -1165,10 +1156,6 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         binder_type: ExprPtr<'t>,
         body: ExprPtr<'t>,
     ) -> ExprPtr<'t> {
-        let key = (binder_name, binder_style, binder_type, body);
-        if let Some(&cached) = self.expr_cache.mk_pi_cache.get(&key) {
-            return cached;
-        }
         self.trace.alloc_mk_pi += 1;
         let ty_nlbv = self.nlbv(binder_type);
         let body_nlbv = self.nlbv(body);
@@ -1181,9 +1168,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         let has_fvars = self.has_fvars(binder_type.core) || self.has_fvars(body.core);
         let pi_expr = Expr::Pi { binder_name, binder_style, binder_type: adj_ty, body: adj_body, num_loose_bvars: core_nlbv, has_fvars };
         let core = self.alloc_expr(pi_expr);
-        let result = if min_shift == ExprPtr::CLOSED_SHIFT { ExprPtr::closed(core) } else { ExprPtr::new(core, min_shift) };
-        self.expr_cache.mk_pi_cache.insert(key, result);
-        result
+        if min_shift == ExprPtr::CLOSED_SHIFT { ExprPtr::closed(core) } else { ExprPtr::new(core, min_shift) }
     }
 
     pub fn mk_let(
