@@ -358,11 +358,6 @@ pub struct ExprCache<'t> {
     /// Lazy memoized has_fvars: CorePtr → has-a-Local-in-subtree.
     /// Populated on demand; pure function of core.
     pub(crate) has_fvars_cache: FxHashMap<CorePtr<'t>, bool>,
-    /// Lazy memoized has_bvar: does core reference a free bvar at the given index?
-    /// Keyed on (core, index); populated on demand.
-    pub(crate) has_bvar_cache: FxHashMap<(CorePtr<'t>, u16), bool>,
-    pub(crate) has_bvar_cache_hits: u64,
-    pub(crate) has_bvar_cache_misses: u64,
 }
 
 impl<'t> ExprCache<'t> {
@@ -380,9 +375,6 @@ impl<'t> ExprCache<'t> {
             mk_app_miss_count: 0,
             var0_ptr: None,
             has_fvars_cache: new_fx_hash_map(),
-            has_bvar_cache: new_fx_hash_map(),
-            has_bvar_cache_hits: 0,
-            has_bvar_cache_misses: 0,
         }
     }
 
