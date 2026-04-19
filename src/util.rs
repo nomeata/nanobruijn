@@ -4,7 +4,6 @@ use crate::level::Level;
 use crate::name::Name;
 use crate::pretty_printer::{PpOptions, PrettyPrinter};
 use crate::tc::TypeChecker;
-use crate::union_find::UnionFind;
 use crate::unique_hasher::UniqueHasher;
 use indexmap::{IndexMap, IndexSet};
 use num_bigint::BigUint;
@@ -1904,8 +1903,6 @@ pub(crate) struct TcCache<'t> {
     pub(crate) defeq_neg_base: LazyMap<(ExprPtr<'t>, ExprPtr<'t>), (ExprPtr<'t>, ExprPtr<'t>, u16)>,
     /// Depth-stacked weighted UF base (bucket 0): closed expressions.
     pub(crate) uf_base: LazyMap<CorePtr<'t>, ExprPtr<'t>>,
-    /// Strong reduction cache (global, library feature).
-    pub(crate) strong_cache: UniqueHashMap<(CorePtr<'t>, bool, bool), CorePtr<'t>>,
     /// Per-depth frames: local bindings + open-expression caches.
     /// Frame at index i corresponds to binder depth i+1.
     /// Cache bucket k>0 maps to frames[k-1].
@@ -1923,7 +1920,6 @@ impl<'t> TcCache<'t> {
             infer_check_base: LazyMap::new(), infer_no_check_base: LazyMap::new(),
             defeq_pos_base: LazyMap::new(), defeq_neg_base: LazyMap::new(),
             uf_base: LazyMap::new(),
-            strong_cache: new_unique_hash_map(),
             frames: Vec::new(),
             depth: 0,
         }

@@ -1,6 +1,5 @@
 use crate::env::Declar;
 use crate::expr::{BinderStyle, Expr::*, FVarId};
-use crate::hash64;
 use crate::level::Level;
 use crate::name::Name;
 use crate::util::{ExportFile, CorePtr, LevelPtr, LevelsPtr, NamePtr, ExprPtr, StringPtr, TcCtx};

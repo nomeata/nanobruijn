@@ -941,60 +941,6 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         self.infer(subst_body, flag)
     }
     
-    // Not well tested, used for introspection/debugging.
-    #[allow(dead_code)]
-    pub(crate) fn strong_reduce(&mut self, e: ExprPtr<'t>, reduce_types: bool, reduce_proofs: bool) -> ExprPtr<'t> {
-        if (!reduce_types) || (!reduce_proofs) {
-            let ty = self.infer(e, InferOnly);
-            if !reduce_types && matches!(self.ctx.read_expr(ty.core), Sort {..}) {
-                return e
-            }
-            if !reduce_proofs && self.is_proposition(ty).0 {
-                return e
-            }
-        }
-        let e = self.whnf(e);
-        if let Some(cached) = self.tc_cache.strong_cache.get(&(e.core, reduce_types, reduce_proofs)).copied() {
-            return ExprPtr::from_nlbv(cached, self.ctx.num_loose_bvars(cached)).shift_up(e.shift)
-        }
-
-        let out = match self.ctx.view_expr(e) {
-            Expr::App {fun, arg, ..} => {
-                let f = self.strong_reduce(fun, reduce_types, reduce_proofs);
-                let arg = self.strong_reduce(arg, reduce_types, reduce_proofs);
-                self.ctx.mk_app(f, arg)
-            }
-            Expr::Lambda {binder_name, binder_style, binder_type, body, ..} => {
-                let binder_type_r = self.strong_reduce(binder_type, reduce_types, reduce_proofs);
-                self.push_local(binder_type_r);
-                let body_r = self.strong_reduce(body, reduce_types, reduce_proofs);
-                self.pop_local();
-                self.ctx.mk_lambda(binder_name, binder_style, binder_type_r, body_r)
-            }
-            Expr::Pi {binder_name, binder_style, binder_type, body, ..} => {
-                let binder_type_r = self.strong_reduce(binder_type, reduce_types, reduce_proofs);
-                self.push_local(binder_type_r);
-                let body_r = self.strong_reduce(body, reduce_types, reduce_proofs);
-                self.pop_local();
-                self.ctx.mk_pi(binder_name, binder_style, binder_type_r, body_r)
-            }
-            Expr::Proj {ty_name, idx, structure, ..} => {
-                let structure = self.strong_reduce(structure, reduce_types, reduce_proofs);
-                let x = self.ctx.mk_proj(ty_name, idx, structure);
-                let y = self.whnf(x);
-                if y != x {
-                    self.strong_reduce(y, reduce_types, reduce_proofs)
-                } else {
-                    x
-                }
-
-            }
-            _ => e
-        };
-        self.tc_cache.strong_cache.insert((e.core, reduce_types, reduce_proofs), out.core);
-        out
-    }
-
     pub fn whnf(&mut self, e: ExprPtr<'t>) -> ExprPtr<'t> {
         self.ctx.trace.whnf_calls += 1;
         self.ctx.check_heartbeat();

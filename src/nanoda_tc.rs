@@ -74,7 +74,6 @@ pub(crate) struct NanodaTcCache<'t> {
     pub(crate) whnf_no_unfolding_cache: UniqueHashMap<CorePtr<'t>, ExprPtr<'t>>,
     pub(crate) eq_cache: UnionFind<CorePtr<'t>>,
     pub(crate) failure_cache: FxHashSet<(CorePtr<'t>, CorePtr<'t>)>,
-    pub(crate) strong_cache: UniqueHashMap<(CorePtr<'t>, bool, bool), ExprPtr<'t>>,
 }
 
 impl<'t> NanodaTcCache<'t> {
@@ -86,7 +85,6 @@ impl<'t> NanodaTcCache<'t> {
             whnf_no_unfolding_cache: new_unique_hash_map(),
             eq_cache: UnionFind::new(),
             failure_cache: new_fx_hash_set(),
-            strong_cache: new_unique_hash_map(),
         }
     }
 
@@ -98,7 +96,6 @@ impl<'t> NanodaTcCache<'t> {
         self.whnf_no_unfolding_cache.clear();
         self.eq_cache.clear();
         self.failure_cache.clear();
-        self.strong_cache.clear();
     }
 }
 
@@ -641,76 +638,6 @@ impl<'x, 't: 'x, 'p: 't> NanodaTypeChecker<'x, 't, 'p> {
         self.infer(body, flag)
     }
     
-    // Not well tested, used for introspection/debugging.
-    #[allow(dead_code)]
-    pub(crate) fn strong_reduce(&mut self, e: ExprPtr<'t>, reduce_types: bool, reduce_proofs: bool) -> ExprPtr<'t> {
-        if (!reduce_types) || (!reduce_proofs) {
-            let ty = self.infer(e, InferOnly);
-            if !reduce_types && matches!(self.ctx.read_expr(ty.core), Sort {..}) {
-                return e
-            }
-            if !reduce_proofs && self.is_proposition(ty).0 {
-                return e
-            }
-        }
-        let e = self.whnf(e);
-        if let Some(cached) = self.tc_cache.strong_cache.get(&(e.core, reduce_types, reduce_proofs)).copied() {
-            return cached
-        }
-
-        let out = match self.ctx.view_expr(e) {
-            Expr::App {fun, arg, ..} => {
-                let f = self.strong_reduce(fun, reduce_types, reduce_proofs);
-                let arg = self.strong_reduce(arg, reduce_types, reduce_proofs);
-                self.ctx.mk_app(f, arg)
-            }
-            Expr::Lambda {binder_name, binder_style, binder_type, body, ..} => {
-                let start_pos = self.ctx.dbj_level_counter;
-                let local = self.ctx.mk_dbj_level(binder_name, binder_style, binder_type.core);
-                let instd = self.ctx.inst(body, &[local]);
-                let body = self.strong_reduce(instd, reduce_types, reduce_proofs);
-                let abstrd = self.ctx.abstr_levels(body.core, start_pos);
-                match self.ctx.read_expr(local.core) {
-                    Local {binder_name, binder_style, binder_type, ..} => {
-                        self.ctx.replace_dbj_level(local);
-                        let t = self.ctx.abstr_levels(binder_type, start_pos);
-                        self.ctx.mk_lambda(binder_name, binder_style, t, abstrd)
-                    },
-                    _ => panic!()
-                }
-            }
-            Expr::Pi {binder_name, binder_style, binder_type, body, ..} => {
-                let start_pos = self.ctx.dbj_level_counter;
-                let local = self.ctx.mk_dbj_level(binder_name, binder_style, binder_type.core);
-                let instd = self.ctx.inst(body, &[local]);
-                let body = self.strong_reduce(instd, reduce_types, reduce_proofs);
-                let abstrd = self.ctx.abstr_levels(body.core, start_pos);
-                match self.ctx.read_expr(local.core) {
-                    Local {binder_name, binder_style, binder_type, ..} => {
-                        self.ctx.replace_dbj_level(local);
-                        let t = self.ctx.abstr_levels(binder_type, start_pos);
-                        self.ctx.mk_pi(binder_name, binder_style, t, abstrd)
-                    },
-                    _ => panic!()
-                }
-            }
-            Expr::Proj {ty_name, idx, structure, ..} => {
-                let structure = self.strong_reduce(structure, reduce_types, reduce_proofs);
-                let x = self.ctx.mk_proj(ty_name, idx, structure);
-                let y = self.whnf(x);
-                if y != x {
-                    self.strong_reduce(y, reduce_types, reduce_proofs)
-                } else {
-                    x
-                }
-
-            }
-            _ => e
-        };
-        self.tc_cache.strong_cache.insert((e.core, reduce_types, reduce_proofs), out);
-        out
-    }
-
     pub fn whnf(&mut self, e: ExprPtr<'t>) -> ExprPtr<'t> {
         self.ctx.trace.whnf_calls += 1;
         if matches!(self.ctx.read_expr(e.core), NatLit { .. } | StringLit { .. }) {
