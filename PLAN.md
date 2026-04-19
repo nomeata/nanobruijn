@@ -443,6 +443,27 @@ These approaches were tried and found counterproductive, unsound, or out of scop
   225.7B → 233.6B (+3.5%) — the extra compare on every App traversal exceeds the saved
   work. Reverted. The redundancy caught by mk_app_dm_cache is NOT unchanged-identity;
   see above.
+
+- **Lazy `infer_let`** (push let onto local_ctx, infer body, pop, inst_beta on result):
+  fixes `perf/shift-cascade` (1000 nested lets) dramatically — **1.12B → 41M instructions,
+  27× faster, ahead of nanoda's 53M** on that test. But blows up Init: stuck for >500s on
+  some declaration with `dag=650M` entries, 1.5T+ instructions, OOM-killed. A narrower
+  conditional "lazy only when body is a Let" didn't help — the Init diverger is also a
+  nested-let shape.
+  **Root cause of divergence:** with the let in context, whnf during infer repeatedly
+  zeta-reduces Var(k) → val lookups. Each pop discards the depth frame's cached whnf
+  entries. For declarations where inferred types reference let vars (true dependent-type
+  cases, common in Init's Grind/Ordered tactics), the lost cache + repeated zeta makes
+  the whole infer 1000× slower than eager's pre-substituted path.
+  Cascade-vs-Init diverges because cascade's body type is `Nat` (closed, trivial
+  inst_beta) while Init divergers have body types that reference the let var and suffer
+  downstream cache-miss cascades. A real fix needs either (a) context-spanning whnf
+  cache keyed on something stable across pop, or (b) a heuristic that detects the
+  cascade shape upfront (e.g. val is a Lambda with no calls and body is Let with
+  identical shape). Out of scope for now. **Trade-off: we lose big on `perf/shift-cascade`
+  compared to the official kernel and nanoda; the pure de Bruijn + shift-in-pointer design
+  is fundamentally handicapped on deeply nested let chains with cross-let value
+  references.**
 - **target-cpu=native**: Regression. Generic x86-64 code performs better, likely because
   the wider AVX-512 instructions cause frequency throttling on this CPU.
 - **Trace counter removal**: Commenting out all 116 `self.trace.xxx += 1` increments.
