@@ -449,20 +449,30 @@ These approaches were tried and found counterproductive, unsound, or out of scop
   27× faster, ahead of nanoda's 53M** on that test. But blows up Init: one declaration
   at ~#19500 hits the 10s per-decl timeout, DAG bloats to 4.5M+ entries in that window.
   **Not a frame-invalidation issue**: lazy frame invalidation preserves entries on pop.
-  **Root cause is cache bucketing.** `cache_bucket(e) = depth - e.shift` buckets an
-  expression at its "core's natural depth." In eager mode (no let push), every
-  computation happens at bucket `d` and repeat whnfs on the same core hit. In lazy mode
-  at depth `d+1`, new sub-expressions get `shift=0` and bucket `d+1`, even when they
-  don't reference the let var (`nlbv << d+1`). They can't share cache with their
-  equivalents that were seen outside the let at bucket `d`. Measured whnf hit rate on
-  the diverging Init decl: **174 / 364024 = 0.05%** (eager baseline: ~70%). Every
-  whnf becomes fresh work; the DAG grows explosively.
-  **Proposed real fix (future work):** redefine `cache_bucket(e)` to use
-  `min(depth - shift, effective_nlbv)` where `effective_nlbv = nlbv(core) + shift`.
-  Expressions with slack (`nlbv < natural_depth`) would bucket at their minimum valid
-  depth — locally-nameless-style sharing for free. Needs careful review of cache
-  semantics: lookups/inserts must agree on bucketing, and the local_ctx[0..bucket]
-  invariant (unchanged across pushes/pops above `bucket`) must still hold.
+  **Not a cache-bucketing-slack issue either**: OSNF guarantees that any freshly-allocated
+  core at shift=0 inside the let references the let var (at least one child has shift=0
+  by min-shift-of-open-children==0). So bucketing those at `d+1` is correct, not wasteful.
+  **Actual root cause — zeta produces many unique variants.** In eager mode the single
+  up-front `inst_beta(body, [val])` creates one body' where every let-var occurrence has
+  been replaced by `val` directly. whnf on body' traverses these and the DAG's hash-consing
+  consolidates equivalent sub-expressions into shared cores. Cache hit rate stays ~70%.
+  In lazy mode, every `Var(k) → let-var` encounter during whnf triggers a fresh
+  `lookup_var_value` that returns `val.shift_up(idx+1)` — a distinct ExprPtr per shift
+  amount. Beta reductions downstream then produce distinct shifted variants. The whnf
+  cache stores each as a separate key; few repeats. Measured whnf hit rate on the
+  diverging Init decl: **174 / 364024 = 0.05%** (eager baseline: ~70%). DAG grows to
+  4.5M entries for a single declaration.
+  **Why cascade still wins anyway:** in the cascade test, the body's inferred type is
+  `Nat` (closed) at every level, so the outer `inst_beta(body_ty, [val])` after pop is
+  O(1). The expensive cache-miss churn that plagues the Init diverger doesn't fire,
+  because the cascade's body doesn't depend on the let vars in a way that triggers
+  zeta-during-whnf — it just declares helpers that happen not to be used further up.
+  **Possible fix direction:** unify zeta variants. If `lookup_var_value` returned a
+  canonical shape (e.g., by always pre-shifting `val` once at let-push time and
+  composing shifts lazily on the ExprPtr), the zeta results would pointer-share across
+  occurrences at the same depth. Needs careful design — we already compose shifts via
+  `shift_up`, but beta reductions bake the shift into the result via inst_beta, losing
+  the shift-composable form. Out of scope for now.
   **Trade-off for now:** we lose on `perf/shift-cascade` vs the official kernel and
   nanoda. Eager-only `infer_let` keeps Init fast but pays O(N²) on deeply nested let
   chains with cross-let value references.
