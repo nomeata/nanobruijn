@@ -427,6 +427,22 @@ These approaches were tried and found counterproductive, unsound, or out of scop
   from caching. Key insight: `unfold_pi_step`/`unfold_lambda_step` calls are 99.8%
   on unshifted inputs (shift=0 or closed), so those paths don't need caching
   either.
+- **Remove `mk_app_dm_cache`** (after the 2026-04-19 field removal made mk_app lean):
+  Init 225.7B → 229.4B (+1.6%); Mathlib 8t: 3m28s → 3m44s wall (+8%), 20m33s → 21m19s
+  user (+3.7%). The cache still pays off. **Why:** instrumented per-call-site counters
+  show 97% of mk_app calls originate from `inst_aux` and its inline `inst_aux_quick`
+  (~34k+7k of ~43k calls per slow Init declaration). The 96% cache hit rate is not
+  "identity" (unchanged children): the children genuinely change in most calls. It's
+  different substitution paths converging on the same `(fun, arg)` pair downstream —
+  `inst_cache` bumps `inst_substs_id` on every top-level `inst`/`inst_beta` call, so
+  nothing hits across calls. `mk_app_dm_cache` is the meet point where those paths
+  merge and is the right level for this redundancy. Kept.
+- **mk_app identity short-circuit** (return original when `new_fun == fun && new_arg == arg
+  && sh_amt == 0` in `inst_aux_body` / `inst_aux_quick` App arms): counter shows the path
+  fires 14–1521 times per declaration out of ~43k mk_app calls (0.03–3.5%). Init regressed
+  225.7B → 233.6B (+3.5%) — the extra compare on every App traversal exceeds the saved
+  work. Reverted. The redundancy caught by mk_app_dm_cache is NOT unchanged-identity;
+  see above.
 - **target-cpu=native**: Regression. Generic x86-64 code performs better, likely because
   the wider AVX-512 instructions cause frequency throttling on this CPU.
 - **Trace counter removal**: Commenting out all 116 `self.trace.xxx += 1` increments.
@@ -536,19 +552,46 @@ cascading cache misses → repeated whnf/infer → more expression creation → 
   Enforced by `osnf_adj` (panics on violation). Invariant violation root-caused and fixed
   (nested inductive types with no params to abstract).
 
+- **Lean Expr struct (2026-04-19)**: `hash`, `num_loose_bvars`, and `has_fvars` fields all
+  removed from every Expr variant.
+  - `hash`: now computed on demand in `Expr::get_hash()`.
+  - `num_loose_bvars`: only stored in the parallel `expr_nlbv: Vec<u16>` (populated at
+    `alloc_expr` from children's ExprPtr shifts via `TcCtx::compute_nlbv`).
+  - `has_fvars`: lazy memoized on `CorePtr` via `expr_cache.has_fvars_cache` (FxHashMap).
+    Only queried on non-hot paths (inductive.rs assertions, nanoda_tc, abstr early-exit).
+  - **`osnf_adj` simplified**: takes only `amount` (no nlbv). Pure O(1) branching
+    arithmetic — `if self.is_closed() { self } else { Self::new(self.core, self.shift - amount) }`.
+  - **`mk_app` simplified**: pure ExprPtr arithmetic — two `is_closed()` checks, shift min,
+    `osnf_adj` on each child, `alloc_expr`. No nlbv/has_fvars lookups.
+  - **Impact**: Init 241.6B → 225.7B (-6.6%).
+
+- **Cache cleanup (2026-04-19)**: removed caches that were subsumed or unhelpful:
+  - `defeq_pos`: 0 hits / 988k UF hits on Init — strictly subsumed by UF. Removed.
+  - `mk_pi_cache` / `mk_lambda_cache`: 54-59% hit rate but HashMap overhead ≈ `alloc_expr`
+    probe cost; `alloc_expr` already hash-conses. Removed.
+  - `strong_cache` + `eq_cache`: subsumed by UF. `cheap_eq` is now just
+    `x == y || uf_check_eq(x, y)`. Removed.
+  - Kept: `mk_app_dm_cache`. See below.
+
 ## Current performance
 
-Local measurements (single-thread, release build):
+Local measurements (release build):
 
-| | Init | Mathlib |
+| | Init (instructions, single-thread) | Mathlib (8 threads, wall / user) |
 |---|---|---|
-| nanobruijn (2026-04-18) | 242B | 11.0T |
+| nanobruijn (2026-04-19, post-field-removal) | 225.7B | 3m28s / 20m33s |
+| nanobruijn (2026-04-18) | 242B | — |
 | nanobruijn (pre-CLOSED_SHIFT, 2026-04-15) | 238B | ~11.5T |
 | Nanoda Init baseline | 227B | — |
 
 Note: earlier comparisons claiming a large speedup over nanoda on Mathlib were
 incorrect (mis-remembered nanoda number). For up-to-date cross-checker comparisons,
 see [arena results](https://arena.lean-lang.org/).
+
+**`max_declarations` caveat**: honored only in serial mode (`tc.rs:177`); parallel
+mode pulls from an atomic counter until exhausted. Don't extrapolate from `_10k.json`
+timings assuming they scale to full Mathlib — the first 10k are Init + early imports
+and are denser than the tail.
 
 ### TODOs
 
