@@ -314,62 +314,25 @@ def shift : Expr → (k : Nat) → (c : Nat := 0) → Expr
   | const id, _, _ => const id
 
 theorem shift_zero (e : Expr) (c : Nat) : e.shift 0 c = e := by
-  induction e generalizing c with
-  | bvar i => simp only [shift]; split <;> (first | (congr 1; omega) | rfl)
-  | app f a ihf iha => simp only [shift, ihf, iha]
-  | lam body ih => simp only [shift, ih]
-  | const _ => rfl
+  induction e generalizing c <;> grind [shift]
 
 theorem shift_shift (e : Expr) (j k c : Nat) :
     (e.shift j c).shift k c = e.shift (j + k) c := by
-  induction e generalizing c with
-  | bvar i =>
-    simp only [shift]
-    by_cases h : i ≥ c
-    · simp only [h, ↓reduceIte, shift, show i + j ≥ c from by omega, Expr.bvar.injEq]; omega
-    · simp only [h, ↓reduceIte, shift]
-  | app f a ihf iha => simp only [shift, ihf, iha]
-  | lam body ih => simp only [shift, ih]
-  | const _ => rfl
+  induction e generalizing c <;> grind [shift]
 
 theorem shift_shift_comm (e : Expr) (j k c d : Nat) (hcd : c ≤ d) (hdj : d ≤ c + j) :
     (e.shift j c).shift k d = e.shift (j + k) c := by
-  induction e generalizing c d with
-  | bvar i =>
-    simp only [shift]
-    by_cases h : i ≥ c
-    · simp only [h, ↓reduceIte, shift, show i + j ≥ d from by omega, Expr.bvar.injEq]; omega
-    · simp only [h, ↓reduceIte, shift, show ¬(i ≥ d) from by omega]
-  | app f a ihf iha => simp only [shift, ihf c d hcd hdj, iha c d hcd hdj]
-  | lam body ih =>
-    simp only [shift]
-    exact congrArg Expr.lam (ih (c + 1) (d + 1) (by omega) (by omega))
-  | const _ => rfl
+  induction e generalizing c d <;> grind [shift]
 
 private theorem shift_comm_lt_gen (e : Expr) (k amount cutoff base : Nat) (hlt : k < cutoff) :
     (e.shift k base).shift amount (cutoff + base) =
     (e.shift amount (cutoff - k + base)).shift k base := by
-  induction e generalizing k cutoff base with
-  | bvar i =>
-    simp only [shift]
-    by_cases h : i ≥ base
-    · simp only [h, ↓reduceIte]
-      by_cases hi : i + k ≥ cutoff + base
-      · simp only [shift, hi, ↓reduceIte, show i ≥ cutoff - k + base from by omega,
-          show i + amount ≥ base from by omega, Expr.bvar.injEq]; omega
-      · simp only [shift, hi, ↓reduceIte, show ¬(i ≥ cutoff - k + base) from by omega, h]
-    · simp only [h, ↓reduceIte, shift, show ¬(i ≥ cutoff + base) from by omega,
-        show ¬(i ≥ cutoff - k + base) from by omega]
-  | app f a ihf iha => simp only [shift, ihf k cutoff base hlt, iha k cutoff base hlt]
-  | lam body ih =>
-    simp only [shift]
-    exact congrArg Expr.lam (ih k cutoff (base + 1) hlt)
-  | const _ => rfl
+  induction e generalizing k cutoff base <;> grind [shift]
 
 theorem shift_comm_lt (e : Expr) (k amount cutoff : Nat) (hlt : k < cutoff) :
     (e.shift k 0).shift amount cutoff = (e.shift amount (cutoff - k)).shift k 0 := by
   have h := shift_comm_lt_gen e k amount cutoff 0 hlt
-  simp only [Nat.add_zero] at h; exact h
+  grind
 
 /-- Free-variable predicate on de Bruijn expressions. `HasFreeVar e k` iff
     `e` has a free variable at external index `k` (the standard notion:
@@ -380,149 +343,59 @@ inductive HasFreeVar : Expr → Nat → Prop where
   | app_right {f a : Expr} {k : Nat} (h : HasFreeVar a k) : HasFreeVar (app f a) k
   | lam {body : Expr} {k : Nat} (h : HasFreeVar body (k + 1)) : HasFreeVar (lam body) k
 
+/-! Case-analysis lemmas that teach `grind` how to decompose `HasFreeVar`. -/
+
+@[grind =] theorem hasFreeVar_bvar_iff (i j : Nat) : HasFreeVar (bvar j) i ↔ i = j :=
+  ⟨fun h => by cases h; rfl, fun h => h ▸ HasFreeVar.bvar _⟩
+
+@[grind] theorem hasFreeVar_bvar_self (i : Nat) : HasFreeVar (bvar i) i := HasFreeVar.bvar _
+
+@[grind =] theorem hasFreeVar_app_iff (f a : Expr) (k : Nat) :
+    HasFreeVar (app f a) k ↔ HasFreeVar f k ∨ HasFreeVar a k :=
+  ⟨fun h => by cases h with | app_left h => exact Or.inl h | app_right h => exact Or.inr h,
+   fun h => h.elim HasFreeVar.app_left HasFreeVar.app_right⟩
+
+@[grind =] theorem hasFreeVar_lam_iff (body : Expr) (k : Nat) :
+    HasFreeVar (lam body) k ↔ HasFreeVar body (k + 1) :=
+  ⟨fun h => by cases h; assumption, HasFreeVar.lam⟩
+
+@[grind] theorem hasFreeVar_const (id k : Nat) : ¬ HasFreeVar (const id) k := by
+  intro h; cases h
+
 /-- Stronger forward decomposition of HasFreeVar on a shift. -/
 theorem hasFreeVar_shift_extract (e : Expr) (n c i : Nat) :
     HasFreeVar (e.shift n c) i →
     (HasFreeVar e (i - n) ∧ i ≥ n + c) ∨ (HasFreeVar e i ∧ i < c) := by
-  induction e generalizing c i with
-  | bvar j =>
-    intro h
-    simp only [shift] at h
-    by_cases hjc : j ≥ c
-    · simp only [hjc, ↓reduceIte] at h
-      cases h with
-      | bvar _ =>
-        left
-        refine ⟨?_, ?_⟩
-        · have : j + n - n = j := by omega
-          rw [this]; exact HasFreeVar.bvar _
-        · omega
-    · simp only [hjc, ↓reduceIte] at h
-      cases h with
-      | bvar _ => right; exact ⟨HasFreeVar.bvar _, by omega⟩
-  | app f a ihf iha =>
-    intro h
-    simp only [shift] at h
-    cases h with
-    | app_left hf =>
-      rcases ihf c i hf with ⟨hfe, hi⟩ | ⟨hfe, hi⟩
-      · exact Or.inl ⟨HasFreeVar.app_left hfe, hi⟩
-      · exact Or.inr ⟨HasFreeVar.app_left hfe, hi⟩
-    | app_right ha =>
-      rcases iha c i ha with ⟨hae, hi⟩ | ⟨hae, hi⟩
-      · exact Or.inl ⟨HasFreeVar.app_right hae, hi⟩
-      · exact Or.inr ⟨HasFreeVar.app_right hae, hi⟩
-  | lam body ih =>
-    intro h
-    simp only [shift] at h
-    cases h with
-    | lam hb =>
-      rcases ih (c+1) (i+1) hb with ⟨hbe, hi⟩ | ⟨hbe, hi⟩
-      · left
-        refine ⟨?_, ?_⟩
-        · have : i + 1 - n = (i - n) + 1 := by omega
-          rw [this] at hbe
-          exact HasFreeVar.lam hbe
-        · omega
-      · right
-        exact ⟨HasFreeVar.lam hbe, by omega⟩
-  | const _ =>
-    intro h
-    simp only [shift] at h
-    cases h
+  induction e generalizing c i <;> grind [shift]
 
 /-- Shift preserves / creates external bvars with a cutoff-parametrized predictable pattern. -/
 theorem hasFreeVar_shift_fwd (e : Expr) (n c k : Nat) :
     HasFreeVar (e.shift n c) k → k ≥ n + c ∨ k < c := by
-  induction e generalizing c k with
-  | bvar i =>
-    intro h
-    simp only [shift] at h
-    by_cases hic : i ≥ c
-    · simp only [hic, ↓reduceIte] at h
-      cases h; left; omega
-    · simp only [hic, ↓reduceIte] at h
-      cases h; right; omega
-  | app f a ihf iha =>
-    intro h
-    simp only [shift] at h
-    cases h with
-    | app_left hf => exact ihf c k hf
-    | app_right ha => exact iha c k ha
-  | lam body ih =>
-    intro h
-    simp only [shift] at h
-    cases h with
-    | lam hb =>
-      have := ih (c+1) (k+1) hb
-      omega
-  | const _ =>
-    intro h
-    simp only [shift] at h
-    cases h
+  induction e generalizing c k <;> grind [shift]
 
 /-- Specialised to cutoff 0. -/
 theorem hasFreeVar_shift_zero_ge (e : Expr) (n k : Nat)
     (h : HasFreeVar (e.shift n 0) k) : k ≥ n := by
-  rcases hasFreeVar_shift_fwd e n 0 k h with hge | hlt
-  · omega
-  · omega
+  have := hasFreeVar_shift_fwd e n 0 k h; omega
 
 /-- Shifting back: external bvar j in e gives external bvar j+n (if j ≥ c) in
     e.shift n c. -/
 theorem hasFreeVar_shift_bwd (e : Expr) (j : Nat) (h : HasFreeVar e j) (n c : Nat) :
     HasFreeVar (e.shift n c) (if j ≥ c then j + n else j) := by
-  induction h generalizing c with
-  | bvar i =>
-    simp only [shift]
-    by_cases hic : i ≥ c
-    · simp only [hic, ↓reduceIte]; exact HasFreeVar.bvar _
-    · simp only [hic, ↓reduceIte]; exact HasFreeVar.bvar _
-  | app_left _ ih =>
-    simp only [shift]; exact HasFreeVar.app_left (ih c)
-  | app_right _ ih =>
-    simp only [shift]; exact HasFreeVar.app_right (ih c)
-  | @lam body k hb ih =>
-    simp only [shift]
-    have ih' := ih (c + 1)
-    apply HasFreeVar.lam
-    by_cases hkc : k ≥ c
-    · simp only [hkc, ↓reduceIte]
-      simp only [show k + 1 ≥ c + 1 from by omega, ↓reduceIte] at ih'
-      show (body.shift n (c + 1)).HasFreeVar (k + n + 1)
-      have : k + n + 1 = k + 1 + n := by omega
-      rw [this]; exact ih'
-    · simp only [hkc, ↓reduceIte]
-      simp only [show ¬(k + 1 ≥ c + 1) from by omega, ↓reduceIte] at ih'
-      exact ih'
+  induction h generalizing c <;> grind [shift]
 
 /-- If all external free vars of e are below c, shift at cutoff c is a no-op. -/
 theorem shift_eq_of_hasFreeVars_lt (e : Expr) (k c : Nat)
     (h : ∀ j, HasFreeVar e j → j < c) : e.shift k c = e := by
   induction e generalizing c with
   | bvar i =>
-    simp only [shift]
-    split
-    · rename_i hic
-      exfalso; exact absurd (h i (HasFreeVar.bvar _)) (by omega)
-    · rfl
+    have := h i (HasFreeVar.bvar _)
+    grind [shift]
   | app f a ihf iha =>
-    simp only [shift]
-    rw [ihf c (fun j hj => h j (HasFreeVar.app_left hj))]
-    rw [iha c (fun j hj => h j (HasFreeVar.app_right hj))]
+    grind [shift]
   | lam body ih =>
-    simp only [shift]
     refine congrArg Expr.lam (ih (c + 1) ?_)
-    intro j hj
-    by_cases hj0 : j = 0
-    · omega
-    · have hj1 : j ≥ 1 := by omega
-      have : HasFreeVar (Expr.lam body) (j - 1) := by
-        have heq : (j - 1) + 1 = j := by omega
-        rw [← heq] at hj
-        exact HasFreeVar.lam hj
-      have := h (j - 1) this
-      omega
+    intro j hj; have := h (j - 1); grind
   | const _ => rfl
 
 /-- Specialisation: closed (no HasFreeVar) expression shift at cutoff 0 is a no-op. -/
@@ -533,43 +406,7 @@ theorem shift_eq_of_no_hasFreeVar (e : Expr) (k : Nat)
 theorem shift_injective (k c : Nat) : ∀ (e₁ e₂ : Expr),
     e₁.shift k c = e₂.shift k c → e₁ = e₂ := by
   intro e₁
-  induction e₁ generalizing c with
-  | bvar i =>
-    intro e₂ h
-    cases e₂ with
-    | bvar j =>
-      simp only [shift] at h
-      split at h <;> split at h <;> simp_all [bvar.injEq] <;> omega
-    | app f a => simp only [shift] at h; split at h <;> simp at h
-    | lam body => simp only [shift] at h; split at h <;> simp at h
-    | const n => simp only [shift] at h; split at h <;> simp at h
-  | app f₁ a₁ ihf iha =>
-    intro e₂ h
-    cases e₂ with
-    | bvar j => simp only [shift] at h; split at h <;> simp at h
-    | app f₂ a₂ =>
-      simp only [shift, app.injEq] at h
-      have h1 := ihf c f₂ h.1
-      have h2 := iha c a₂ h.2
-      subst h1; subst h2; rfl
-    | lam body => simp only [shift] at h; simp at h
-    | const n => simp only [shift] at h; simp at h
-  | lam body₁ ih =>
-    intro e₂ h
-    cases e₂ with
-    | bvar j => simp only [shift] at h; split at h <;> simp at h
-    | app f a => simp only [shift] at h; simp at h
-    | lam body₂ =>
-      simp only [shift, lam.injEq] at h
-      exact congrArg lam (ih (c + 1) body₂ h)
-    | const n => simp only [shift] at h; simp at h
-  | const n₁ =>
-    intro e₂ h
-    cases e₂ with
-    | bvar j => simp only [shift] at h; split at h <;> simp at h
-    | app f a => simp only [shift] at h; simp at h
-    | lam body => simp only [shift] at h; simp at h
-    | const n₂ => simp only [shift, const.injEq] at h; exact congrArg const h
+  induction e₁ generalizing c <;> intro e₂ h <;> cases e₂ <;> grind [shift]
 
 end Expr
 
