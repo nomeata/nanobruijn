@@ -611,20 +611,18 @@ theorem adjust_child_erase (e : SExpr) (amount cutoff : Nat)
     by_cases hc0 : cutoff = 0
     · subst hc0
       simp only [↓reduceIte]
-      have hshift : amount + 0 - k + k = amount := by omega
       calc (adjust_child inner (amount + 0 - k) 0).erase.shift amount 0
           = (adjust_child inner (amount + 0 - k) 0).erase.shift (amount + 0 - k + k) 0 := by
-            rw [hshift]
+            congr 1; omega
         _ = ((adjust_child inner (amount + 0 - k) 0).erase.shift (amount + 0 - k) 0).shift k 0 := by
             rw [Expr.shift_shift]
         _ = inner.erase.shift k 0 := by rw [ih]
     · simp only [hc0, ↓reduceIte]
       show (((adjust_child inner (amount + cutoff - k) 0).erase.shift cutoff 0).shift amount cutoff : Expr) = _
       rw [Expr.shift_shift_comm _ cutoff amount 0 cutoff (by omega) (by omega)]
-      have hshift : amount + cutoff - k + k = cutoff + amount := by omega
       calc (adjust_child inner (amount + cutoff - k) 0).erase.shift (cutoff + amount) 0
           = (adjust_child inner (amount + cutoff - k) 0).erase.shift (amount + cutoff - k + k) 0 := by
-            rw [hshift]
+            congr 1; omega
         _ = ((adjust_child inner (amount + cutoff - k) 0).erase.shift (amount + cutoff - k) 0).shift k 0 := by
             rw [Expr.shift_shift]
         _ = inner.erase.shift k 0 := by rw [ih]
@@ -866,13 +864,9 @@ theorem mk_osnf_compound_erase_app (f a : SExpr) :
   simp only
   split
   · rfl
-  · rename_i hlb
-    show (Expr.app (adjust_child f (fvar_lb_val (app f a)) 0).erase
-                    (adjust_child a (fvar_lb_val (app f a)) 0).erase).shift _ 0 = _
-    rw [Expr.shift]
-    congr 1
-    · exact adjust_child_erase f _ 0 (bvarsGe_child_app_left f a)
-    · exact adjust_child_erase a _ 0 (bvarsGe_child_app_right f a)
+  · have hf := adjust_child_erase f _ 0 (bvarsGe_child_app_left f a)
+    have ha := adjust_child_erase a _ 0 (bvarsGe_child_app_right f a)
+    grind [erase, Expr.shift]
 
 theorem mk_osnf_compound_erase_lam (body : SExpr) :
     (mk_osnf_compound (lam body)).erase = (lam body).erase := by
@@ -882,11 +876,8 @@ theorem mk_osnf_compound_erase_lam (body : SExpr) :
   simp only
   split
   · rfl
-  · rename_i hlb
-    show (Expr.lam (adjust_child body (fvar_lb_val (lam body)) 1).erase).shift _ 0 = _
-    rw [Expr.shift]
-    congr 1
-    exact adjust_child_erase body _ 1 (bvarsGe_child_lam body)
+  · have := adjust_child_erase body _ 1 (bvarsGe_child_lam body)
+    grind [erase, Expr.shift]
 
 /-! ### mk_osnf_compound produces OSNF -/
 
