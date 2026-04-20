@@ -72,6 +72,22 @@ def union (as bs : FVarList) : FVarList :=
       y :: union ((x - y - 1) :: xs) ys
 termination_by (as.length + bs.length, as.length)
 
+/-- Absolute-value membership: `MemAbs i xs` iff the absolute index `i` is in
+    the set decoded by `xs`. -/
+inductive MemAbs : Nat → FVarList → Prop where
+  | head (d : Nat) (rest : FVarList) : MemAbs d (d :: rest)
+  | tail (i d : Nat) (rest : FVarList) (h : MemAbs i rest) :
+      MemAbs (d + 1 + i) (d :: rest)
+
+theorem not_memAbs_nil (i : Nat) : ¬ MemAbs i [] := by
+  intro h; cases h
+
+theorem memAbs_ge_head (d i : Nat) (rest : FVarList) (h : MemAbs i (d :: rest)) :
+    i ≥ d := by
+  cases h with
+  | head => exact Nat.le_refl d
+  | tail => omega
+
 end FVarList
 
 /-! ## Plain expressions and shift -/
@@ -157,6 +173,17 @@ inductive HasFreeVar : Expr → Nat → Nat → Prop where
   | app_right (f a : Expr) (i c : Nat) (h : HasFreeVar a i c) : HasFreeVar (app f a) i c
   | lam (body : Expr) (i c : Nat) (h : HasFreeVar body i (c + 1)) : HasFreeVar (lam body) i c
 
+/-- External free-variable predicate: `ExtFreeVar e k` iff, treating `e` as a
+    term at depth 0, there is a bvar whose **external index** (internal name
+    minus the number of binders it sits under) equals `k`. This is the view
+    matched by `SExpr.fvars`: under a lambda, body's external index `k+1`
+    corresponds to `lam body`'s external index `k`. -/
+inductive ExtFreeVar : Expr → Nat → Prop where
+  | bvar (i : Nat) : ExtFreeVar (bvar i) i
+  | app_left {f a : Expr} {k : Nat} (h : ExtFreeVar f k) : ExtFreeVar (app f a) k
+  | app_right {f a : Expr} {k : Nat} (h : ExtFreeVar a k) : ExtFreeVar (app f a) k
+  | lam {body : Expr} {k : Nat} (h : ExtFreeVar body (k + 1)) : ExtFreeVar (lam body) k
+
 /-- All free variables of `e` at cutoff `c` are `≥ bound`. -/
 def AllFreeVarsGe (e : Expr) (bound : Nat) (c : Nat := 0) : Prop :=
   ∀ i, HasFreeVar e i c → i ≥ bound
@@ -205,6 +232,71 @@ theorem shift_eq_of_no_freevars (e : Expr) (k c : Nat)
     simp only [shift]
     rw [ih (c + 1) (fun i hi => h i (HasFreeVar.lam _ _ _ hi))]
   | const _ => rfl
+
+/-- Shift preserves / creates external bvars with a cutoff-parametrized predictable pattern. -/
+theorem extFreeVar_shift_fwd (e : Expr) (n c k : Nat) :
+    ExtFreeVar (e.shift n c) k → k ≥ n + c ∨ k < c := by
+  induction e generalizing c k with
+  | bvar i =>
+    intro h
+    simp only [shift] at h
+    by_cases hic : i ≥ c
+    · simp only [hic, ↓reduceIte] at h
+      cases h; left; omega
+    · simp only [hic, ↓reduceIte] at h
+      cases h; right; omega
+  | app f a ihf iha =>
+    intro h
+    simp only [shift] at h
+    cases h with
+    | app_left hf => exact ihf c k hf
+    | app_right ha => exact iha c k ha
+  | lam body ih =>
+    intro h
+    simp only [shift] at h
+    cases h with
+    | lam hb =>
+      have := ih (c+1) (k+1) hb
+      omega
+  | const _ =>
+    intro h
+    simp only [shift] at h
+    cases h
+
+/-- Specialised to cutoff 0. -/
+theorem extFreeVar_shift_zero_ge (e : Expr) (n k : Nat)
+    (h : ExtFreeVar (e.shift n 0) k) : k ≥ n := by
+  rcases extFreeVar_shift_fwd e n 0 k h with hge | hlt
+  · omega
+  · omega
+
+/-- Shifting back: external bvar j in e gives external bvar j+n (if j ≥ c) in
+    e.shift n c. -/
+theorem extFreeVar_shift_bwd (e : Expr) (j : Nat) (h : ExtFreeVar e j) (n c : Nat) :
+    ExtFreeVar (e.shift n c) (if j ≥ c then j + n else j) := by
+  induction h generalizing c with
+  | bvar i =>
+    simp only [shift]
+    by_cases hic : i ≥ c
+    · simp only [hic, ↓reduceIte]; exact ExtFreeVar.bvar _
+    · simp only [hic, ↓reduceIte]; exact ExtFreeVar.bvar _
+  | app_left _ ih =>
+    simp only [shift]; exact ExtFreeVar.app_left (ih c)
+  | app_right _ ih =>
+    simp only [shift]; exact ExtFreeVar.app_right (ih c)
+  | @lam body k hb ih =>
+    simp only [shift]
+    have ih' := ih (c + 1)
+    apply ExtFreeVar.lam
+    by_cases hkc : k ≥ c
+    · simp only [hkc, ↓reduceIte]
+      simp only [show k + 1 ≥ c + 1 from by omega, ↓reduceIte] at ih'
+      show (body.shift n (c + 1)).ExtFreeVar (k + n + 1)
+      have : k + n + 1 = k + 1 + n := by omega
+      rw [this]; exact ih'
+    · simp only [hkc, ↓reduceIte]
+      simp only [show ¬(k + 1 ≥ c + 1) from by omega, ↓reduceIte] at ih'
+      exact ih'
 
 theorem shift_injective (k c : Nat) : ∀ (e₁ e₂ : Expr),
     e₁.shift k c = e₂.shift k c → e₁ = e₂ := by
