@@ -1135,22 +1135,14 @@ theorem to_osnf_erase (e : SExpr) : (to_osnf e).erase = e.erase := by
   induction e with
   | bvar i =>
     simp only [to_osnf]
-    split
-    · rename_i hi0; subst hi0; rfl
-    · rename_i hi0
-      show (Expr.bvar 0).shift i 0 = Expr.bvar i
-      simp only [Expr.shift, show 0 ≥ 0 from Nat.zero_le _, ↓reduceIte, Nat.zero_add]
+    split <;> grind [erase, Expr.shift]
   | const id => rfl
   | app f a ihf iha =>
     show (mk_osnf_compound (app f.to_osnf a.to_osnf)).erase = Expr.app f.erase a.erase
-    rw [mk_osnf_compound_erase_app]
-    show Expr.app (f.to_osnf).erase (a.to_osnf).erase = Expr.app f.erase a.erase
-    rw [ihf, iha]
+    rw [mk_osnf_compound_erase_app]; grind [erase]
   | lam body ih =>
     show (mk_osnf_compound (lam body.to_osnf)).erase = Expr.lam body.erase
-    rw [mk_osnf_compound_erase_lam]
-    show Expr.lam (body.to_osnf).erase = Expr.lam body.erase
-    rw [ih]
+    rw [mk_osnf_compound_erase_lam]; grind [erase]
   | shift k inner ih =>
     show (match inner.to_osnf with
       | shift m core => if k + m = 0 then core else shift (k + m) core
@@ -1159,37 +1151,25 @@ theorem to_osnf_erase (e : SExpr) : (to_osnf e).erase = e.erase := by
     split
     · rename_i m core heq
       have ih' : (shift m core).erase = inner.erase := by rw [← heq]; exact ih
+      rw [erase] at ih'
       split
-      · rename_i hkm
-        have hk0 : k = 0 := by omega
+      · have hk0 : k = 0 := by omega
         have hm0 : m = 0 := by omega
-        subst hk0; subst hm0
-        rw [SExpr.erase, Expr.shift_zero] at ih'
-        rw [ih', Expr.shift_zero]
-      · rename_i hkm
-        rw [SExpr.erase]
-        rw [SExpr.erase] at ih'
-        rw [← ih', Expr.shift_shift]
-        congr 1; omega
+        subst hk0; subst hm0; grind [erase, Expr.shift_zero]
+      · grind [erase, Expr.shift_shift]
     · rename_i e hnotShift
       split
-      · rename_i hk0; subst hk0
-        rw [ih, Expr.shift_zero]
-      · rename_i hk0
-        -- e = inner.to_osnf, not a shift. match e.fvars
-        have : ∀ (fvs : FVarList), inner.to_osnf.fvars = fvs →
+      · rename_i hk0; subst hk0; rw [ih, Expr.shift_zero]
+      · have : ∀ (fvs : FVarList), inner.to_osnf.fvars = fvs →
             (match fvs with | [] => inner.to_osnf | _ => shift k (inner.to_osnf)).erase
               = inner.erase.shift k 0 := by
           intro fvs hfvs
           match fvs with
           | [] =>
-            show inner.to_osnf.erase = inner.erase.shift k 0
             have hclosed := (fvars_empty_iff_no_hasFreeVar inner.to_osnf).mp hfvs
-            rw [← ih]
-            exact (Expr.shift_eq_of_no_hasFreeVar inner.to_osnf.erase k hclosed).symm
-          | d :: rest =>
-            show (shift k inner.to_osnf).erase = inner.erase.shift k 0
-            rw [SExpr.erase, ih]
+            have := Expr.shift_eq_of_no_hasFreeVar inner.to_osnf.erase k hclosed
+            grind
+          | d :: rest => grind [erase]
         exact this _ rfl
 
 -- Helper for osnf_unique: a shifted core has external free var at n.
