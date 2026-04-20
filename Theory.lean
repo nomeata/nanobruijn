@@ -31,127 +31,75 @@ There is no special leaf case for `bvar i`, only for `bvar 0`.
 - `equiv_iff_osnf_eq` : two SExprs are shift-equivalent iff they have the same OSNF.
 -/
 
-/-! ## FVarList: delta-encoded sorted sets of natural numbers
+/-! ## FVarList: free-variable index lists
 
-Used to track the set of free bvar indices appearing in an `SExpr`. The
-delta encoding makes `shift` O(1) (touches only the head), matching the
-behavior of `Shift` nodes in the implementation. -/
+A plain `List Nat` interpreted as a multiset of absolute free-variable
+indices. The operations are the obvious ones — shift is `map`, unbind is
+`filterMap`, union is `++`. -/
 
-/-- Delta-encoded sorted set of natural numbers.
-    `[]` is the empty set; `d :: rest` encodes `{d} ∪ {d + 1 + x | x ∈ decode rest}`. -/
 abbrev FVarList := List Nat
 
 namespace FVarList
 
-/-- Shift all indices up by `k`. O(1): only changes the head. -/
-def shift (k : Nat) : FVarList → FVarList
-  | [] => []
-  | d :: rest => (d + k) :: rest
+/-- Shift every index up by `k`. -/
+def shift (k : Nat) (xs : FVarList) : FVarList := xs.map (· + k)
 
-/-- Remove bvar(0) and decrement all others (exiting a binder body). -/
-def unbind : FVarList → FVarList
-  | [] => []
-  | 0 :: rest => rest
-  | (d + 1) :: rest => d :: rest
+/-- Remove bvar(0) and decrement the others (exit a binder body). -/
+def unbind (xs : FVarList) : FVarList :=
+  xs.filterMap fun i => if i = 0 then none else some (i - 1)
 
-/-- The lower bound (smallest free bvar index). -/
-def lb : FVarList → Option Nat
-  | [] => none
-  | d :: _ => some d
+/-- Union = append. Membership is by `∈`; duplicates are fine. -/
+def union (as bs : FVarList) : FVarList := as ++ bs
 
-/-- Merge two delta-encoded sorted sets. -/
-def union (as bs : FVarList) : FVarList :=
-  match as, bs with
-  | [], ys => ys
-  | xs, [] => xs
-  | x :: xs, y :: ys =>
-    if x < y then
-      x :: union xs ((y - x - 1) :: ys)
-    else if x = y then
-      x :: union xs ys
-    else -- x > y
-      y :: union ((x - y - 1) :: xs) ys
-termination_by (as.length + bs.length, as.length)
+/-- Smallest element; 0 for the empty list. -/
+def lb_val : FVarList → Nat
+  | [] => 0
+  | [x] => x
+  | x :: xs => min x (lb_val xs)
 
-/-- Absolute-value membership: `MemAbs i xs` iff the absolute index `i` is in
-    the set decoded by `xs`. -/
-inductive MemAbs : Nat → FVarList → Prop where
-  | head (d : Nat) (rest : FVarList) : MemAbs d (d :: rest)
-  | tail (i d : Nat) (rest : FVarList) (h : MemAbs i rest) :
-      MemAbs (d + 1 + i) (d :: rest)
+theorem lb_val_le_of_mem (xs : FVarList) (i : Nat) (h : i ∈ xs) : lb_val xs ≤ i := by
+  induction xs with
+  | nil => cases h
+  | cons x xs ih =>
+    match xs, h with
+    | [], List.Mem.head _ => exact Nat.le_refl _
+    | y :: ys, h =>
+      simp only [lb_val]
+      cases h with
+      | head => exact Nat.min_le_left _ _
+      | tail _ hmem => exact Nat.le_trans (Nat.min_le_right _ _) (ih hmem)
 
-theorem not_memAbs_nil (i : Nat) : ¬ MemAbs i [] := by
-  intro h; cases h
+theorem mem_of_lb_val_eq {xs : FVarList} (hne : xs ≠ []) :
+    lb_val xs ∈ xs := by
+  induction xs with
+  | nil => exact absurd rfl hne
+  | cons x xs ih =>
+    match xs with
+    | [] => exact List.mem_cons_self
+    | y :: ys =>
+      simp only [lb_val]
+      by_cases hle : x ≤ lb_val (y :: ys)
+      · simp only [Nat.min_eq_left hle]; exact List.mem_cons_self
+      · have : min x (lb_val (y :: ys)) = lb_val (y :: ys) := by
+          apply Nat.min_eq_right; omega
+        rw [this]; exact List.mem_cons_of_mem _ (ih (by simp))
 
-theorem memAbs_ge_head (d i : Nat) (rest : FVarList) (h : MemAbs i (d :: rest)) :
-    i ≥ d := by
-  cases h with
-  | head => exact Nat.le_refl d
-  | tail => omega
+@[simp] theorem shift_nil (k : Nat) : shift k ([] : FVarList) = [] := rfl
+@[simp] theorem shift_cons (k d : Nat) (rest : FVarList) :
+    shift k (d :: rest) = (d + k) :: shift k rest := rfl
 
-theorem memAbs_cons_cases (i d : Nat) (rest : FVarList) (h : MemAbs i (d :: rest)) :
-    i = d ∨ ∃ jj, i = d + 1 + jj ∧ MemAbs jj rest := by
-  cases h with
-  | head => exact Or.inl rfl
-  | tail jj _ _ hrest => exact Or.inr ⟨jj, by omega, hrest⟩
+@[simp] theorem mem_shift {k i : Nat} {xs : FVarList} :
+    i ∈ shift k xs ↔ ∃ j ∈ xs, i = j + k := by
+  unfold shift; grind [List.mem_map]
 
-@[grind =] theorem memAbs_nil_iff (i : Nat) : MemAbs i [] ↔ False :=
-  ⟨not_memAbs_nil _, False.elim⟩
+@[simp] theorem mem_union {i : Nat} {xs ys : FVarList} :
+    i ∈ union xs ys ↔ i ∈ xs ∨ i ∈ ys := by
+  unfold union; exact List.mem_append
 
-@[grind =] theorem memAbs_cons_iff (i d : Nat) (rest : FVarList) :
-    MemAbs i (d :: rest) ↔ i = d ∨ ∃ j, i = d + 1 + j ∧ MemAbs j rest := by
-  refine ⟨memAbs_cons_cases i d rest, ?_⟩
-  rintro (rfl | ⟨j, rfl, hrest⟩)
-  · exact MemAbs.head _ _
-  · exact MemAbs.tail _ _ _ hrest
-
-theorem memAbs_shift_iff (k i : Nat) (xs : FVarList) :
-    MemAbs i (shift k xs) ↔ ∃ j, MemAbs j xs ∧ i = j + k := by
-  cases xs <;> simp only [shift, memAbs_cons_iff, memAbs_nil_iff] <;> grind
-
-private theorem memAbs_union_iff_aux (n : Nat) :
-    ∀ (xs ys : FVarList), xs.length + ys.length ≤ n →
-    ∀ (i : Nat), (MemAbs i (union xs ys) ↔ MemAbs i xs ∨ MemAbs i ys) := by
-  induction n with
-  | zero =>
-    intro xs ys hn i
-    match xs, ys with
-    | [], [] => simp [union, memAbs_nil_iff]
-    | _ :: _, _ => simp at hn
-    | [], _ :: _ => simp at hn
-  | succ n' ih =>
-    intro xs ys hn i
-    match xs, ys with
-    | [], ys => simp [union, memAbs_nil_iff]
-    | x :: xs', [] => simp [union, memAbs_nil_iff]
-    | x :: xs', y :: ys' =>
-      simp only [union]
-      split
-      · rename_i hxy
-        have hlen : xs'.length + ((y - x - 1) :: ys').length ≤ n' := by simp at hn ⊢; omega
-        have IH := ih xs' ((y - x - 1) :: ys') hlen
-        simp only [memAbs_cons_iff, IH]; grind
-      · rename_i hxy
-        split
-        · rename_i heq
-          have hlen : xs'.length + ys'.length ≤ n' := by simp at hn ⊢; omega
-          have IH := ih xs' ys' hlen
-          simp only [memAbs_cons_iff, IH]; grind
-        · rename_i hne
-          have hlen : ((x - y - 1) :: xs').length + ys'.length ≤ n' := by simp at hn ⊢; omega
-          have IH := ih ((x - y - 1) :: xs') ys' hlen
-          simp only [memAbs_cons_iff, IH]; grind
-
-theorem memAbs_union_iff (i : Nat) (xs ys : FVarList) :
-    MemAbs i (union xs ys) ↔ MemAbs i xs ∨ MemAbs i ys :=
-  memAbs_union_iff_aux (xs.length + ys.length) xs ys (Nat.le_refl _) i
-
-theorem memAbs_unbind_iff (i : Nat) (xs : FVarList) :
-    MemAbs i (unbind xs) ↔ MemAbs (i + 1) xs := by
-  match xs with
-  | [] => simp only [unbind, memAbs_nil_iff]
-  | 0 :: rest => simp only [unbind, memAbs_cons_iff]; grind
-  | (d' + 1) :: rest => simp only [unbind, memAbs_cons_iff]; grind
+@[simp] theorem mem_unbind {i : Nat} {xs : FVarList} :
+    i ∈ unbind xs ↔ (i + 1) ∈ xs := by
+  unfold unbind; simp [List.mem_filterMap]
+  grind
 
 end FVarList
 
@@ -306,67 +254,56 @@ def fvars : SExpr → FVarList
   | const _ => []
   | shift k inner => FVarList.shift k inner.fvars
 
-/-- `fvar_lb_val` as a Nat, returning 0 for closed expressions. -/
-def fvar_lb_val (e : SExpr) : Nat :=
-  match e.fvars with
-  | [] => 0
-  | d :: _ => d
+/-- Smallest free bvar index; 0 for closed expressions. -/
+def fvar_lb_val (e : SExpr) : Nat := FVarList.lb_val e.fvars
 
 /-! ### Link between structural fvars and external fvars on erase -/
 
-theorem memAbs_fvars_iff_hasFreeVar (e : SExpr) (i : Nat) :
-    FVarList.MemAbs i e.fvars ↔ Expr.HasFreeVar e.erase i := by
+theorem mem_fvars_iff_hasFreeVar (e : SExpr) (i : Nat) :
+    i ∈ e.fvars ↔ Expr.HasFreeVar e.erase i := by
   induction e generalizing i with
   | bvar j => grind [fvars, erase]
   | const n => grind [fvars, erase]
-  | app f a ihf iha => grind [fvars, erase, FVarList.memAbs_union_iff]
-  | lam body ih => grind [fvars, erase, FVarList.memAbs_unbind_iff]
+  | app f a ihf iha => grind [fvars, erase, FVarList.mem_union]
+  | lam body ih => grind [fvars, erase, FVarList.mem_unbind]
   | shift k inner ih =>
-    simp only [fvars, erase, FVarList.memAbs_shift_iff]
+    simp only [fvars, erase, FVarList.mem_shift]
     constructor
     · rintro ⟨j, hj, rfl⟩
       have := Expr.hasFreeVar_shift_bwd inner.erase j ((ih j).mp hj) k 0
       simpa using this
     · intro h
       rcases Expr.hasFreeVar_shift_extract inner.erase k 0 i h with ⟨hfe, hge⟩ | ⟨_, hlt⟩
-      · exact ⟨i - k, (ih (i - k)).mpr hfe, by omega⟩
-      · omega
+      · exact ⟨i - k, (ih (i - k)).mpr hfe, by grind⟩
+      · grind
 
 /-- `e.fvars = []` iff the erasure has no external free bvars. -/
 theorem fvars_empty_iff_no_hasFreeVar (e : SExpr) :
     e.fvars = [] ↔ ∀ i, ¬ Expr.HasFreeVar e.erase i := by
   constructor
   · intro h i hext
-    have := (memAbs_fvars_iff_hasFreeVar e i).mpr hext
+    have := (mem_fvars_iff_hasFreeVar e i).mpr hext
     grind
   · intro h
     match hfv : e.fvars with
     | [] => rfl
     | d :: rest =>
-      have : FVarList.MemAbs d e.fvars := by rw [hfv]; exact FVarList.MemAbs.head _ _
-      grind [memAbs_fvars_iff_hasFreeVar]
+      have : d ∈ e.fvars := by rw [hfv]; exact List.mem_cons_self
+      grind [mem_fvars_iff_hasFreeVar]
 
 /-- If fvar_lb_val is 0 and fvars is non-empty, 0 is an external free var. -/
 theorem fvar_lb_zero_has_hasFreeVar_zero (e : SExpr)
     (hlb : fvar_lb_val e = 0) (hne : e.fvars ≠ []) :
     Expr.HasFreeVar e.erase 0 := by
-  apply (memAbs_fvars_iff_hasFreeVar e 0).mp
-  match hfv : e.fvars with
-  | [] => exact absurd hfv hne
-  | d :: rest =>
-    have hd : d = 0 := by unfold fvar_lb_val at hlb; rw [hfv] at hlb; exact hlb
-    grind [FVarList.MemAbs.head]
+  have : FVarList.lb_val e.fvars ∈ e.fvars := FVarList.mem_of_lb_val_eq hne
+  rw [show FVarList.lb_val e.fvars = 0 from hlb] at this
+  exact (mem_fvars_iff_hasFreeVar e 0).mp this
 
 /-- If fvar_lb_val = k, then all external free vars are ≥ k. -/
 theorem hasFreeVar_ge_fvar_lb (e : SExpr) (i : Nat)
     (h : Expr.HasFreeVar e.erase i) :
-    i ≥ fvar_lb_val e := by
-  have hmem : FVarList.MemAbs i e.fvars := (memAbs_fvars_iff_hasFreeVar e i).mpr h
-  match hfv : e.fvars with
-  | [] => grind [FVarList.memAbs_nil_iff]
-  | d :: rest =>
-    have := FVarList.memAbs_ge_head d i rest (by rw [← hfv]; exact hmem)
-    unfold fvar_lb_val; rw [hfv]; exact this
+    i ≥ fvar_lb_val e :=
+  FVarList.lb_val_le_of_mem e.fvars i ((mem_fvars_iff_hasFreeVar e i).mpr h)
 
 /-! ### OSNF definition
 
@@ -417,48 +354,48 @@ Defined directly on `fvars`: every free variable of `e` either lies below
 `cutoff` or is at least `cutoff + amount`. -/
 
 def BvarsGe (e : SExpr) (amount cutoff : Nat) : Prop :=
-  ∀ i, FVarList.MemAbs i e.fvars → i ≥ cutoff → i ≥ cutoff + amount
+  ∀ i ∈ e.fvars, i ≥ cutoff → i ≥ cutoff + amount
 
 /-! ### adjust_child preserves erasure (under BvarsGe) -/
 
 -- Helpers: project / combine `BvarsGe` at app and lam.
 private theorem bvarsGe_app_left (f a : SExpr) (amount cutoff : Nat)
     (h : BvarsGe (app f a) amount cutoff) : BvarsGe f amount cutoff := by
-  intro i hi; exact h i (by grind [fvars, FVarList.memAbs_union_iff])
+  intro i hi; exact h i (by grind [fvars, FVarList.mem_union])
 
 private theorem bvarsGe_app_right (f a : SExpr) (amount cutoff : Nat)
     (h : BvarsGe (app f a) amount cutoff) : BvarsGe a amount cutoff := by
-  intro i hi; exact h i (by grind [fvars, FVarList.memAbs_union_iff])
+  intro i hi; exact h i (by grind [fvars, FVarList.mem_union])
 
 private theorem bvarsGe_app_of (f a : SExpr) (amount cutoff : Nat)
     (hf : BvarsGe f amount cutoff) (ha : BvarsGe a amount cutoff) :
     BvarsGe (app f a) amount cutoff := by
-  intro i hi hic; grind [BvarsGe, fvars, FVarList.memAbs_union_iff]
+  intro i hi hic; grind [BvarsGe, fvars, FVarList.mem_union]
 
 private theorem bvarsGe_lam_of (body : SExpr) (amount cutoff : Nat)
     (hb : BvarsGe body amount (cutoff + 1)) :
     BvarsGe (lam body) amount cutoff := by
   intro i hi hic
-  have := hb (i + 1) (by grind [fvars, FVarList.memAbs_unbind_iff]) (by grind); grind
+  have := hb (i + 1) (by grind [fvars, FVarList.mem_unbind]) (by grind); grind
 
 private theorem bvarsGe_lam_body (body : SExpr) (amount cutoff : Nat)
     (h : BvarsGe (lam body) amount cutoff) :
     BvarsGe body amount (cutoff + 1) := by
   intro i hi hic
-  have := h (i - 1) (by grind [fvars, FVarList.memAbs_unbind_iff]) (by grind); grind
+  have := h (i - 1) (by grind [fvars, FVarList.mem_unbind]) (by grind); grind
 
 -- Derived BvarsGe for shift's inner per branch, matching the old constructor cases.
 private theorem bvarsGe_shift_mid (k : Nat) (inner : SExpr) (amount cutoff : Nat)
     (h : BvarsGe (shift k inner) amount cutoff) (hge : k ≥ cutoff) :
     BvarsGe inner (amount + cutoff - k) 0 := by
   intro i hi _
-  have := h (i + k) (by grind [fvars, FVarList.memAbs_shift_iff]) (by grind); grind
+  have := h (i + k) (by grind [fvars, FVarList.mem_shift]) (by grind); grind
 
 private theorem bvarsGe_shift_lt (k : Nat) (inner : SExpr) (amount cutoff : Nat)
     (h : BvarsGe (shift k inner) amount cutoff) (hlt : k < cutoff) :
     BvarsGe inner amount (cutoff - k) := by
   intro i hi hic
-  have := h (i + k) (by grind [fvars, FVarList.memAbs_shift_iff]) (by grind); grind
+  have := h (i + k) (by grind [fvars, FVarList.mem_shift]) (by grind); grind
 
 theorem adjust_child_erase (e : SExpr) (amount cutoff : Nat)
     (h : BvarsGe e amount cutoff) :
@@ -467,7 +404,7 @@ theorem adjust_child_erase (e : SExpr) (amount cutoff : Nat)
   | bvar i =>
     simp only [adjust_child, erase]
     by_cases hic : i ≥ cutoff
-    · have := h i (FVarList.MemAbs.head _ _) hic
+    · have := h i (List.mem_cons_self) hic
       simp only [hic, ↓reduceIte, erase, Expr.shift,
         show i - amount ≥ cutoff from by omega]; grind
     · simp only [hic, ↓reduceIte, erase, Expr.shift, hic]
@@ -513,7 +450,7 @@ theorem adjust_child_erase (e : SExpr) (amount cutoff : Nat)
 theorem bvarsGe_of_extSemantic (e : SExpr) (amount cutoff : Nat)
     (h : ∀ i, Expr.HasFreeVar e.erase i → i ≥ cutoff → i ≥ cutoff + amount) :
     BvarsGe e amount cutoff := fun i hi =>
-  h i ((memAbs_fvars_iff_hasFreeVar e i).mp hi)
+  h i ((mem_fvars_iff_hasFreeVar e i).mp hi)
 
 /-- All external free vars of e.erase are ≥ fvar_lb_val e. -/
 theorem bvarsGe_fvar_lb (e : SExpr) : BvarsGe e (fvar_lb_val e) 0 := by
@@ -526,18 +463,18 @@ theorem bvarsGe_fvar_lb (e : SExpr) : BvarsGe e (fvar_lb_val e) 0 := by
 theorem bvarsGe_child_app_left (f a : SExpr) :
     BvarsGe f (fvar_lb_val (app f a)) 0 := fun i hi _ => by
   have := hasFreeVar_ge_fvar_lb (app f a) i
-    (.app_left ((memAbs_fvars_iff_hasFreeVar _ _).mp hi)); grind
+    (.app_left ((mem_fvars_iff_hasFreeVar _ _).mp hi)); grind
 
 theorem bvarsGe_child_app_right (f a : SExpr) :
     BvarsGe a (fvar_lb_val (app f a)) 0 := fun i hi _ => by
   have := hasFreeVar_ge_fvar_lb (app f a) i
-    (.app_right ((memAbs_fvars_iff_hasFreeVar _ _).mp hi)); grind
+    (.app_right ((mem_fvars_iff_hasFreeVar _ _).mp hi)); grind
 
 theorem bvarsGe_child_lam (body : SExpr) :
     BvarsGe body (fvar_lb_val (lam body)) 1 := fun i hi hic => by
   have hlam : Expr.HasFreeVar (lam body).erase (i - 1) := by
     have : (i - 1) + 1 = i := by grind
-    grind [erase, memAbs_fvars_iff_hasFreeVar]
+    grind [erase, mem_fvars_iff_hasFreeVar]
   have := hasFreeVar_ge_fvar_lb (lam body) (i - 1) hlam; grind
 
 /-! ### mk_osnf_compound: normalize a compound expression whose children are in OSNF -/
@@ -558,7 +495,7 @@ def mk_osnf_compound (e : SExpr) : SExpr :=
 theorem hasFreeVar_of_bvarsGe (e : SExpr) (amount cutoff : Nat)
     (h : BvarsGe e amount cutoff) :
     ∀ i, Expr.HasFreeVar e.erase i → i ≥ cutoff → i ≥ cutoff + amount := fun i hi =>
-  h i ((memAbs_fvars_iff_hasFreeVar e i).mpr hi)
+  h i ((mem_fvars_iff_hasFreeVar e i).mpr hi)
 
 /-! ### Semantic characterisation of adjust_child's external free vars -/
 
@@ -589,39 +526,31 @@ theorem adjust_child_hasFreeVar_iff (e : SExpr) (amount cutoff : Nat)
 theorem adjust_child_preserves_fvar_lb_zero (e : SExpr) (amount cutoff : Nat)
     (h : fvar_lb_val e = 0) (hbv : BvarsGe e amount cutoff) :
     fvar_lb_val (adjust_child e amount cutoff) = 0 := by
-  match hfv : e.fvars with
-  | [] =>
-    have hclosed : ∀ i, ¬ Expr.HasFreeVar e.erase i :=
-      (fvars_empty_iff_no_hasFreeVar e).mp hfv
+  by_cases hfv : e.fvars = []
+  · -- e closed ⇒ adj e closed
+    have hclosed := (fvars_empty_iff_no_hasFreeVar e).mp hfv
     have hclosed' : ∀ k, ¬ Expr.HasFreeVar (adjust_child e amount cutoff).erase k := by
       intro k hk; rw [adjust_child_hasFreeVar_iff e amount cutoff hbv k] at hk
       rcases hk with ⟨_, h'⟩ | ⟨_, h'⟩ <;> exact hclosed _ h'
     have : (adjust_child e amount cutoff).fvars = [] :=
       (fvars_empty_iff_no_hasFreeVar _).mpr hclosed'
-    unfold fvar_lb_val; rw [this]
-  | d :: rest =>
-    have hd : d = 0 := by unfold fvar_lb_val at h; rw [hfv] at h; exact h
-    have hext0 : Expr.HasFreeVar e.erase 0 := by
-      apply (memAbs_fvars_iff_hasFreeVar e 0).mp
-      rw [hfv, hd]; exact FVarList.MemAbs.head _ _
+    show FVarList.lb_val _ = 0; rw [this]; rfl
+  · -- fvar_lb_val e = 0 and fvars nonempty ⇒ 0 ∈ fvars
+    have hmem_e : (0 : Nat) ∈ e.fvars := h ▸ FVarList.mem_of_lb_val_eq hfv
+    have hext0 : Expr.HasFreeVar e.erase 0 := (mem_fvars_iff_hasFreeVar e 0).mp hmem_e
+    -- derive HasFreeVar on adj
     have hadj0 : Expr.HasFreeVar (adjust_child e amount cutoff).erase 0 := by
       rw [adjust_child_hasFreeVar_iff e amount cutoff hbv 0]
       by_cases hc : cutoff = 0
       · left; subst hc
         have := hasFreeVar_of_bvarsGe e amount 0 hbv 0 hext0 (Nat.zero_le _)
-        have : amount = 0 := by omega
-        subst this; exact ⟨by omega, by simpa using hext0⟩
-      · exact Or.inr ⟨by omega, hext0⟩
-    have hmem : FVarList.MemAbs 0 (adjust_child e amount cutoff).fvars :=
-      (memAbs_fvars_iff_hasFreeVar _ 0).mpr hadj0
-    match hfv' : (adjust_child e amount cutoff).fvars with
-    | [] => grind [FVarList.memAbs_nil_iff]
-    | d' :: rest' =>
-      have := FVarList.memAbs_ge_head d' 0 rest' (by rw [← hfv']; exact hmem)
-      have hd'0 : d' = 0 := by omega
-      show (match (adjust_child e amount cutoff).fvars with
-            | [] => 0 | d :: _ => d) = 0
-      rw [hfv']; exact hd'0
+        have : amount = 0 := by grind
+        subst this; exact ⟨by grind, by simpa using hext0⟩
+      · exact Or.inr ⟨by grind, hext0⟩
+    have hmem : (0 : Nat) ∈ (adjust_child e amount cutoff).fvars :=
+      (mem_fvars_iff_hasFreeVar _ 0).mpr hadj0
+    have := FVarList.lb_val_le_of_mem _ 0 hmem
+    show FVarList.lb_val _ = 0; grind
 
 /-- adjust_child preserves fvars non-emptiness. -/
 theorem adjust_child_fvars_nonempty (e : SExpr) (amount cutoff : Nat)
@@ -714,32 +643,17 @@ theorem adjust_child_preserves_osnf (e : SExpr) (amount cutoff : Nat)
         (adjust_child_preserves_fvar_lb_zero core amount (cutoff - n) hlb_core hi)
         (adjust_child_fvars_nonempty core amount (cutoff - n) hi hfv_core)
 
--- Helper: head of fvars is an element.
-private theorem memAbs_fvar_lb_val (e : SExpr) (hne : e.fvars ≠ []) :
-    FVarList.MemAbs (fvar_lb_val e) e.fvars := by
-  match hfv : e.fvars with
-  | [] => exact absurd hfv hne
-  | d :: rest =>
-    have heq : fvar_lb_val e = d := by unfold fvar_lb_val; rw [hfv]
-    rw [heq]; exact FVarList.MemAbs.head _ _
-
--- Helper: when fvar_lb_val > 0, get HasFreeVar at fvar_lb_val.
+-- Helper: when fvars is non-empty, get HasFreeVar at fvar_lb_val.
 private theorem hasFreeVar_at_fvar_lb_val (e : SExpr) (hne : e.fvars ≠ []) :
     Expr.HasFreeVar e.erase (fvar_lb_val e) :=
-  (memAbs_fvars_iff_hasFreeVar _ _).mp (memAbs_fvar_lb_val e hne)
+  (mem_fvars_iff_hasFreeVar _ _).mp (FVarList.mem_of_lb_val_eq hne)
 
--- Helper: if HasFreeVar (adj e).erase 0, then (adj e).fvar_lb_val = 0.
+-- Helper: if HasFreeVar e'.erase 0, then e'.fvar_lb_val = 0.
 private theorem fvar_lb_val_zero_of_hasFreeVar_zero (e' : SExpr)
     (h : Expr.HasFreeVar e'.erase 0) : fvar_lb_val e' = 0 := by
-  have hmem : FVarList.MemAbs 0 e'.fvars :=
-    (memAbs_fvars_iff_hasFreeVar _ _).mpr h
-  match hfv : e'.fvars with
-  | [] => exact absurd (hfv ▸ hmem) (FVarList.not_memAbs_nil _)
-  | d' :: rest' =>
-    have hge := FVarList.memAbs_ge_head d' 0 rest' (hfv ▸ hmem)
-    have hd'0 : d' = 0 := by omega
-    show (match e'.fvars with | [] => 0 | d :: _ => d) = 0
-    rw [hfv]; exact hd'0
+  have hmem : (0 : Nat) ∈ e'.fvars := (mem_fvars_iff_hasFreeVar _ _).mpr h
+  have := FVarList.lb_val_le_of_mem _ 0 hmem
+  show FVarList.lb_val _ = 0; grind
 
 -- Helper: HasFreeVar e.erase i → e.fvars ≠ [].
 private theorem fvars_ne_nil_of_hasFreeVar (e' : SExpr) (i : Nat)
