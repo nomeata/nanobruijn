@@ -326,22 +326,17 @@ def fvar_lb_val (e : SExpr) : Nat :=
 theorem memAbs_fvars_iff_hasFreeVar (e : SExpr) (i : Nat) :
     FVarList.MemAbs i e.fvars ↔ Expr.HasFreeVar e.erase i := by
   induction e generalizing i with
-  | bvar j => simp only [fvars, erase]; grind [FVarList.memAbs_cons_cases, FVarList.not_memAbs_nil, FVarList.MemAbs.head]
+  | bvar j => simp only [fvars, erase, FVarList.memAbs_cons_iff, FVarList.memAbs_nil_iff]; grind
   | const n =>
-    simp only [fvars, erase]
-    exact ⟨fun h => absurd h (FVarList.not_memAbs_nil _), fun h => by cases h⟩
-  | app f a ihf iha =>
-    simp only [fvars, erase, FVarList.memAbs_union_iff, ihf, iha]
-    grind
-  | lam body ih =>
-    simp only [fvars, erase, FVarList.memAbs_unbind_iff, ih]
-    grind
+    simp only [fvars, erase, FVarList.memAbs_nil_iff, false_iff]
+    intro h; cases h
+  | app f a ihf iha => simp only [fvars, erase, FVarList.memAbs_union_iff, ihf, iha]; grind
+  | lam body ih => simp only [fvars, erase, FVarList.memAbs_unbind_iff, ih]; grind
   | shift k inner ih =>
     simp only [fvars, erase, FVarList.memAbs_shift_iff]
     constructor
     · rintro ⟨j, hj, rfl⟩
-      have hf : Expr.HasFreeVar inner.erase j := (ih j).mp hj
-      have := Expr.hasFreeVar_shift_bwd inner.erase j hf k 0
+      have := Expr.hasFreeVar_shift_bwd inner.erase j ((ih j).mp hj) k 0
       simpa using this
     · intro h
       rcases Expr.hasFreeVar_shift_extract inner.erase k 0 i h with ⟨hfe, hge⟩ | ⟨_, hlt⟩
@@ -354,7 +349,7 @@ theorem fvars_empty_iff_no_hasFreeVar (e : SExpr) :
   constructor
   · intro h i hext
     have := (memAbs_fvars_iff_hasFreeVar e i).mpr hext
-    grind [FVarList.not_memAbs_nil]
+    grind [FVarList.memAbs_nil_iff]
   · intro h
     match hfv : e.fvars with
     | [] => rfl
@@ -379,7 +374,7 @@ theorem hasFreeVar_ge_fvar_lb (e : SExpr) (i : Nat)
     i ≥ fvar_lb_val e := by
   have hmem : FVarList.MemAbs i e.fvars := (memAbs_fvars_iff_hasFreeVar e i).mpr h
   match hfv : e.fvars with
-  | [] => grind [FVarList.not_memAbs_nil]
+  | [] => grind [FVarList.memAbs_nil_iff]
   | d :: rest =>
     have := FVarList.memAbs_ge_head d i rest (by rw [← hfv]; exact hmem)
     unfold fvar_lb_val; rw [hfv]; exact this
