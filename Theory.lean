@@ -371,19 +371,19 @@ theorem shift_comm_lt (e : Expr) (k amount cutoff : Nat) (hlt : k < cutoff) :
   have h := shift_comm_lt_gen e k amount cutoff 0 hlt
   simp only [Nat.add_zero] at h; exact h
 
-/-- Free-variable predicate on de Bruijn expressions. `ExtFreeVar e k` iff
+/-- Free-variable predicate on de Bruijn expressions. `HasFreeVar e k` iff
     `e` has a free variable at external index `k` (the standard notion:
     under `lam`, the body's `k+1` becomes the lambda's `k`). -/
-inductive ExtFreeVar : Expr → Nat → Prop where
-  | bvar (i : Nat) : ExtFreeVar (bvar i) i
-  | app_left {f a : Expr} {k : Nat} (h : ExtFreeVar f k) : ExtFreeVar (app f a) k
-  | app_right {f a : Expr} {k : Nat} (h : ExtFreeVar a k) : ExtFreeVar (app f a) k
-  | lam {body : Expr} {k : Nat} (h : ExtFreeVar body (k + 1)) : ExtFreeVar (lam body) k
+inductive HasFreeVar : Expr → Nat → Prop where
+  | bvar (i : Nat) : HasFreeVar (bvar i) i
+  | app_left {f a : Expr} {k : Nat} (h : HasFreeVar f k) : HasFreeVar (app f a) k
+  | app_right {f a : Expr} {k : Nat} (h : HasFreeVar a k) : HasFreeVar (app f a) k
+  | lam {body : Expr} {k : Nat} (h : HasFreeVar body (k + 1)) : HasFreeVar (lam body) k
 
-/-- Stronger forward decomposition of ExtFreeVar on a shift. -/
-theorem extFreeVar_shift_extract (e : Expr) (n c i : Nat) :
-    ExtFreeVar (e.shift n c) i →
-    (ExtFreeVar e (i - n) ∧ i ≥ n + c) ∨ (ExtFreeVar e i ∧ i < c) := by
+/-- Stronger forward decomposition of HasFreeVar on a shift. -/
+theorem hasFreeVar_shift_extract (e : Expr) (n c i : Nat) :
+    HasFreeVar (e.shift n c) i →
+    (HasFreeVar e (i - n) ∧ i ≥ n + c) ∨ (HasFreeVar e i ∧ i < c) := by
   induction e generalizing c i with
   | bvar j =>
     intro h
@@ -395,23 +395,23 @@ theorem extFreeVar_shift_extract (e : Expr) (n c i : Nat) :
         left
         refine ⟨?_, ?_⟩
         · have : j + n - n = j := by omega
-          rw [this]; exact ExtFreeVar.bvar _
+          rw [this]; exact HasFreeVar.bvar _
         · omega
     · simp only [hjc, ↓reduceIte] at h
       cases h with
-      | bvar _ => right; exact ⟨ExtFreeVar.bvar _, by omega⟩
+      | bvar _ => right; exact ⟨HasFreeVar.bvar _, by omega⟩
   | app f a ihf iha =>
     intro h
     simp only [shift] at h
     cases h with
     | app_left hf =>
       rcases ihf c i hf with ⟨hfe, hi⟩ | ⟨hfe, hi⟩
-      · exact Or.inl ⟨ExtFreeVar.app_left hfe, hi⟩
-      · exact Or.inr ⟨ExtFreeVar.app_left hfe, hi⟩
+      · exact Or.inl ⟨HasFreeVar.app_left hfe, hi⟩
+      · exact Or.inr ⟨HasFreeVar.app_left hfe, hi⟩
     | app_right ha =>
       rcases iha c i ha with ⟨hae, hi⟩ | ⟨hae, hi⟩
-      · exact Or.inl ⟨ExtFreeVar.app_right hae, hi⟩
-      · exact Or.inr ⟨ExtFreeVar.app_right hae, hi⟩
+      · exact Or.inl ⟨HasFreeVar.app_right hae, hi⟩
+      · exact Or.inr ⟨HasFreeVar.app_right hae, hi⟩
   | lam body ih =>
     intro h
     simp only [shift] at h
@@ -422,18 +422,18 @@ theorem extFreeVar_shift_extract (e : Expr) (n c i : Nat) :
         refine ⟨?_, ?_⟩
         · have : i + 1 - n = (i - n) + 1 := by omega
           rw [this] at hbe
-          exact ExtFreeVar.lam hbe
+          exact HasFreeVar.lam hbe
         · omega
       · right
-        exact ⟨ExtFreeVar.lam hbe, by omega⟩
+        exact ⟨HasFreeVar.lam hbe, by omega⟩
   | const _ =>
     intro h
     simp only [shift] at h
     cases h
 
 /-- Shift preserves / creates external bvars with a cutoff-parametrized predictable pattern. -/
-theorem extFreeVar_shift_fwd (e : Expr) (n c k : Nat) :
-    ExtFreeVar (e.shift n c) k → k ≥ n + c ∨ k < c := by
+theorem hasFreeVar_shift_fwd (e : Expr) (n c k : Nat) :
+    HasFreeVar (e.shift n c) k → k ≥ n + c ∨ k < c := by
   induction e generalizing c k with
   | bvar i =>
     intro h
@@ -462,34 +462,34 @@ theorem extFreeVar_shift_fwd (e : Expr) (n c k : Nat) :
     cases h
 
 /-- Specialised to cutoff 0. -/
-theorem extFreeVar_shift_zero_ge (e : Expr) (n k : Nat)
-    (h : ExtFreeVar (e.shift n 0) k) : k ≥ n := by
-  rcases extFreeVar_shift_fwd e n 0 k h with hge | hlt
+theorem hasFreeVar_shift_zero_ge (e : Expr) (n k : Nat)
+    (h : HasFreeVar (e.shift n 0) k) : k ≥ n := by
+  rcases hasFreeVar_shift_fwd e n 0 k h with hge | hlt
   · omega
   · omega
 
 /-- Shifting back: external bvar j in e gives external bvar j+n (if j ≥ c) in
     e.shift n c. -/
-theorem extFreeVar_shift_bwd (e : Expr) (j : Nat) (h : ExtFreeVar e j) (n c : Nat) :
-    ExtFreeVar (e.shift n c) (if j ≥ c then j + n else j) := by
+theorem hasFreeVar_shift_bwd (e : Expr) (j : Nat) (h : HasFreeVar e j) (n c : Nat) :
+    HasFreeVar (e.shift n c) (if j ≥ c then j + n else j) := by
   induction h generalizing c with
   | bvar i =>
     simp only [shift]
     by_cases hic : i ≥ c
-    · simp only [hic, ↓reduceIte]; exact ExtFreeVar.bvar _
-    · simp only [hic, ↓reduceIte]; exact ExtFreeVar.bvar _
+    · simp only [hic, ↓reduceIte]; exact HasFreeVar.bvar _
+    · simp only [hic, ↓reduceIte]; exact HasFreeVar.bvar _
   | app_left _ ih =>
-    simp only [shift]; exact ExtFreeVar.app_left (ih c)
+    simp only [shift]; exact HasFreeVar.app_left (ih c)
   | app_right _ ih =>
-    simp only [shift]; exact ExtFreeVar.app_right (ih c)
+    simp only [shift]; exact HasFreeVar.app_right (ih c)
   | @lam body k hb ih =>
     simp only [shift]
     have ih' := ih (c + 1)
-    apply ExtFreeVar.lam
+    apply HasFreeVar.lam
     by_cases hkc : k ≥ c
     · simp only [hkc, ↓reduceIte]
       simp only [show k + 1 ≥ c + 1 from by omega, ↓reduceIte] at ih'
-      show (body.shift n (c + 1)).ExtFreeVar (k + n + 1)
+      show (body.shift n (c + 1)).HasFreeVar (k + n + 1)
       have : k + n + 1 = k + 1 + n := by omega
       rw [this]; exact ih'
     · simp only [hkc, ↓reduceIte]
@@ -497,19 +497,19 @@ theorem extFreeVar_shift_bwd (e : Expr) (j : Nat) (h : ExtFreeVar e j) (n c : Na
       exact ih'
 
 /-- If all external free vars of e are below c, shift at cutoff c is a no-op. -/
-theorem shift_eq_of_extFreeVars_lt (e : Expr) (k c : Nat)
-    (h : ∀ j, ExtFreeVar e j → j < c) : e.shift k c = e := by
+theorem shift_eq_of_hasFreeVars_lt (e : Expr) (k c : Nat)
+    (h : ∀ j, HasFreeVar e j → j < c) : e.shift k c = e := by
   induction e generalizing c with
   | bvar i =>
     simp only [shift]
     split
     · rename_i hic
-      exfalso; exact absurd (h i (ExtFreeVar.bvar _)) (by omega)
+      exfalso; exact absurd (h i (HasFreeVar.bvar _)) (by omega)
     · rfl
   | app f a ihf iha =>
     simp only [shift]
-    rw [ihf c (fun j hj => h j (ExtFreeVar.app_left hj))]
-    rw [iha c (fun j hj => h j (ExtFreeVar.app_right hj))]
+    rw [ihf c (fun j hj => h j (HasFreeVar.app_left hj))]
+    rw [iha c (fun j hj => h j (HasFreeVar.app_right hj))]
   | lam body ih =>
     simp only [shift]
     refine congrArg Expr.lam (ih (c + 1) ?_)
@@ -517,18 +517,18 @@ theorem shift_eq_of_extFreeVars_lt (e : Expr) (k c : Nat)
     by_cases hj0 : j = 0
     · omega
     · have hj1 : j ≥ 1 := by omega
-      have : ExtFreeVar (Expr.lam body) (j - 1) := by
+      have : HasFreeVar (Expr.lam body) (j - 1) := by
         have heq : (j - 1) + 1 = j := by omega
         rw [← heq] at hj
-        exact ExtFreeVar.lam hj
+        exact HasFreeVar.lam hj
       have := h (j - 1) this
       omega
   | const _ => rfl
 
-/-- Specialisation: closed (no ExtFreeVar) expression shift at cutoff 0 is a no-op. -/
-theorem shift_eq_of_no_extFreeVar (e : Expr) (k : Nat)
-    (h : ∀ j, ¬ ExtFreeVar e j) : e.shift k 0 = e :=
-  shift_eq_of_extFreeVars_lt e k 0 (fun j hj => absurd hj (h j))
+/-- Specialisation: closed (no HasFreeVar) expression shift at cutoff 0 is a no-op. -/
+theorem shift_eq_of_no_hasFreeVar (e : Expr) (k : Nat)
+    (h : ∀ j, ¬ HasFreeVar e j) : e.shift k 0 = e :=
+  shift_eq_of_hasFreeVars_lt e k 0 (fun j hj => absurd hj (h j))
 
 theorem shift_injective (k c : Nat) : ∀ (e₁ e₂ : Expr),
     e₁.shift k c = e₂.shift k c → e₁ = e₂ := by
@@ -620,15 +620,15 @@ def fvar_lb_val (e : SExpr) : Nat :=
 
 /-! ### Link between structural fvars and external fvars on erase -/
 
-theorem memAbs_fvars_iff_extFreeVar (e : SExpr) (i : Nat) :
-    FVarList.MemAbs i e.fvars ↔ Expr.ExtFreeVar e.erase i := by
+theorem memAbs_fvars_iff_hasFreeVar (e : SExpr) (i : Nat) :
+    FVarList.MemAbs i e.fvars ↔ Expr.HasFreeVar e.erase i := by
   induction e generalizing i with
   | bvar j =>
     simp only [fvars, erase]
     constructor
     · intro h
       rcases FVarList.memAbs_cons_cases i j [] h with hij | ⟨jj, _, hrest⟩
-      · rw [hij]; exact Expr.ExtFreeVar.bvar _
+      · rw [hij]; exact Expr.HasFreeVar.bvar _
       · exact absurd hrest (FVarList.not_memAbs_nil _)
     · intro h
       cases h with
@@ -643,8 +643,8 @@ theorem memAbs_fvars_iff_extFreeVar (e : SExpr) (i : Nat) :
     rw [FVarList.memAbs_union_iff, ihf, iha]
     constructor
     · rintro (hf | ha)
-      · exact Expr.ExtFreeVar.app_left hf
-      · exact Expr.ExtFreeVar.app_right ha
+      · exact Expr.HasFreeVar.app_left hf
+      · exact Expr.HasFreeVar.app_right ha
     · intro h
       cases h with
       | app_left hf => exact Or.inl hf
@@ -653,29 +653,29 @@ theorem memAbs_fvars_iff_extFreeVar (e : SExpr) (i : Nat) :
     simp only [fvars, erase]
     rw [FVarList.memAbs_unbind_iff, ih]
     constructor
-    · intro h; exact Expr.ExtFreeVar.lam h
+    · intro h; exact Expr.HasFreeVar.lam h
     · intro h; cases h with | lam h => exact h
   | shift k inner ih =>
     simp only [fvars, erase]
     rw [FVarList.memAbs_shift_iff]
     constructor
     · rintro ⟨j, hj, rfl⟩
-      have : Expr.ExtFreeVar inner.erase j := (ih j).mp hj
-      have := Expr.extFreeVar_shift_bwd inner.erase j this k 0
+      have : Expr.HasFreeVar inner.erase j := (ih j).mp hj
+      have := Expr.hasFreeVar_shift_bwd inner.erase j this k 0
       simp only [show j ≥ 0 from Nat.zero_le _, ↓reduceIte] at this
       exact this
     · intro h
-      rcases Expr.extFreeVar_shift_extract inner.erase k 0 i h with ⟨hfe, hge⟩ | ⟨_, hlt⟩
+      rcases Expr.hasFreeVar_shift_extract inner.erase k 0 i h with ⟨hfe, hge⟩ | ⟨_, hlt⟩
       · refine ⟨i - k, (ih (i - k)).mpr hfe, ?_⟩
         omega
       · omega
 
 /-- `e.fvars = []` iff the erasure has no external free bvars. -/
-theorem fvars_empty_iff_no_extFreeVar (e : SExpr) :
-    e.fvars = [] ↔ ∀ i, ¬ Expr.ExtFreeVar e.erase i := by
+theorem fvars_empty_iff_no_hasFreeVar (e : SExpr) :
+    e.fvars = [] ↔ ∀ i, ¬ Expr.HasFreeVar e.erase i := by
   constructor
   · intro h i hext
-    have := (memAbs_fvars_iff_extFreeVar e i).mpr hext
+    have := (memAbs_fvars_iff_hasFreeVar e i).mpr hext
     rw [h] at this
     exact FVarList.not_memAbs_nil _ this
   · intro h
@@ -684,13 +684,13 @@ theorem fvars_empty_iff_no_extFreeVar (e : SExpr) :
     | d :: rest =>
       exfalso
       have : FVarList.MemAbs d e.fvars := by rw [hfv]; exact FVarList.MemAbs.head _ _
-      exact h d ((memAbs_fvars_iff_extFreeVar e d).mp this)
+      exact h d ((memAbs_fvars_iff_hasFreeVar e d).mp this)
 
 /-- If fvar_lb_val is 0 and fvars is non-empty, 0 is an external free var. -/
-theorem fvar_lb_zero_has_extFreeVar_zero (e : SExpr)
+theorem fvar_lb_zero_has_hasFreeVar_zero (e : SExpr)
     (hlb : fvar_lb_val e = 0) (hne : e.fvars ≠ []) :
-    Expr.ExtFreeVar e.erase 0 := by
-  apply (memAbs_fvars_iff_extFreeVar e 0).mp
+    Expr.HasFreeVar e.erase 0 := by
+  apply (memAbs_fvars_iff_hasFreeVar e 0).mp
   match hfv : e.fvars with
   | [] => exact absurd hfv hne
   | d :: rest =>
@@ -702,10 +702,10 @@ theorem fvar_lb_zero_has_extFreeVar_zero (e : SExpr)
     exact FVarList.MemAbs.head _ _
 
 /-- If fvar_lb_val = k, then all external free vars are ≥ k. -/
-theorem extFreeVar_ge_fvar_lb (e : SExpr) (i : Nat)
-    (h : Expr.ExtFreeVar e.erase i) :
+theorem hasFreeVar_ge_fvar_lb (e : SExpr) (i : Nat)
+    (h : Expr.HasFreeVar e.erase i) :
     i ≥ fvar_lb_val e := by
-  have hmem : FVarList.MemAbs i e.fvars := (memAbs_fvars_iff_extFreeVar e i).mpr h
+  have hmem : FVarList.MemAbs i e.fvars := (memAbs_fvars_iff_hasFreeVar e i).mpr h
   match hfv : e.fvars with
   | [] => rw [hfv] at hmem; exact absurd hmem (FVarList.not_memAbs_nil _)
   | d :: rest =>
@@ -853,34 +853,34 @@ theorem adjust_child_erase (e : SExpr) (amount cutoff : Nat)
 
 /-! ### BvarsGe semantic characterisation -/
 
-/-- From an ExtFreeVar-based semantic bound, produce a structural BvarsGe. -/
+/-- From an HasFreeVar-based semantic bound, produce a structural BvarsGe. -/
 theorem bvarsGe_of_extSemantic (e : SExpr) (amount cutoff : Nat)
-    (h : ∀ i, Expr.ExtFreeVar e.erase i → i ≥ cutoff → i ≥ cutoff + amount) :
+    (h : ∀ i, Expr.HasFreeVar e.erase i → i ≥ cutoff → i ≥ cutoff + amount) :
     BvarsGe e amount cutoff := by
   induction e generalizing amount cutoff with
   | bvar j =>
     by_cases hjc : j ≥ cutoff
-    · exact BvarsGe.bvar_ge j amount cutoff (h j (Expr.ExtFreeVar.bvar j) hjc)
+    · exact BvarsGe.bvar_ge j amount cutoff (h j (Expr.HasFreeVar.bvar j) hjc)
     · exact BvarsGe.bvar_lt j amount cutoff (by omega)
   | const n => exact BvarsGe.const_intro n amount cutoff
   | app f a ihf iha =>
     refine BvarsGe.app f a amount cutoff ?_ ?_
     · refine ihf amount cutoff ?_
       intro i hi hic
-      exact h i (Expr.ExtFreeVar.app_left hi) hic
+      exact h i (Expr.HasFreeVar.app_left hi) hic
     · refine iha amount cutoff ?_
       intro i hi hic
-      exact h i (Expr.ExtFreeVar.app_right hi) hic
+      exact h i (Expr.HasFreeVar.app_right hi) hic
   | lam body ih =>
     refine BvarsGe.lam body amount cutoff ?_
     refine ih amount (cutoff + 1) ?_
     intro i hi hic
-    -- From h on (lam body): ExtFreeVar (lam body) (i-1) → i-1 ≥ cutoff → i-1 ≥ cutoff+amount
-    have hext : Expr.ExtFreeVar (lam body).erase (i - 1) := by
-      show Expr.ExtFreeVar (Expr.lam body.erase) (i - 1)
+    -- From h on (lam body): HasFreeVar (lam body) (i-1) → i-1 ≥ cutoff → i-1 ≥ cutoff+amount
+    have hext : Expr.HasFreeVar (lam body).erase (i - 1) := by
+      show Expr.HasFreeVar (Expr.lam body.erase) (i - 1)
       have hi1 : (i - 1) + 1 = i := by omega
       rw [← hi1] at hi
-      exact Expr.ExtFreeVar.lam hi
+      exact Expr.HasFreeVar.lam hi
     have := h (i - 1) hext (by omega)
     omega
   | shift k inner ih =>
@@ -890,10 +890,10 @@ theorem bvarsGe_of_extSemantic (e : SExpr) (amount cutoff : Nat)
     · refine BvarsGe.shift_mid k inner amount cutoff hk2 (by omega) ?_
       refine ih (amount + cutoff - k) 0 ?_
       intro i hi _
-      -- hi : ExtFreeVar inner.erase i, need i ≥ 0 + (amount + cutoff - k)
-      -- Use h with i' = i + k: ExtFreeVar (inner.shift k 0) (i+k) → i+k ≥ cutoff
-      have hext : Expr.ExtFreeVar (inner.erase.shift k 0) (i + k) := by
-        have := Expr.extFreeVar_shift_bwd inner.erase i hi k 0
+      -- hi : HasFreeVar inner.erase i, need i ≥ 0 + (amount + cutoff - k)
+      -- Use h with i' = i + k: HasFreeVar (inner.shift k 0) (i+k) → i+k ≥ cutoff
+      have hext : Expr.HasFreeVar (inner.erase.shift k 0) (i + k) := by
+        have := Expr.hasFreeVar_shift_bwd inner.erase i hi k 0
         simp only [show i ≥ 0 from Nat.zero_le _, ↓reduceIte] at this
         exact this
       have := h (i + k) hext (by omega)
@@ -901,8 +901,8 @@ theorem bvarsGe_of_extSemantic (e : SExpr) (amount cutoff : Nat)
     · refine BvarsGe.shift_lt k inner amount cutoff (by omega) ?_
       refine ih amount (cutoff - k) ?_
       intro i hi hic
-      have hext : Expr.ExtFreeVar (inner.erase.shift k 0) (i + k) := by
-        have := Expr.extFreeVar_shift_bwd inner.erase i hi k 0
+      have hext : Expr.HasFreeVar (inner.erase.shift k 0) (i + k) := by
+        have := Expr.hasFreeVar_shift_bwd inner.erase i hi k 0
         simp only [show i ≥ 0 from Nat.zero_le _, ↓reduceIte] at this
         exact this
       have := h (i + k) hext (by omega)
@@ -912,7 +912,7 @@ theorem bvarsGe_of_extSemantic (e : SExpr) (amount cutoff : Nat)
 theorem bvarsGe_fvar_lb (e : SExpr) : BvarsGe e (fvar_lb_val e) 0 := by
   refine bvarsGe_of_extSemantic e (fvar_lb_val e) 0 ?_
   intro i hi _
-  have := extFreeVar_ge_fvar_lb e i hi
+  have := hasFreeVar_ge_fvar_lb e i hi
   omega
 
 /-! ### Children of compound satisfy BvarsGe -/
@@ -921,29 +921,29 @@ theorem bvarsGe_child_app_left (f a : SExpr) :
     BvarsGe f (fvar_lb_val (app f a)) 0 := by
   refine bvarsGe_of_extSemantic f _ 0 ?_
   intro i hi _
-  have := extFreeVar_ge_fvar_lb (app f a) i (Expr.ExtFreeVar.app_left hi)
+  have := hasFreeVar_ge_fvar_lb (app f a) i (Expr.HasFreeVar.app_left hi)
   omega
 
 theorem bvarsGe_child_app_right (f a : SExpr) :
     BvarsGe a (fvar_lb_val (app f a)) 0 := by
   refine bvarsGe_of_extSemantic a _ 0 ?_
   intro i hi _
-  have := extFreeVar_ge_fvar_lb (app f a) i (Expr.ExtFreeVar.app_right hi)
+  have := hasFreeVar_ge_fvar_lb (app f a) i (Expr.HasFreeVar.app_right hi)
   omega
 
 theorem bvarsGe_child_lam (body : SExpr) :
     BvarsGe body (fvar_lb_val (lam body)) 1 := by
   refine bvarsGe_of_extSemantic body _ 1 ?_
   intro i hi hi1
-  -- hi : ExtFreeVar body.erase i, hi1 : i ≥ 1
+  -- hi : HasFreeVar body.erase i, hi1 : i ≥ 1
   -- Need: i ≥ 1 + fvar_lb_val (lam body)
-  -- ExtFreeVar (lam body).erase (i-1) via lam constructor
-  have hext : Expr.ExtFreeVar (lam body).erase (i - 1) := by
-    show Expr.ExtFreeVar (Expr.lam body.erase) (i - 1)
+  -- HasFreeVar (lam body).erase (i-1) via lam constructor
+  have hext : Expr.HasFreeVar (lam body).erase (i - 1) := by
+    show Expr.HasFreeVar (Expr.lam body.erase) (i - 1)
     have : (i - 1) + 1 = i := by omega
     rw [← this] at hi
-    exact Expr.ExtFreeVar.lam hi
-  have := extFreeVar_ge_fvar_lb (lam body) (i - 1) hext
+    exact Expr.HasFreeVar.lam hi
+  have := hasFreeVar_ge_fvar_lb (lam body) (i - 1) hext
   omega
 
 /-! ### mk_osnf_compound: normalize a compound expression whose children are in OSNF -/
@@ -961,9 +961,9 @@ def mk_osnf_compound (e : SExpr) : SExpr :=
     shift lb core
 
 /-- BvarsGe implies the semantic extent constraint. -/
-theorem extFreeVar_of_bvarsGe (e : SExpr) (amount cutoff : Nat)
+theorem hasFreeVar_of_bvarsGe (e : SExpr) (amount cutoff : Nat)
     (h : BvarsGe e amount cutoff) :
-    ∀ i, Expr.ExtFreeVar e.erase i → i ≥ cutoff → i ≥ cutoff + amount := by
+    ∀ i, Expr.HasFreeVar e.erase i → i ≥ cutoff → i ≥ cutoff + amount := by
   induction h with
   | bvar_lt i amount cutoff hlt =>
     intro j hj hjc
@@ -973,13 +973,13 @@ theorem extFreeVar_of_bvarsGe (e : SExpr) (amount cutoff : Nat)
     cases hj with | bvar _ => omega
   | app f a amount cutoff hf ha ihf iha =>
     intro i hi hic
-    change Expr.ExtFreeVar (Expr.app f.erase a.erase) i at hi
+    change Expr.HasFreeVar (Expr.app f.erase a.erase) i at hi
     cases hi with
     | app_left h => exact ihf i h hic
     | app_right h => exact iha i h hic
   | lam body amount cutoff hb ih =>
     intro i hi hic
-    change Expr.ExtFreeVar (Expr.lam body.erase) i at hi
+    change Expr.HasFreeVar (Expr.lam body.erase) i at hi
     cases hi with
     | lam h =>
       have := ih (i + 1) h (by omega)
@@ -989,18 +989,18 @@ theorem extFreeVar_of_bvarsGe (e : SExpr) (amount cutoff : Nat)
     cases hi
   | shift_ge k inner amount cutoff hka =>
     intro i hi _
-    have := Expr.extFreeVar_shift_zero_ge inner.erase k i hi
+    have := Expr.hasFreeVar_shift_zero_ge inner.erase k i hi
     omega
   | shift_mid k inner amount cutoff hge hlt hi ih =>
     intro i hi_ext hic
-    rcases Expr.extFreeVar_shift_extract inner.erase k 0 i hi_ext with
+    rcases Expr.hasFreeVar_shift_extract inner.erase k 0 i hi_ext with
       ⟨hinner, hge'⟩ | ⟨_, hlt0⟩
     · have := ih (i - k) hinner (by omega)
       omega
     · omega
   | shift_lt k inner amount cutoff hlt hi ih =>
     intro i hi_ext hic
-    rcases Expr.extFreeVar_shift_extract inner.erase k 0 i hi_ext with
+    rcases Expr.hasFreeVar_shift_extract inner.erase k 0 i hi_ext with
       ⟨hinner, hge'⟩ | ⟨_, hlt0⟩
     · have := ih (i - k) hinner (by omega)
       omega
@@ -1008,15 +1008,15 @@ theorem extFreeVar_of_bvarsGe (e : SExpr) (amount cutoff : Nat)
 
 /-! ### Semantic characterisation of adjust_child's external free vars -/
 
-theorem adjust_child_extFreeVar_iff (e : SExpr) (amount cutoff : Nat)
+theorem adjust_child_hasFreeVar_iff (e : SExpr) (amount cutoff : Nat)
     (hbv : BvarsGe e amount cutoff) (k : Nat) :
-    Expr.ExtFreeVar (adjust_child e amount cutoff).erase k ↔
-    (k ≥ cutoff ∧ Expr.ExtFreeVar e.erase (k + amount)) ∨
-    (k < cutoff ∧ Expr.ExtFreeVar e.erase k) := by
+    Expr.HasFreeVar (adjust_child e amount cutoff).erase k ↔
+    (k ≥ cutoff ∧ Expr.HasFreeVar e.erase (k + amount)) ∨
+    (k < cutoff ∧ Expr.HasFreeVar e.erase k) := by
   have hadj := adjust_child_erase e amount cutoff hbv
   constructor
   · intro h
-    have hshift := Expr.extFreeVar_shift_bwd _ _ h amount cutoff
+    have hshift := Expr.hasFreeVar_shift_bwd _ _ h amount cutoff
     rw [hadj] at hshift
     by_cases hkc : k ≥ cutoff
     · simp only [hkc, ↓reduceIte] at hshift
@@ -1024,17 +1024,17 @@ theorem adjust_child_extFreeVar_iff (e : SExpr) (amount cutoff : Nat)
     · simp only [hkc, ↓reduceIte] at hshift
       exact Or.inr ⟨by omega, hshift⟩
   · rintro (⟨hkc, h⟩ | ⟨hkc, h⟩)
-    · -- k ≥ cutoff, ExtFreeVar e.erase (k + amount)
+    · -- k ≥ cutoff, HasFreeVar e.erase (k + amount)
       rw [← hadj] at h
-      rcases Expr.extFreeVar_shift_extract _ amount cutoff (k + amount) h with
+      rcases Expr.hasFreeVar_shift_extract _ amount cutoff (k + amount) h with
         ⟨hfe, hge⟩ | ⟨hfe, hlt⟩
       · have : k + amount - amount = k := by omega
         rw [this] at hfe
         exact hfe
       · omega
-    · -- k < cutoff, ExtFreeVar e.erase k
+    · -- k < cutoff, HasFreeVar e.erase k
       rw [← hadj] at h
-      rcases Expr.extFreeVar_shift_extract _ amount cutoff k h with
+      rcases Expr.hasFreeVar_shift_extract _ amount cutoff k h with
         ⟨_, hge⟩ | ⟨hfe, _⟩
       · omega
       · exact hfe
@@ -1047,31 +1047,31 @@ theorem adjust_child_preserves_fvar_lb_zero (e : SExpr) (amount cutoff : Nat)
   match hfv : e.fvars with
   | [] =>
     -- e closed → adj e closed → fvar_lb_val = 0
-    have hclosed : ∀ i, ¬ Expr.ExtFreeVar e.erase i :=
-      (fvars_empty_iff_no_extFreeVar e).mp hfv
-    have hclosed' : ∀ k, ¬ Expr.ExtFreeVar (adjust_child e amount cutoff).erase k := by
+    have hclosed : ∀ i, ¬ Expr.HasFreeVar e.erase i :=
+      (fvars_empty_iff_no_hasFreeVar e).mp hfv
+    have hclosed' : ∀ k, ¬ Expr.HasFreeVar (adjust_child e amount cutoff).erase k := by
       intro k hk
-      rw [adjust_child_extFreeVar_iff e amount cutoff hbv k] at hk
+      rw [adjust_child_hasFreeVar_iff e amount cutoff hbv k] at hk
       rcases hk with ⟨_, h'⟩ | ⟨_, h'⟩
       · exact hclosed _ h'
       · exact hclosed _ h'
     have : (adjust_child e amount cutoff).fvars = [] :=
-      (fvars_empty_iff_no_extFreeVar _).mpr hclosed'
+      (fvars_empty_iff_no_hasFreeVar _).mpr hclosed'
     unfold fvar_lb_val; rw [this]
   | d :: rest =>
     -- d = 0 (from fvar_lb_val = 0)
     have hd : d = 0 := by unfold fvar_lb_val at h; rw [hfv] at h; exact h
-    -- ExtFreeVar e.erase 0
-    have hext0 : Expr.ExtFreeVar e.erase 0 := by
-      apply (memAbs_fvars_iff_extFreeVar e 0).mp
+    -- HasFreeVar e.erase 0
+    have hext0 : Expr.HasFreeVar e.erase 0 := by
+      apply (memAbs_fvars_iff_hasFreeVar e 0).mp
       rw [hfv, hd]; exact FVarList.MemAbs.head _ _
-    -- ExtFreeVar (adj e).erase 0
-    have hadj0 : Expr.ExtFreeVar (adjust_child e amount cutoff).erase 0 := by
-      rw [adjust_child_extFreeVar_iff e amount cutoff hbv 0]
+    -- HasFreeVar (adj e).erase 0
+    have hadj0 : Expr.HasFreeVar (adjust_child e amount cutoff).erase 0 := by
+      rw [adjust_child_hasFreeVar_iff e amount cutoff hbv 0]
       by_cases hc : cutoff = 0
       · left
         subst hc
-        have hsem := extFreeVar_of_bvarsGe e amount 0 hbv 0 hext0 (Nat.zero_le _)
+        have hsem := hasFreeVar_of_bvarsGe e amount 0 hbv 0 hext0 (Nat.zero_le _)
         have ham : amount = 0 := by omega
         subst ham
         refine ⟨by omega, ?_⟩
@@ -1080,7 +1080,7 @@ theorem adjust_child_preserves_fvar_lb_zero (e : SExpr) (amount cutoff : Nat)
         exact ⟨by omega, hext0⟩
     -- fvar_lb_val (adj e) = 0
     have hmem : FVarList.MemAbs 0 (adjust_child e amount cutoff).fvars :=
-      (memAbs_fvars_iff_extFreeVar _ 0).mpr hadj0
+      (memAbs_fvars_iff_hasFreeVar _ 0).mpr hadj0
     match hfv' : (adjust_child e amount cutoff).fvars with
     | [] => exact absurd hmem (by rw [hfv']; exact FVarList.not_memAbs_nil _)
     | d' :: rest' =>
@@ -1094,20 +1094,20 @@ theorem adjust_child_fvars_nonempty (e : SExpr) (amount cutoff : Nat)
     (hbv : BvarsGe e amount cutoff) (hne : e.fvars ≠ []) :
     (adjust_child e amount cutoff).fvars ≠ [] := by
   intro habs
-  have hclosed := (fvars_empty_iff_no_extFreeVar _).mp habs
+  have hclosed := (fvars_empty_iff_no_hasFreeVar _).mp habs
   apply hne
-  apply (fvars_empty_iff_no_extFreeVar _).mpr
+  apply (fvars_empty_iff_no_hasFreeVar _).mpr
   intro i hi
   by_cases hic : i ≥ cutoff
-  · have hge := extFreeVar_of_bvarsGe e amount cutoff hbv i hi hic
-    have hext : Expr.ExtFreeVar (adjust_child e amount cutoff).erase (i - amount) := by
-      rw [adjust_child_extFreeVar_iff e amount cutoff hbv (i - amount)]
+  · have hge := hasFreeVar_of_bvarsGe e amount cutoff hbv i hi hic
+    have hext : Expr.HasFreeVar (adjust_child e amount cutoff).erase (i - amount) := by
+      rw [adjust_child_hasFreeVar_iff e amount cutoff hbv (i - amount)]
       refine Or.inl ⟨by omega, ?_⟩
       have : i - amount + amount = i := by omega
       rw [this]; exact hi
     exact hclosed _ hext
-  · have hext : Expr.ExtFreeVar (adjust_child e amount cutoff).erase i := by
-      rw [adjust_child_extFreeVar_iff e amount cutoff hbv i]
+  · have hext : Expr.HasFreeVar (adjust_child e amount cutoff).erase i := by
+      rw [adjust_child_hasFreeVar_iff e amount cutoff hbv i]
       exact Or.inr ⟨by omega, hi⟩
     exact hclosed _ hext
 
@@ -1231,10 +1231,10 @@ private theorem memAbs_fvar_lb_val (e : SExpr) (hne : e.fvars ≠ []) :
     rw [heq]
     exact FVarList.MemAbs.head _ _
 
--- Helper: when fvar_lb_val > 0, get ExtFreeVar at fvar_lb_val.
-private theorem extFreeVar_at_fvar_lb_val (e : SExpr) (hne : e.fvars ≠ []) :
-    Expr.ExtFreeVar e.erase (fvar_lb_val e) :=
-  (memAbs_fvars_iff_extFreeVar _ _).mp (memAbs_fvar_lb_val e hne)
+-- Helper: when fvar_lb_val > 0, get HasFreeVar at fvar_lb_val.
+private theorem hasFreeVar_at_fvar_lb_val (e : SExpr) (hne : e.fvars ≠ []) :
+    Expr.HasFreeVar e.erase (fvar_lb_val e) :=
+  (memAbs_fvars_iff_hasFreeVar _ _).mp (memAbs_fvar_lb_val e hne)
 
 theorem mk_osnf_compound_app_isOSNF (f a : SExpr) (hf : IsOSNF f) (ha : IsOSNF a) :
     IsOSNF (mk_osnf_compound (app f a)) := by
@@ -1260,11 +1260,11 @@ theorem mk_osnf_compound_app_isOSNF (f a : SExpr) (hf : IsOSNF f) (ha : IsOSNF a
       BvarsGe.app _ _ _ _ hbvf hbva
     have hadjf := adjust_child_preserves_osnf f _ 0 hf hbvf
     have hadja := adjust_child_preserves_osnf a _ 0 ha hbva
-    have h_ext_lb := extFreeVar_at_fvar_lb_val (app f a) hne
+    have h_ext_lb := hasFreeVar_at_fvar_lb_val (app f a) hne
     have h_ext_0 :
-        Expr.ExtFreeVar
+        Expr.HasFreeVar
           (adjust_child (app f a) (fvar_lb_val (app f a)) 0).erase 0 := by
-      rw [adjust_child_extFreeVar_iff (app f a) _ 0 hbv_app 0]
+      rw [adjust_child_hasFreeVar_iff (app f a) _ 0 hbv_app 0]
       refine Or.inl ⟨by omega, ?_⟩
       simpa using h_ext_lb
     have h_lb_zero :
@@ -1272,7 +1272,7 @@ theorem mk_osnf_compound_app_isOSNF (f a : SExpr) (hf : IsOSNF f) (ha : IsOSNF a
       have h_mem :
           FVarList.MemAbs 0
             (adjust_child (app f a) (fvar_lb_val (app f a)) 0).fvars :=
-        (memAbs_fvars_iff_extFreeVar _ _).mpr h_ext_0
+        (memAbs_fvars_iff_hasFreeVar _ _).mpr h_ext_0
       match hfv : (adjust_child (app f a) (fvar_lb_val (app f a)) 0).fvars with
       | [] => exact absurd (hfv ▸ h_mem) (FVarList.not_memAbs_nil _)
       | d' :: rest' =>
@@ -1289,7 +1289,7 @@ theorem mk_osnf_compound_app_isOSNF (f a : SExpr) (hf : IsOSNF f) (ha : IsOSNF a
         (app (adjust_child f (fvar_lb_val (app f a)) 0)
              (adjust_child a (fvar_lb_val (app f a)) 0)).fvars ≠ [] := by
       intro habs
-      have := (fvars_empty_iff_no_extFreeVar _).mp habs 0
+      have := (fvars_empty_iff_no_hasFreeVar _).mp habs 0
       exact this h_ext_0
     exact IsOSNF.shifted _ _ hlb_pos
       (IsOSNF.app _ _ hadjf hadja h_lb_zero')
@@ -1315,11 +1315,11 @@ theorem mk_osnf_compound_lam_isOSNF (body : SExpr) (hb : IsOSNF body) :
     have hbv_lam : BvarsGe (lam body) (fvar_lb_val (lam body)) 0 :=
       BvarsGe.lam _ _ _ hbvb
     have hadjb := adjust_child_preserves_osnf body _ 1 hb hbvb
-    have h_ext_lb := extFreeVar_at_fvar_lb_val (lam body) hne
+    have h_ext_lb := hasFreeVar_at_fvar_lb_val (lam body) hne
     have h_ext_0 :
-        Expr.ExtFreeVar
+        Expr.HasFreeVar
           (adjust_child (lam body) (fvar_lb_val (lam body)) 0).erase 0 := by
-      rw [adjust_child_extFreeVar_iff (lam body) _ 0 hbv_lam 0]
+      rw [adjust_child_hasFreeVar_iff (lam body) _ 0 hbv_lam 0]
       refine Or.inl ⟨by omega, ?_⟩
       simpa using h_ext_lb
     have h_lb_zero :
@@ -1327,7 +1327,7 @@ theorem mk_osnf_compound_lam_isOSNF (body : SExpr) (hb : IsOSNF body) :
       have h_mem :
           FVarList.MemAbs 0
             (adjust_child (lam body) (fvar_lb_val (lam body)) 0).fvars :=
-        (memAbs_fvars_iff_extFreeVar _ _).mpr h_ext_0
+        (memAbs_fvars_iff_hasFreeVar _ _).mpr h_ext_0
       match hfv : (adjust_child (lam body) (fvar_lb_val (lam body)) 0).fvars with
       | [] => exact absurd (hfv ▸ h_mem) (FVarList.not_memAbs_nil _)
       | d' :: rest' =>
@@ -1342,7 +1342,7 @@ theorem mk_osnf_compound_lam_isOSNF (body : SExpr) (hb : IsOSNF body) :
     have h_fvars_ne :
         (lam (adjust_child body (fvar_lb_val (lam body)) 1)).fvars ≠ [] := by
       intro habs
-      have := (fvars_empty_iff_no_extFreeVar _).mp habs 0
+      have := (fvars_empty_iff_no_hasFreeVar _).mp habs 0
       exact this h_ext_0
     exact IsOSNF.shifted _ _ hlb_pos
       (IsOSNF.lam _ hadjb h_lb_zero')
@@ -1489,20 +1489,20 @@ theorem to_osnf_erase (e : SExpr) : (to_osnf e).erase = e.erase := by
           match fvs with
           | [] =>
             show inner.to_osnf.erase = inner.erase.shift k 0
-            have hclosed := (fvars_empty_iff_no_extFreeVar inner.to_osnf).mp hfvs
+            have hclosed := (fvars_empty_iff_no_hasFreeVar inner.to_osnf).mp hfvs
             rw [← ih]
-            exact (Expr.shift_eq_of_no_extFreeVar inner.to_osnf.erase k hclosed).symm
+            exact (Expr.shift_eq_of_no_hasFreeVar inner.to_osnf.erase k hclosed).symm
           | d :: rest =>
             show (shift k inner.to_osnf).erase = inner.erase.shift k 0
             rw [SExpr.erase, ih]
         exact this _ rfl
 
 -- Helper for osnf_unique: a shifted core has external free var at n.
-private theorem shifted_has_extFreeVar_n (n : Nat) (core : SExpr)
+private theorem shifted_has_hasFreeVar_n (n : Nat) (core : SExpr)
     (hc : IsOSNF core) (hlb : core.fvar_lb_val = 0) (hfv : core.fvars ≠ []) :
-    Expr.ExtFreeVar (core.erase.shift n 0) n := by
-  have hc0 := fvar_lb_zero_has_extFreeVar_zero core hlb hfv
-  have := Expr.extFreeVar_shift_bwd core.erase 0 hc0 n 0
+    Expr.HasFreeVar (core.erase.shift n 0) n := by
+  have hc0 := fvar_lb_zero_has_hasFreeVar_zero core hlb hfv
+  have := Expr.hasFreeVar_shift_bwd core.erase 0 hc0 n 0
   simp only [show 0 ≥ 0 from Nat.zero_le _, ↓reduceIte, Nat.zero_add] at this
   exact this
 
@@ -1513,22 +1513,22 @@ private theorem osnf_nonshift_ne_shifted {e : SExpr} (he : IsOSNF e)
     (hc : IsOSNF core) (hlb : core.fvar_lb_val = 0) (hfv : core.fvars ≠ [])
     (heq : e.erase = (shift n core).erase) : False := by
   simp only [erase] at heq
-  have hs : Expr.ExtFreeVar (core.erase.shift n 0) n :=
-    shifted_has_extFreeVar_n n core hc hlb hfv
+  have hs : Expr.HasFreeVar (core.erase.shift n 0) n :=
+    shifted_has_hasFreeVar_n n core hc hlb hfv
   rcases hlbE with hlbE | hfvE
   · -- e has ext fvar at 0 (if non-closed) or is closed
     by_cases hfvE2 : e.fvars = []
-    · have hnone : ∀ i, ¬ Expr.ExtFreeVar e.erase i :=
-        (fvars_empty_iff_no_extFreeVar _).mp hfvE2
+    · have hnone : ∀ i, ¬ Expr.HasFreeVar e.erase i :=
+        (fvars_empty_iff_no_hasFreeVar _).mp hfvE2
       rw [heq] at hnone
       exact hnone n hs
-    · have h0 : Expr.ExtFreeVar e.erase 0 :=
-        fvar_lb_zero_has_extFreeVar_zero e hlbE hfvE2
+    · have h0 : Expr.HasFreeVar e.erase 0 :=
+        fvar_lb_zero_has_hasFreeVar_zero e hlbE hfvE2
       rw [heq] at h0
-      have := Expr.extFreeVar_shift_zero_ge core.erase n 0 h0
+      have := Expr.hasFreeVar_shift_zero_ge core.erase n 0 h0
       omega
-  · have hnone : ∀ i, ¬ Expr.ExtFreeVar e.erase i :=
-      (fvars_empty_iff_no_extFreeVar _).mp hfvE
+  · have hnone : ∀ i, ¬ Expr.HasFreeVar e.erase i :=
+      (fvars_empty_iff_no_hasFreeVar _).mp hfvE
     rw [heq] at hnone
     exact hnone n hs
 
@@ -1606,12 +1606,12 @@ theorem osnf_unique (e₁ e₂ : SExpr) (h₁ : IsOSNF e₁) (h₂ : IsOSNF e₂
         (IsOSNF.lam body hb hlb) (Or.inl hlb) hn₁ hc₁ hlb₁ hfv₁ heq.symm
     | shifted n₂ core₂ hn₂ hc₂ hlb₂ hfv₂ =>
       simp only [erase] at heq
-      have hs1 := shifted_has_extFreeVar_n n₁ core₁ hc₁ hlb₁ hfv₁
-      have hs2 := shifted_has_extFreeVar_n n₂ core₂ hc₂ hlb₂ hfv₂
+      have hs1 := shifted_has_hasFreeVar_n n₁ core₁ hc₁ hlb₁ hfv₁
+      have hs2 := shifted_has_hasFreeVar_n n₂ core₂ hc₂ hlb₂ hfv₂
       rw [heq] at hs1
       rw [← heq] at hs2
-      have h12 : n₁ ≥ n₂ := Expr.extFreeVar_shift_zero_ge core₂.erase n₂ n₁ hs1
-      have h21 : n₂ ≥ n₁ := Expr.extFreeVar_shift_zero_ge core₁.erase n₁ n₂ hs2
+      have h12 : n₁ ≥ n₂ := Expr.hasFreeVar_shift_zero_ge core₂.erase n₂ n₁ hs1
+      have h21 : n₂ ≥ n₁ := Expr.hasFreeVar_shift_zero_ge core₁.erase n₁ n₂ hs2
       have hneq : n₁ = n₂ := by omega
       subst hneq
       have hceq : core₁.erase = core₂.erase :=
