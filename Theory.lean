@@ -579,27 +579,24 @@ theorem hasFreeVar_of_bvarsGe (e : SExpr) (amount cutoff : Nat)
     (h : BvarsGe e amount cutoff) :
     ∀ i, Expr.HasFreeVar e.erase i → i ≥ cutoff → i ≥ cutoff + amount := by
   induction h with
-  | bvar_lt i amount cutoff hlt => grind [erase]
-  | bvar_ge i amount cutoff hge => grind [erase]
-  | app f a amount cutoff hf ha ihf iha => grind [erase]
+  | bvar_lt => grind [erase]
+  | bvar_ge => grind [erase]
+  | app _ _ _ _ _ _ ihf iha => grind [erase]
   | lam body amount cutoff hb ih =>
     intro i hi hic
     change Expr.HasFreeVar (Expr.lam body.erase) i at hi
     cases hi with | lam h => have := ih (i + 1) h (by omega); omega
-  | const_intro id amount cutoff => grind [erase]
+  | const_intro => grind [erase]
   | shift_ge k inner amount cutoff hka =>
-    intro i hi _
-    have := Expr.hasFreeVar_shift_zero_ge inner.erase k i hi; omega
+    intro i hi _; have := Expr.hasFreeVar_shift_zero_ge inner.erase k i hi; omega
   | shift_mid k inner amount cutoff hge hlt hi ih =>
     intro i hi_ext hic
-    rcases Expr.hasFreeVar_shift_extract inner.erase k 0 i hi_ext with
-      ⟨hinner, hge'⟩ | ⟨_, hlt0⟩
+    rcases Expr.hasFreeVar_shift_extract inner.erase k 0 i hi_ext with ⟨hinner, _⟩ | ⟨_, _⟩
     · have := ih (i - k) hinner (by omega); omega
     · omega
   | shift_lt k inner amount cutoff hlt hi ih =>
     intro i hi_ext hic
-    rcases Expr.hasFreeVar_shift_extract inner.erase k 0 i hi_ext with
-      ⟨hinner, hge'⟩ | ⟨_, hlt0⟩
+    rcases Expr.hasFreeVar_shift_extract inner.erase k 0 i hi_ext with ⟨hinner, _⟩ | ⟨_, _⟩
     · have := ih (i - k) hinner (by omega); omega
     · omega
 
@@ -806,24 +803,20 @@ theorem mk_osnf_compound_app_isOSNF (f a : SExpr) (hf : IsOSNF f) (ha : IsOSNF a
   split
   · rename_i hlb; exact IsOSNF.app _ _ hf ha hlb
   · rename_i hlb
-    have hlb_pos : fvar_lb_val (app f a) > 0 := by omega
     have hne : (app f a).fvars ≠ [] := by
       intro habs; unfold fvar_lb_val at hlb; rw [habs] at hlb; exact hlb rfl
     have hbvf := bvarsGe_child_app_left f a
     have hbva := bvarsGe_child_app_right f a
-    have hbv_app : BvarsGe (app f a) (fvar_lb_val (app f a)) 0 :=
-      BvarsGe.app _ _ _ _ hbvf hbva
-    have hadjf := adjust_child_preserves_osnf f _ 0 hf hbvf
-    have hadja := adjust_child_preserves_osnf a _ 0 ha hbva
+    have hbv_app := BvarsGe.app _ _ _ _ hbvf hbva
     have h_ext_0 :
-        Expr.HasFreeVar
-          (adjust_child (app f a) (fvar_lb_val (app f a)) 0).erase 0 := by
+        Expr.HasFreeVar (adjust_child (app f a) (fvar_lb_val (app f a)) 0).erase 0 := by
       rw [adjust_child_hasFreeVar_iff (app f a) _ 0 hbv_app 0]
       exact Or.inl ⟨by omega, by simpa using hasFreeVar_at_fvar_lb_val (app f a) hne⟩
-    have h_lb_zero' := fvar_lb_val_zero_of_hasFreeVar_zero _ h_ext_0
-    have h_fvars_ne := fvars_ne_nil_of_hasFreeVar _ _ h_ext_0
-    exact IsOSNF.shifted _ _ hlb_pos
-      (IsOSNF.app _ _ hadjf hadja h_lb_zero') h_lb_zero' h_fvars_ne
+    have h_lb := fvar_lb_val_zero_of_hasFreeVar_zero _ h_ext_0
+    exact IsOSNF.shifted _ _ (by omega)
+      (IsOSNF.app _ _ (adjust_child_preserves_osnf f _ 0 hf hbvf)
+        (adjust_child_preserves_osnf a _ 0 ha hbva) h_lb)
+      h_lb (fvars_ne_nil_of_hasFreeVar _ _ h_ext_0)
 
 theorem mk_osnf_compound_lam_isOSNF (body : SExpr) (hb : IsOSNF body) :
     IsOSNF (mk_osnf_compound (lam body)) := by
@@ -834,22 +827,18 @@ theorem mk_osnf_compound_lam_isOSNF (body : SExpr) (hb : IsOSNF body) :
   split
   · rename_i hlb; exact IsOSNF.lam _ hb hlb
   · rename_i hlb
-    have hlb_pos : fvar_lb_val (lam body) > 0 := by omega
     have hne : (lam body).fvars ≠ [] := by
       intro habs; unfold fvar_lb_val at hlb; rw [habs] at hlb; exact hlb rfl
     have hbvb := bvarsGe_child_lam body
-    have hbv_lam : BvarsGe (lam body) (fvar_lb_val (lam body)) 0 :=
-      BvarsGe.lam _ _ _ hbvb
-    have hadjb := adjust_child_preserves_osnf body _ 1 hb hbvb
+    have hbv_lam := BvarsGe.lam _ _ _ hbvb
     have h_ext_0 :
-        Expr.HasFreeVar
-          (adjust_child (lam body) (fvar_lb_val (lam body)) 0).erase 0 := by
+        Expr.HasFreeVar (adjust_child (lam body) (fvar_lb_val (lam body)) 0).erase 0 := by
       rw [adjust_child_hasFreeVar_iff (lam body) _ 0 hbv_lam 0]
       exact Or.inl ⟨by omega, by simpa using hasFreeVar_at_fvar_lb_val (lam body) hne⟩
-    have h_lb_zero' := fvar_lb_val_zero_of_hasFreeVar_zero _ h_ext_0
-    have h_fvars_ne := fvars_ne_nil_of_hasFreeVar _ _ h_ext_0
-    exact IsOSNF.shifted _ _ hlb_pos
-      (IsOSNF.lam _ hadjb h_lb_zero') h_lb_zero' h_fvars_ne
+    have h_lb := fvar_lb_val_zero_of_hasFreeVar_zero _ h_ext_0
+    exact IsOSNF.shifted _ _ (by omega)
+      (IsOSNF.lam _ (adjust_child_preserves_osnf body _ 1 hb hbvb) h_lb)
+      h_lb (fvars_ne_nil_of_hasFreeVar _ _ h_ext_0)
 
 /-! ### to_osnf: compute the OSNF of an expression (recursive, bottom-up) -/
 
