@@ -98,15 +98,6 @@ theorem memAbs_cons_cases (i d : Nat) (rest : FVarList) (h : MemAbs i (d :: rest
 @[grind =] theorem memAbs_nil_iff (i : Nat) : MemAbs i [] ↔ False :=
   ⟨not_memAbs_nil _, False.elim⟩
 
-theorem memAbs_head_self (d : Nat) (rest : FVarList) : MemAbs d (d :: rest) :=
-  MemAbs.head _ _
-
-theorem memAbs_tail_self (i d : Nat) (rest : FVarList) (h : MemAbs i rest) :
-    MemAbs (d + 1 + i) (d :: rest) := MemAbs.tail _ _ _ h
-
-grind_pattern memAbs_head_self => (d :: rest)
-grind_pattern memAbs_tail_self => (d :: rest), MemAbs i rest
-
 @[grind =] theorem memAbs_cons_iff (i d : Nat) (rest : FVarList) :
     MemAbs i (d :: rest) ↔ i = d ∨ ∃ j, i = d + 1 + j ∧ MemAbs j rest := by
   refine ⟨memAbs_cons_cases i d rest, ?_⟩
@@ -116,7 +107,7 @@ grind_pattern memAbs_tail_self => (d :: rest), MemAbs i rest
 
 theorem memAbs_shift_iff (k i : Nat) (xs : FVarList) :
     MemAbs i (shift k xs) ↔ ∃ j, MemAbs j xs ∧ i = j + k := by
-  cases xs <;> grind [shift]
+  cases xs <;> simp only [shift, memAbs_cons_iff, memAbs_nil_iff] <;> grind
 
 private theorem memAbs_union_iff_aux (n : Nat) :
     ∀ (xs ys : FVarList), xs.length + ys.length ≤ n →
@@ -139,17 +130,17 @@ private theorem memAbs_union_iff_aux (n : Nat) :
       · rename_i hxy
         have hlen : xs'.length + ((y - x - 1) :: ys').length ≤ n' := by simp at hn ⊢; omega
         have IH := ih xs' ((y - x - 1) :: ys') hlen
-        grind
+        simp only [memAbs_cons_iff, IH]; grind
       · rename_i hxy
         split
         · rename_i heq
           have hlen : xs'.length + ys'.length ≤ n' := by simp at hn ⊢; omega
           have IH := ih xs' ys' hlen
-          grind
+          simp only [memAbs_cons_iff, IH]; grind
         · rename_i hne
           have hlen : ((x - y - 1) :: xs').length + ys'.length ≤ n' := by simp at hn ⊢; omega
           have IH := ih ((x - y - 1) :: xs') ys' hlen
-          grind
+          simp only [memAbs_cons_iff, IH]; grind
 
 theorem memAbs_union_iff (i : Nat) (xs ys : FVarList) :
     MemAbs i (union xs ys) ↔ MemAbs i xs ∨ MemAbs i ys :=
@@ -158,9 +149,9 @@ theorem memAbs_union_iff (i : Nat) (xs ys : FVarList) :
 theorem memAbs_unbind_iff (i : Nat) (xs : FVarList) :
     MemAbs i (unbind xs) ↔ MemAbs (i + 1) xs := by
   match xs with
-  | [] => grind [unbind]
-  | 0 :: rest => grind [unbind]
-  | (d' + 1) :: rest => grind [unbind]
+  | [] => simp only [unbind, memAbs_nil_iff]
+  | 0 :: rest => simp only [unbind, memAbs_cons_iff]; grind
+  | (d' + 1) :: rest => simp only [unbind, memAbs_cons_iff]; grind
 
 end FVarList
 
@@ -217,8 +208,7 @@ inductive HasFreeVar : Expr → Nat → Prop where
 @[grind =] theorem hasFreeVar_bvar_iff (i j : Nat) : HasFreeVar (bvar j) i ↔ i = j :=
   ⟨fun h => by cases h; rfl, fun h => h ▸ HasFreeVar.bvar _⟩
 
-theorem hasFreeVar_bvar_self (i : Nat) : HasFreeVar (bvar i) i := HasFreeVar.bvar _
-grind_pattern hasFreeVar_bvar_self => (bvar i)
+@[grind] theorem hasFreeVar_bvar_self (i : Nat) : HasFreeVar (bvar i) i := HasFreeVar.bvar _
 
 @[grind =] theorem hasFreeVar_app_iff (f a : Expr) (k : Nat) :
     HasFreeVar (app f a) k ↔ HasFreeVar f k ∨ HasFreeVar a k :=
@@ -258,7 +248,7 @@ theorem hasFreeVar_shift_bwd (e : Expr) (j : Nat) (h : HasFreeVar e j) (n c : Na
 theorem shift_eq_of_hasFreeVars_lt (e : Expr) (k c : Nat)
     (h : ∀ j, HasFreeVar e j → j < c) : e.shift k c = e := by
   induction e generalizing c with
-  | bvar i => grind [shift]
+  | bvar i => have := h i (HasFreeVar.bvar _); grind [shift]
   | app f a ihf iha => grind [shift]
   | lam body ih =>
     refine congrArg Expr.lam (ih (c + 1) ?_)
