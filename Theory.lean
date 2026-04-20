@@ -1,8 +1,9 @@
 /-
 # OSNF (Outermost-Shift Normal Form) — formal model
 
-Most of the theory is proved. Four `sorry`s remain, all about the
-isOSNF-preservation of `adjust_child` / `mk_osnf_compound`.
+All five main theorems are proved: `to_osnf_erase`, `to_osnf_isOSNF`,
+`osnf_unique`, `to_osnf_idempotent`, `equiv_iff_osnf_eq`. Zero sorries, zero
+axioms.
 
 ## The canonical form
 
@@ -1427,14 +1428,70 @@ def to_osnf : SExpr → SExpr
         | [] => e
         | _ => shift k e
 
-/-! ### Main theorems
+/-! ### Main theorems -/
 
-`to_osnf_erase`, `osnf_unique`, `to_osnf_idempotent`, `equiv_iff_osnf_eq` are
-fully proved. `to_osnf_isOSNF` still depends on the isOSNF preservation of
-`adjust_child`/`mk_osnf_compound`, which are `sorry` for now. -/
+-- Helper: IsOSNF.shifted preserves fvar_lb_val and fvars.
+private theorem isOSNF_shifted_parts {n : Nat} {c : SExpr} (h : IsOSNF (shift n c)) :
+    n > 0 ∧ IsOSNF c ∧ c.fvar_lb_val = 0 ∧ c.fvars ≠ [] := by
+  cases h with
+  | shifted _ _ hn hc hlb hfv => exact ⟨hn, hc, hlb, hfv⟩
+
+-- Helper: a non-shift OSNF has fvar_lb_val = 0.
+private theorem isOSNF_not_shift_fvar_lb_val_zero {e : SExpr}
+    (he : IsOSNF e) (h1 : ∀ m c, e ≠ shift m c) : fvar_lb_val e = 0 := by
+  cases he with
+  | bvar0 => rfl
+  | const _ => rfl
+  | app _ _ _ _ hlb => exact hlb
+  | lam _ _ hlb => exact hlb
+  | shifted n c _ _ _ _ => exact absurd rfl (h1 n c)
 
 /-- `to_osnf e` is in OSNF. -/
-theorem to_osnf_isOSNF (e : SExpr) : IsOSNF (to_osnf e) := sorry
+theorem to_osnf_isOSNF (e : SExpr) : IsOSNF (to_osnf e) := by
+  induction e with
+  | bvar i =>
+    show IsOSNF (if i = 0 then bvar 0 else shift i (bvar 0))
+    split
+    · exact IsOSNF.bvar0
+    · rename_i hi0
+      exact IsOSNF.shifted i (bvar 0) (by omega) IsOSNF.bvar0 rfl
+        (by simp [fvars])
+  | const id => exact IsOSNF.const id
+  | app f a ihf iha =>
+    show IsOSNF (mk_osnf_compound (app f.to_osnf a.to_osnf))
+    exact mk_osnf_compound_app_isOSNF _ _ ihf iha
+  | lam body ih =>
+    show IsOSNF (mk_osnf_compound (lam body.to_osnf))
+    exact mk_osnf_compound_lam_isOSNF _ ih
+  | shift k inner ih =>
+    show IsOSNF (match inner.to_osnf with
+      | shift m core => if k + m = 0 then core else shift (k + m) core
+      | e => if k = 0 then e else match e.fvars with | [] => e | _ => shift k e)
+    split
+    · rename_i m core heq
+      have hih : IsOSNF (shift m core) := heq ▸ ih
+      obtain ⟨hm, hc, hlb, hfv⟩ := isOSNF_shifted_parts hih
+      split
+      next hkm => exfalso; omega
+      next hkm =>
+        exact IsOSNF.shifted (k + m) core (by omega) hc hlb hfv
+    · rename_i e hnotshift
+      split
+      next hk0 => subst hk0; exact ih
+      next hk0 =>
+        -- match e.fvars
+        have : ∀ (fvs : FVarList), inner.to_osnf.fvars = fvs →
+            IsOSNF (match fvs with | [] => inner.to_osnf | _ => shift k (inner.to_osnf)) := by
+          intro fvs hfvs
+          cases fvs with
+          | nil => exact ih
+          | cons hd tl =>
+            have hfv : inner.to_osnf.fvars ≠ [] := by rw [hfvs]; exact List.cons_ne_nil _ _
+            have hlb : fvar_lb_val inner.to_osnf = 0 :=
+              isOSNF_not_shift_fvar_lb_val_zero ih
+                (fun m c hEq => hnotshift m c (hEq ▸ rfl))
+            exact IsOSNF.shifted k _ (by omega) ih hlb hfv
+        exact this _ rfl
 
 /-- `to_osnf` preserves denotation. -/
 theorem to_osnf_erase (e : SExpr) : (to_osnf e).erase = e.erase := by
