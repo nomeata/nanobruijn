@@ -95,29 +95,19 @@ theorem memAbs_cons_cases (i d : Nat) (rest : FVarList) (h : MemAbs i (d :: rest
   | head => exact Or.inl rfl
   | tail jj _ _ hrest => exact Or.inr ⟨jj, by omega, hrest⟩
 
+@[grind =] theorem memAbs_nil_iff (i : Nat) : MemAbs i [] ↔ False :=
+  ⟨not_memAbs_nil _, False.elim⟩
+
+@[grind =] theorem memAbs_cons_iff (i d : Nat) (rest : FVarList) :
+    MemAbs i (d :: rest) ↔ i = d ∨ ∃ j, i = d + 1 + j ∧ MemAbs j rest := by
+  refine ⟨memAbs_cons_cases i d rest, ?_⟩
+  rintro (rfl | ⟨j, rfl, hrest⟩)
+  · exact MemAbs.head _ _
+  · exact MemAbs.tail _ _ _ hrest
+
 theorem memAbs_shift_iff (k i : Nat) (xs : FVarList) :
     MemAbs i (shift k xs) ↔ ∃ j, MemAbs j xs ∧ i = j + k := by
-  cases xs with
-  | nil =>
-    simp only [shift]
-    exact ⟨fun h => absurd h (not_memAbs_nil _),
-           fun ⟨_, h, _⟩ => absurd h (not_memAbs_nil _)⟩
-  | cons d rest =>
-    simp only [shift]
-    constructor
-    · intro h
-      cases h with
-      | head _ _ => exact ⟨d, MemAbs.head _ _, by omega⟩
-      | tail j' _ _ hrest => exact ⟨d + 1 + j', MemAbs.tail _ _ _ hrest, by omega⟩
-    · rintro ⟨j, hj, rfl⟩
-      cases hj with
-      | head _ _ =>
-        have : d + k = d + k := rfl
-        exact MemAbs.head _ _
-      | tail j' _ _ hrest =>
-        have heq : d + 1 + j' + k = (d + k) + 1 + j' := by omega
-        rw [heq]
-        exact MemAbs.tail _ _ _ hrest
+  cases xs <;> simp only [shift, memAbs_cons_iff, memAbs_nil_iff] <;> grind
 
 private theorem memAbs_union_iff_aux (n : Nat) :
     ∀ (xs ys : FVarList), xs.length + ys.length ≤ n →
@@ -126,124 +116,37 @@ private theorem memAbs_union_iff_aux (n : Nat) :
   | zero =>
     intro xs ys hn i
     match xs, ys with
-    | [], [] =>
-      simp only [union]
-      exact ⟨Or.inr, fun h => h.resolve_left (not_memAbs_nil i)⟩
+    | [], [] => simp [union, memAbs_nil_iff]
     | _ :: _, _ => simp at hn
     | [], _ :: _ => simp at hn
   | succ n' ih =>
     intro xs ys hn i
     match xs, ys with
-    | [], ys =>
-      simp only [union]
-      exact ⟨Or.inr, fun h => h.resolve_left (not_memAbs_nil i)⟩
-    | x :: xs', [] =>
-      simp only [union]
-      exact ⟨Or.inl, fun h => h.resolve_right (not_memAbs_nil i)⟩
+    | [], ys => simp [union, memAbs_nil_iff]
+    | x :: xs', [] => simp [union, memAbs_nil_iff]
     | x :: xs', y :: ys' =>
       simp only [union]
       split
       · -- x < y
         rename_i hxy
-        have hlen : xs'.length + ((y - x - 1) :: ys').length ≤ n' := by
-          simp at hn ⊢; omega
-        have IH : ∀ j, MemAbs j (union xs' ((y - x - 1) :: ys')) ↔
-                        MemAbs j xs' ∨ MemAbs j ((y - x - 1) :: ys') :=
-          ih xs' ((y - x - 1) :: ys') hlen
-        constructor
-        · intro h
-          rcases memAbs_cons_cases i x _ h with rfl | ⟨j', hiEq, hrest⟩
-          · exact Or.inl (MemAbs.head _ _)
-          · subst hiEq
-            rcases (IH j').mp hrest with hxs | hys
-            · exact Or.inl (MemAbs.tail j' x xs' hxs)
-            · rcases memAbs_cons_cases j' (y - x - 1) _ hys with rfl | ⟨jj, hjEq, hys'rest⟩
-              · have : x + 1 + (y - x - 1) = y := by omega
-                rw [this]; exact Or.inr (MemAbs.head _ _)
-              · subst hjEq
-                have : x + 1 + (y - x - 1 + 1 + jj) = y + 1 + jj := by omega
-                rw [this]; exact Or.inr (MemAbs.tail jj y ys' hys'rest)
-        · rintro (hx | hy)
-          · rcases memAbs_cons_cases i x _ hx with rfl | ⟨j', hiEq, hrest⟩
-            · exact MemAbs.head _ _
-            · subst hiEq
-              exact MemAbs.tail j' x _ ((IH j').mpr (Or.inl hrest))
-          · rcases memAbs_cons_cases i y _ hy with hiy | ⟨jj, hiEq, hys'rest⟩
-            · have heq : i = x + 1 + (y - x - 1) := by omega
-              rw [heq]
-              exact MemAbs.tail (y - x - 1) x _
-                ((IH (y - x - 1)).mpr (Or.inr (MemAbs.head _ _)))
-            · have heq : i = x + 1 + (y - x - 1 + 1 + jj) := by omega
-              rw [heq]
-              exact MemAbs.tail _ x _
-                ((IH (y - x - 1 + 1 + jj)).mpr
-                  (Or.inr (MemAbs.tail jj _ ys' hys'rest)))
+        have hlen : xs'.length + ((y - x - 1) :: ys').length ≤ n' := by simp at hn ⊢; omega
+        have IH := ih xs' ((y - x - 1) :: ys') hlen
+        simp only [memAbs_cons_iff, IH]
+        grind
       · rename_i hxy
         split
         · -- x = y
           rename_i heq
-          have hlen : xs'.length + ys'.length ≤ n' := by
-            simp at hn ⊢; omega
-          have IH : ∀ j, MemAbs j (union xs' ys') ↔
-                          MemAbs j xs' ∨ MemAbs j ys' :=
-            ih xs' ys' hlen
-          constructor
-          · intro h
-            rcases memAbs_cons_cases i x _ h with rfl | ⟨j', hiEq, hrest⟩
-            · exact Or.inl (MemAbs.head _ _)
-            · subst hiEq
-              rcases (IH j').mp hrest with hxs | hys
-              · exact Or.inl (MemAbs.tail j' x xs' hxs)
-              · rw [heq]; exact Or.inr (MemAbs.tail j' y ys' hys)
-          · rintro (hx | hy)
-            · rcases memAbs_cons_cases i x _ hx with rfl | ⟨j', hiEq, hrest⟩
-              · exact MemAbs.head _ _
-              · subst hiEq
-                exact MemAbs.tail j' x _ ((IH j').mpr (Or.inl hrest))
-            · rcases memAbs_cons_cases i y _ hy with hiy | ⟨j', hiEq, hrest⟩
-              · have : i = x := by omega
-                rw [this]; exact MemAbs.head _ _
-              · have : i = x + 1 + j' := by omega
-                rw [this]
-                exact MemAbs.tail _ x _ ((IH j').mpr (Or.inr hrest))
+          have hlen : xs'.length + ys'.length ≤ n' := by simp at hn ⊢; omega
+          have IH := ih xs' ys' hlen
+          simp only [memAbs_cons_iff, IH]
+          grind
         · -- x > y
           rename_i hne
-          have hgt : x > y := by omega
-          have hlen : ((x - y - 1) :: xs').length + ys'.length ≤ n' := by
-            simp at hn ⊢; omega
-          have IH : ∀ j, MemAbs j (union ((x - y - 1) :: xs') ys') ↔
-                          MemAbs j ((x - y - 1) :: xs') ∨ MemAbs j ys' :=
-            ih ((x - y - 1) :: xs') ys' hlen
-          constructor
-          · intro h
-            rcases memAbs_cons_cases i y _ h with rfl | ⟨j', hiEq, hrest⟩
-            · exact Or.inr (MemAbs.head _ _)
-            · subst hiEq
-              rcases (IH j').mp hrest with hxs | hys
-              · rcases memAbs_cons_cases j' (x - y - 1) _ hxs with rfl | ⟨jj, hjEq, hxs'rest⟩
-                · have : y + 1 + (x - y - 1) = x := by omega
-                  rw [this]; exact Or.inl (MemAbs.head _ _)
-                · subst hjEq
-                  have : y + 1 + (x - y - 1 + 1 + jj) = x + 1 + jj := by omega
-                  rw [this]; exact Or.inl (MemAbs.tail jj x xs' hxs'rest)
-              · exact Or.inr (MemAbs.tail j' y ys' hys)
-          · rintro (hx | hy)
-            · rcases memAbs_cons_cases i x _ hx with hix | ⟨j', hiEq, hrest⟩
-              · have heq : i = y + 1 + (x - y - 1) := by omega
-                rw [heq]
-                exact MemAbs.tail _ y _
-                  ((IH (x - y - 1)).mpr (Or.inl (MemAbs.head _ _)))
-              · have heq : i = y + 1 + (x - y - 1 + 1 + j') := by omega
-                rw [heq]
-                exact MemAbs.tail _ y _
-                  ((IH (x - y - 1 + 1 + j')).mpr
-                    (Or.inl (MemAbs.tail j' _ xs' hrest)))
-            · rcases memAbs_cons_cases i y _ hy with hiy | ⟨j', hiEq, hrest⟩
-              · have : i = y := hiy
-                rw [this]; exact MemAbs.head _ _
-              · have : i = y + 1 + j' := hiEq
-                rw [this]
-                exact MemAbs.tail j' y _ ((IH j').mpr (Or.inr hrest))
+          have hlen : ((x - y - 1) :: xs').length + ys'.length ≤ n' := by simp at hn ⊢; omega
+          have IH := ih ((x - y - 1) :: xs') ys' hlen
+          simp only [memAbs_cons_iff, IH]
+          grind
 
 theorem memAbs_union_iff (i : Nat) (xs ys : FVarList) :
     MemAbs i (union xs ys) ↔ MemAbs i xs ∨ MemAbs i ys :=
@@ -251,47 +154,10 @@ theorem memAbs_union_iff (i : Nat) (xs ys : FVarList) :
 
 theorem memAbs_unbind_iff (i : Nat) (xs : FVarList) :
     MemAbs i (unbind xs) ↔ MemAbs (i + 1) xs := by
-  cases xs with
-  | nil =>
-    simp only [unbind]
-    exact ⟨fun h => absurd h (not_memAbs_nil _),
-           fun h => absurd h (not_memAbs_nil _)⟩
-  | cons d rest =>
-    match d with
-    | 0 =>
-      simp only [unbind]
-      constructor
-      · intro h
-        have heq : i + 1 = 0 + 1 + i := by omega
-        rw [heq]
-        exact MemAbs.tail i 0 rest h
-      · intro h
-        generalize hq : i + 1 = q at h
-        cases h with
-        | head _ _ => omega
-        | tail j' _ _ hrest =>
-          have : i = j' := by omega
-          rw [this]; exact hrest
-    | d' + 1 =>
-      simp only [unbind]
-      constructor
-      · intro h
-        cases h with
-        | head _ _ => exact MemAbs.head _ _
-        | tail j' _ _ hrest =>
-          have : d' + 1 + j' + 1 = d' + 1 + 1 + j' := by omega
-          rw [this]
-          exact MemAbs.tail j' (d' + 1) rest hrest
-      · intro h
-        generalize hq : i + 1 = q at h
-        cases h with
-        | head _ _ =>
-          have : i = d' := by omega
-          rw [this]; exact MemAbs.head _ _
-        | tail j' _ _ hrest =>
-          have : i = d' + 1 + j' := by omega
-          rw [this]
-          exact MemAbs.tail j' d' rest hrest
+  match xs with
+  | [] => simp only [unbind, memAbs_nil_iff]
+  | 0 :: rest => simp only [unbind, memAbs_cons_iff]; grind
+  | (d' + 1) :: rest => simp only [unbind, memAbs_cons_iff]; grind
 
 end FVarList
 
