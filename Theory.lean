@@ -874,6 +874,101 @@ theorem adjust_child_erase (e : SExpr) (amount cutoff : Nat)
     rw [Expr.shift_comm_lt _ k amount cutoff (by omega)]
     exact congrArg (·.shift k 0) ih
 
+/-! ### BvarsGe semantic characterisation -/
+
+/-- From an ExtFreeVar-based semantic bound, produce a structural BvarsGe. -/
+theorem bvarsGe_of_extSemantic (e : SExpr) (amount cutoff : Nat)
+    (h : ∀ i, Expr.ExtFreeVar e.erase i → i ≥ cutoff → i ≥ cutoff + amount) :
+    BvarsGe e amount cutoff := by
+  induction e generalizing amount cutoff with
+  | bvar j =>
+    by_cases hjc : j ≥ cutoff
+    · exact BvarsGe.bvar_ge j amount cutoff (h j (Expr.ExtFreeVar.bvar j) hjc)
+    · exact BvarsGe.bvar_lt j amount cutoff (by omega)
+  | const n => exact BvarsGe.const_intro n amount cutoff
+  | app f a ihf iha =>
+    refine BvarsGe.app f a amount cutoff ?_ ?_
+    · refine ihf amount cutoff ?_
+      intro i hi hic
+      exact h i (Expr.ExtFreeVar.app_left hi) hic
+    · refine iha amount cutoff ?_
+      intro i hi hic
+      exact h i (Expr.ExtFreeVar.app_right hi) hic
+  | lam body ih =>
+    refine BvarsGe.lam body amount cutoff ?_
+    refine ih amount (cutoff + 1) ?_
+    intro i hi hic
+    -- From h on (lam body): ExtFreeVar (lam body) (i-1) → i-1 ≥ cutoff → i-1 ≥ cutoff+amount
+    have hext : Expr.ExtFreeVar (lam body).erase (i - 1) := by
+      show Expr.ExtFreeVar (Expr.lam body.erase) (i - 1)
+      have hi1 : (i - 1) + 1 = i := by omega
+      rw [← hi1] at hi
+      exact Expr.ExtFreeVar.lam hi
+    have := h (i - 1) hext (by omega)
+    omega
+  | shift k inner ih =>
+    by_cases hk1 : k ≥ cutoff + amount
+    · exact BvarsGe.shift_ge k inner amount cutoff hk1
+    by_cases hk2 : k ≥ cutoff
+    · refine BvarsGe.shift_mid k inner amount cutoff hk2 (by omega) ?_
+      refine ih (amount + cutoff - k) 0 ?_
+      intro i hi _
+      -- hi : ExtFreeVar inner.erase i, need i ≥ 0 + (amount + cutoff - k)
+      -- Use h with i' = i + k: ExtFreeVar (inner.shift k 0) (i+k) → i+k ≥ cutoff
+      have hext : Expr.ExtFreeVar (inner.erase.shift k 0) (i + k) := by
+        have := Expr.extFreeVar_shift_bwd inner.erase i hi k 0
+        simp only [show i ≥ 0 from Nat.zero_le _, ↓reduceIte] at this
+        exact this
+      have := h (i + k) hext (by omega)
+      omega
+    · refine BvarsGe.shift_lt k inner amount cutoff (by omega) ?_
+      refine ih amount (cutoff - k) ?_
+      intro i hi hic
+      have hext : Expr.ExtFreeVar (inner.erase.shift k 0) (i + k) := by
+        have := Expr.extFreeVar_shift_bwd inner.erase i hi k 0
+        simp only [show i ≥ 0 from Nat.zero_le _, ↓reduceIte] at this
+        exact this
+      have := h (i + k) hext (by omega)
+      omega
+
+/-- All external free vars of e.erase are ≥ fvar_lb_val e. -/
+theorem bvarsGe_fvar_lb (e : SExpr) : BvarsGe e (fvar_lb_val e) 0 := by
+  refine bvarsGe_of_extSemantic e (fvar_lb_val e) 0 ?_
+  intro i hi _
+  have := extFreeVar_ge_fvar_lb e i hi
+  omega
+
+/-! ### Children of compound satisfy BvarsGe -/
+
+theorem bvarsGe_child_app_left (f a : SExpr) :
+    BvarsGe f (fvar_lb_val (app f a)) 0 := by
+  refine bvarsGe_of_extSemantic f _ 0 ?_
+  intro i hi _
+  have := extFreeVar_ge_fvar_lb (app f a) i (Expr.ExtFreeVar.app_left hi)
+  omega
+
+theorem bvarsGe_child_app_right (f a : SExpr) :
+    BvarsGe a (fvar_lb_val (app f a)) 0 := by
+  refine bvarsGe_of_extSemantic a _ 0 ?_
+  intro i hi _
+  have := extFreeVar_ge_fvar_lb (app f a) i (Expr.ExtFreeVar.app_right hi)
+  omega
+
+theorem bvarsGe_child_lam (body : SExpr) :
+    BvarsGe body (fvar_lb_val (lam body)) 1 := by
+  refine bvarsGe_of_extSemantic body _ 1 ?_
+  intro i hi hi1
+  -- hi : ExtFreeVar body.erase i, hi1 : i ≥ 1
+  -- Need: i ≥ 1 + fvar_lb_val (lam body)
+  -- ExtFreeVar (lam body).erase (i-1) via lam constructor
+  have hext : Expr.ExtFreeVar (lam body).erase (i - 1) := by
+    show Expr.ExtFreeVar (Expr.lam body.erase) (i - 1)
+    have : (i - 1) + 1 = i := by omega
+    rw [← this] at hi
+    exact Expr.ExtFreeVar.lam hi
+  have := extFreeVar_ge_fvar_lb (lam body) (i - 1) hext
+  omega
+
 /-! ### mk_osnf_compound: normalize a compound expression whose children are in OSNF -/
 
 /-- Given a compound expression (app or lam) whose children are already in OSNF,
