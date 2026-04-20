@@ -437,6 +437,57 @@ theorem shift_eq_of_no_freevars (e : Expr) (k c : Nat)
     rw [ih (c + 1) (fun i hi => h i (HasFreeVar.lam _ _ _ hi))]
   | const _ => rfl
 
+/-- Stronger forward decomposition of ExtFreeVar on a shift. -/
+theorem extFreeVar_shift_extract (e : Expr) (n c i : Nat) :
+    ExtFreeVar (e.shift n c) i →
+    (ExtFreeVar e (i - n) ∧ i ≥ n + c) ∨ (ExtFreeVar e i ∧ i < c) := by
+  induction e generalizing c i with
+  | bvar j =>
+    intro h
+    simp only [shift] at h
+    by_cases hjc : j ≥ c
+    · simp only [hjc, ↓reduceIte] at h
+      cases h with
+      | bvar _ =>
+        left
+        refine ⟨?_, ?_⟩
+        · have : j + n - n = j := by omega
+          rw [this]; exact ExtFreeVar.bvar _
+        · omega
+    · simp only [hjc, ↓reduceIte] at h
+      cases h with
+      | bvar _ => right; exact ⟨ExtFreeVar.bvar _, by omega⟩
+  | app f a ihf iha =>
+    intro h
+    simp only [shift] at h
+    cases h with
+    | app_left hf =>
+      rcases ihf c i hf with ⟨hfe, hi⟩ | ⟨hfe, hi⟩
+      · exact Or.inl ⟨ExtFreeVar.app_left hfe, hi⟩
+      · exact Or.inr ⟨ExtFreeVar.app_left hfe, hi⟩
+    | app_right ha =>
+      rcases iha c i ha with ⟨hae, hi⟩ | ⟨hae, hi⟩
+      · exact Or.inl ⟨ExtFreeVar.app_right hae, hi⟩
+      · exact Or.inr ⟨ExtFreeVar.app_right hae, hi⟩
+  | lam body ih =>
+    intro h
+    simp only [shift] at h
+    cases h with
+    | lam hb =>
+      rcases ih (c+1) (i+1) hb with ⟨hbe, hi⟩ | ⟨hbe, hi⟩
+      · left
+        refine ⟨?_, ?_⟩
+        · have : i + 1 - n = (i - n) + 1 := by omega
+          rw [this] at hbe
+          exact ExtFreeVar.lam hbe
+        · omega
+      · right
+        exact ⟨ExtFreeVar.lam hbe, by omega⟩
+  | const _ =>
+    intro h
+    simp only [shift] at h
+    cases h
+
 /-- Shift preserves / creates external bvars with a cutoff-parametrized predictable pattern. -/
 theorem extFreeVar_shift_fwd (e : Expr) (n c k : Nat) :
     ExtFreeVar (e.shift n c) k → k ≥ n + c ∨ k < c := by
@@ -589,6 +640,58 @@ def fvar_lb_val (e : SExpr) : Nat :=
   match e.fvars with
   | [] => 0
   | d :: _ => d
+
+/-! ### Link between structural fvars and external fvars on erase -/
+
+theorem memAbs_fvars_iff_extFreeVar (e : SExpr) (i : Nat) :
+    FVarList.MemAbs i e.fvars ↔ Expr.ExtFreeVar e.erase i := by
+  induction e generalizing i with
+  | bvar j =>
+    simp only [fvars, erase]
+    constructor
+    · intro h
+      rcases FVarList.memAbs_cons_cases i j [] h with hij | ⟨jj, _, hrest⟩
+      · rw [hij]; exact Expr.ExtFreeVar.bvar _
+      · exact absurd hrest (FVarList.not_memAbs_nil _)
+    · intro h
+      cases h with
+      | bvar _ => exact FVarList.MemAbs.head _ _
+  | const n =>
+    simp only [fvars, erase]
+    constructor
+    · intro h; exact absurd h (FVarList.not_memAbs_nil _)
+    · intro h; cases h
+  | app f a ihf iha =>
+    simp only [fvars, erase]
+    rw [FVarList.memAbs_union_iff, ihf, iha]
+    constructor
+    · rintro (hf | ha)
+      · exact Expr.ExtFreeVar.app_left hf
+      · exact Expr.ExtFreeVar.app_right ha
+    · intro h
+      cases h with
+      | app_left hf => exact Or.inl hf
+      | app_right ha => exact Or.inr ha
+  | lam body ih =>
+    simp only [fvars, erase]
+    rw [FVarList.memAbs_unbind_iff, ih]
+    constructor
+    · intro h; exact Expr.ExtFreeVar.lam h
+    · intro h; cases h with | lam h => exact h
+  | shift k inner ih =>
+    simp only [fvars, erase]
+    rw [FVarList.memAbs_shift_iff]
+    constructor
+    · rintro ⟨j, hj, rfl⟩
+      have : Expr.ExtFreeVar inner.erase j := (ih j).mp hj
+      have := Expr.extFreeVar_shift_bwd inner.erase j this k 0
+      simp only [show j ≥ 0 from Nat.zero_le _, ↓reduceIte] at this
+      exact this
+    · intro h
+      rcases Expr.extFreeVar_shift_extract inner.erase k 0 i h with ⟨hfe, hge⟩ | ⟨_, hlt⟩
+      · refine ⟨i - k, (ih (i - k)).mpr hfe, ?_⟩
+        omega
+      · omega
 
 /-! ### OSNF definition
 
