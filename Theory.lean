@@ -217,7 +217,8 @@ inductive HasFreeVar : Expr → Nat → Prop where
 @[grind =] theorem hasFreeVar_bvar_iff (i j : Nat) : HasFreeVar (bvar j) i ↔ i = j :=
   ⟨fun h => by cases h; rfl, fun h => h ▸ HasFreeVar.bvar _⟩
 
-@[grind] theorem hasFreeVar_bvar_self (i : Nat) : HasFreeVar (bvar i) i := HasFreeVar.bvar _
+theorem hasFreeVar_bvar_self (i : Nat) : HasFreeVar (bvar i) i := HasFreeVar.bvar _
+grind_pattern hasFreeVar_bvar_self => (bvar i)
 
 @[grind =] theorem hasFreeVar_app_iff (f a : Expr) (k : Nat) :
     HasFreeVar (app f a) k ↔ HasFreeVar f k ∨ HasFreeVar a k :=
@@ -257,11 +258,8 @@ theorem hasFreeVar_shift_bwd (e : Expr) (j : Nat) (h : HasFreeVar e j) (n c : Na
 theorem shift_eq_of_hasFreeVars_lt (e : Expr) (k c : Nat)
     (h : ∀ j, HasFreeVar e j → j < c) : e.shift k c = e := by
   induction e generalizing c with
-  | bvar i =>
-    have := h i (HasFreeVar.bvar _)
-    grind [shift]
-  | app f a ihf iha =>
-    grind [shift]
+  | bvar i => grind [shift]
+  | app f a ihf iha => grind [shift]
   | lam body ih =>
     refine congrArg Expr.lam (ih (c + 1) ?_)
     intro j hj; have := h (j - 1); grind
@@ -589,12 +587,7 @@ theorem hasFreeVar_of_bvarsGe (e : SExpr) (amount cutoff : Nat)
   | const_intro => grind [erase]
   | shift_ge k inner amount cutoff hka =>
     intro i hi _; have := Expr.hasFreeVar_shift_zero_ge inner.erase k i hi; omega
-  | shift_mid k inner amount cutoff hge hlt hi ih =>
-    intro i hi_ext hic
-    rcases Expr.hasFreeVar_shift_extract inner.erase k 0 i hi_ext with ⟨hinner, _⟩ | ⟨_, _⟩
-    · have := ih (i - k) hinner (by omega); omega
-    · omega
-  | shift_lt k inner amount cutoff hlt hi ih =>
+  | shift_mid k inner _ _ _ _ _ ih | shift_lt k inner _ _ _ _ ih =>
     intro i hi_ext hic
     rcases Expr.hasFreeVar_shift_extract inner.erase k 0 i hi_ext with ⟨hinner, _⟩ | ⟨_, _⟩
     · have := ih (i - k) hinner (by omega); omega
