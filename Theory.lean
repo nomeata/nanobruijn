@@ -615,9 +615,7 @@ theorem adjust_child_hasFreeVar_iff (e : SExpr) (amount cutoff : Nat)
   · intro h
     have hshift := Expr.hasFreeVar_shift_bwd _ _ h amount cutoff
     rw [hadj] at hshift
-    by_cases hkc : k ≥ cutoff
-    · simp only [hkc, ↓reduceIte] at hshift; exact Or.inl ⟨hkc, hshift⟩
-    · simp only [hkc, ↓reduceIte] at hshift; exact Or.inr ⟨by omega, hshift⟩
+    by_cases hkc : k ≥ cutoff <;> simp_all
   · rintro (⟨hkc, h⟩ | ⟨hkc, h⟩)
     · rw [← hadj] at h
       rcases Expr.hasFreeVar_shift_extract _ amount cutoff (k + amount) h with
@@ -626,8 +624,7 @@ theorem adjust_child_hasFreeVar_iff (e : SExpr) (amount cutoff : Nat)
         rw [heq] at hfe; exact hfe
       · omega
     · rw [← hadj] at h
-      rcases Expr.hasFreeVar_shift_extract _ amount cutoff k h with
-        ⟨_, _⟩ | ⟨hfe, _⟩
+      rcases Expr.hasFreeVar_shift_extract _ amount cutoff k h with ⟨_, _⟩ | ⟨hfe, _⟩
       · omega
       · exact hfe
 
@@ -635,51 +632,39 @@ theorem adjust_child_hasFreeVar_iff (e : SExpr) (amount cutoff : Nat)
 theorem adjust_child_preserves_fvar_lb_zero (e : SExpr) (amount cutoff : Nat)
     (h : fvar_lb_val e = 0) (hbv : BvarsGe e amount cutoff) :
     fvar_lb_val (adjust_child e amount cutoff) = 0 := by
-  -- Case analysis: either e is closed or 0 ∈ e.fvars
   match hfv : e.fvars with
   | [] =>
-    -- e closed → adj e closed → fvar_lb_val = 0
     have hclosed : ∀ i, ¬ Expr.HasFreeVar e.erase i :=
       (fvars_empty_iff_no_hasFreeVar e).mp hfv
     have hclosed' : ∀ k, ¬ Expr.HasFreeVar (adjust_child e amount cutoff).erase k := by
-      intro k hk
-      rw [adjust_child_hasFreeVar_iff e amount cutoff hbv k] at hk
-      rcases hk with ⟨_, h'⟩ | ⟨_, h'⟩
-      · exact hclosed _ h'
-      · exact hclosed _ h'
+      intro k hk; rw [adjust_child_hasFreeVar_iff e amount cutoff hbv k] at hk
+      rcases hk with ⟨_, h'⟩ | ⟨_, h'⟩ <;> exact hclosed _ h'
     have : (adjust_child e amount cutoff).fvars = [] :=
       (fvars_empty_iff_no_hasFreeVar _).mpr hclosed'
     unfold fvar_lb_val; rw [this]
   | d :: rest =>
-    -- d = 0 (from fvar_lb_val = 0)
     have hd : d = 0 := by unfold fvar_lb_val at h; rw [hfv] at h; exact h
-    -- HasFreeVar e.erase 0
     have hext0 : Expr.HasFreeVar e.erase 0 := by
       apply (memAbs_fvars_iff_hasFreeVar e 0).mp
       rw [hfv, hd]; exact FVarList.MemAbs.head _ _
-    -- HasFreeVar (adj e).erase 0
     have hadj0 : Expr.HasFreeVar (adjust_child e amount cutoff).erase 0 := by
       rw [adjust_child_hasFreeVar_iff e amount cutoff hbv 0]
       by_cases hc : cutoff = 0
-      · left
-        subst hc
-        have hsem := hasFreeVar_of_bvarsGe e amount 0 hbv 0 hext0 (Nat.zero_le _)
-        have ham : amount = 0 := by omega
-        subst ham
-        refine ⟨by omega, ?_⟩
-        simpa using hext0
-      · right
-        exact ⟨by omega, hext0⟩
-    -- fvar_lb_val (adj e) = 0
+      · left; subst hc
+        have := hasFreeVar_of_bvarsGe e amount 0 hbv 0 hext0 (Nat.zero_le _)
+        have : amount = 0 := by omega
+        subst this; exact ⟨by omega, by simpa using hext0⟩
+      · exact Or.inr ⟨by omega, hext0⟩
     have hmem : FVarList.MemAbs 0 (adjust_child e amount cutoff).fvars :=
       (memAbs_fvars_iff_hasFreeVar _ 0).mpr hadj0
     match hfv' : (adjust_child e amount cutoff).fvars with
-    | [] => exact absurd hmem (by rw [hfv']; exact FVarList.not_memAbs_nil _)
+    | [] => grind [FVarList.memAbs_nil_iff]
     | d' :: rest' =>
-      have hd' : d' = 0 := by
-        have hle := FVarList.memAbs_ge_head d' 0 rest' (by rw [← hfv']; exact hmem)
-        omega
-      unfold fvar_lb_val; rw [hfv']; exact hd'
+      have := FVarList.memAbs_ge_head d' 0 rest' (by rw [← hfv']; exact hmem)
+      have hd'0 : d' = 0 := by omega
+      show (match (adjust_child e amount cutoff).fvars with
+            | [] => 0 | d :: _ => d) = 0
+      rw [hfv']; exact hd'0
 
 /-- adjust_child preserves fvars non-emptiness. -/
 theorem adjust_child_fvars_nonempty (e : SExpr) (amount cutoff : Nat)
