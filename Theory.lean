@@ -670,20 +670,15 @@ theorem adjust_child_fvars_nonempty (e : SExpr) (amount cutoff : Nat)
   intro habs
   have hclosed := (fvars_empty_iff_no_hasFreeVar _).mp habs
   apply hne
-  apply (fvars_empty_iff_no_hasFreeVar _).mpr
-  intro i hi
+  refine (fvars_empty_iff_no_hasFreeVar _).mpr fun i hi => ?_
   by_cases hic : i ≥ cutoff
-  · have hge := hasFreeVar_of_bvarsGe e amount cutoff hbv i hi hic
-    have hext : Expr.HasFreeVar (adjust_child e amount cutoff).erase (i - amount) := by
-      rw [adjust_child_hasFreeVar_iff e amount cutoff hbv (i - amount)]
-      refine Or.inl ⟨by omega, ?_⟩
-      have : i - amount + amount = i := by omega
-      rw [this]; exact hi
-    exact hclosed _ hext
-  · have hext : Expr.HasFreeVar (adjust_child e amount cutoff).erase i := by
-      rw [adjust_child_hasFreeVar_iff e amount cutoff hbv i]
-      exact Or.inr ⟨by omega, hi⟩
-    exact hclosed _ hext
+  · have := hasFreeVar_of_bvarsGe e amount cutoff hbv i hi hic
+    apply hclosed (i - amount)
+    rw [adjust_child_hasFreeVar_iff e amount cutoff hbv (i - amount)]
+    exact Or.inl ⟨by omega, by rw [show i - amount + amount = i from by omega]; exact hi⟩
+  · apply hclosed i
+    rw [adjust_child_hasFreeVar_iff e amount cutoff hbv i]
+    exact Or.inr ⟨by omega, hi⟩
 
 /-! ### mk_osnf_compound preserves erasure -/
 
