@@ -1,8 +1,8 @@
 /-
 # OSNF (Outermost-Shift Normal Form) — formal model
 
-This file is the **specification** for OSNF. All proofs are `sorry`; the goal
-is a clean-slate attempt.
+Most of the theory is proved. Four `sorry`s remain, all about the
+isOSNF-preservation of `adjust_child` / `mk_osnf_compound`.
 
 ## The canonical form
 
@@ -1090,8 +1090,9 @@ def to_osnf : SExpr → SExpr
 
 /-! ### Main theorems
 
-All proofs are `sorry`. See PLAN.md / the next session for the clean-slate
-proof attempt. -/
+`to_osnf_erase`, `osnf_unique`, `to_osnf_idempotent`, `equiv_iff_osnf_eq` are
+fully proved. `to_osnf_isOSNF` still depends on the isOSNF preservation of
+`adjust_child`/`mk_osnf_compound`, which are `sorry` for now. -/
 
 /-- `to_osnf e` is in OSNF. -/
 theorem to_osnf_isOSNF (e : SExpr) : IsOSNF (to_osnf e) := sorry
