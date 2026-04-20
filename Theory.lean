@@ -411,111 +411,122 @@ def adjust_child (e : SExpr) (amount : Nat) (cutoff : Nat) : SExpr :=
       -- weak case: recurse into inner with reduced cutoff
       shift k (adjust_child inner amount (cutoff - k))
 
-/-! ### BvarsGe: precondition for adjust_child -/
+/-! ### BvarsGe: precondition for adjust_child
 
-inductive BvarsGe : SExpr → Nat → Nat → Prop where
-  | bvar_lt (i amount cutoff : Nat) (h : i < cutoff) : BvarsGe (bvar i) amount cutoff
-  | bvar_ge (i amount cutoff : Nat) (h : i ≥ cutoff + amount) : BvarsGe (bvar i) amount cutoff
-  | app (f a : SExpr) (amount cutoff : Nat)
-    (hf : BvarsGe f amount cutoff) (ha : BvarsGe a amount cutoff) :
-    BvarsGe (app f a) amount cutoff
-  | lam (body : SExpr) (amount cutoff : Nat)
-    (hb : BvarsGe body amount (cutoff + 1)) :
-    BvarsGe (lam body) amount cutoff
-  | const_intro (id amount cutoff : Nat) : BvarsGe (const id) amount cutoff
-  | shift_ge (k : Nat) (inner : SExpr) (amount cutoff : Nat)
-    (hka : k ≥ cutoff + amount) :
-    BvarsGe (shift k inner) amount cutoff
-  | shift_mid (k : Nat) (inner : SExpr) (amount cutoff : Nat)
-    (hge : k ≥ cutoff) (hlt : k < cutoff + amount)
-    (hi : BvarsGe inner (amount + cutoff - k) 0) :
-    BvarsGe (shift k inner) amount cutoff
-  | shift_lt (k : Nat) (inner : SExpr) (amount cutoff : Nat)
-    (hlt : k < cutoff) (hi : BvarsGe inner amount (cutoff - k)) :
-    BvarsGe (shift k inner) amount cutoff
+Defined directly on `fvars`: every free variable of `e` either lies below
+`cutoff` or is at least `cutoff + amount`. -/
+
+def BvarsGe (e : SExpr) (amount cutoff : Nat) : Prop :=
+  ∀ i, FVarList.MemAbs i e.fvars → i ≥ cutoff → i ≥ cutoff + amount
 
 /-! ### adjust_child preserves erasure (under BvarsGe) -/
+
+-- Helpers: project / combine `BvarsGe` at app and lam.
+private theorem bvarsGe_app_left (f a : SExpr) (amount cutoff : Nat)
+    (h : BvarsGe (app f a) amount cutoff) : BvarsGe f amount cutoff := fun i hi =>
+  h i (by simp [fvars, FVarList.memAbs_union_iff, hi])
+
+private theorem bvarsGe_app_right (f a : SExpr) (amount cutoff : Nat)
+    (h : BvarsGe (app f a) amount cutoff) : BvarsGe a amount cutoff := fun i hi =>
+  h i (by simp [fvars, FVarList.memAbs_union_iff, hi])
+
+private theorem bvarsGe_app_of (f a : SExpr) (amount cutoff : Nat)
+    (hf : BvarsGe f amount cutoff) (ha : BvarsGe a amount cutoff) :
+    BvarsGe (app f a) amount cutoff := by
+  intro i hi hic
+  simp only [fvars, FVarList.memAbs_union_iff] at hi
+  rcases hi with h | h
+  · exact hf i h hic
+  · exact ha i h hic
+
+private theorem bvarsGe_lam_of (body : SExpr) (amount cutoff : Nat)
+    (hb : BvarsGe body amount (cutoff + 1)) :
+    BvarsGe (lam body) amount cutoff := by
+  intro i hi hic
+  simp only [fvars, FVarList.memAbs_unbind_iff] at hi
+  have := hb (i + 1) hi (by omega); omega
+
+private theorem bvarsGe_lam_body (body : SExpr) (amount cutoff : Nat)
+    (h : BvarsGe (lam body) amount cutoff) :
+    BvarsGe body amount (cutoff + 1) := by
+  intro i hi hic
+  have hi1 : (i - 1) + 1 = i := by omega
+  have : FVarList.MemAbs (i - 1) (lam body).fvars := by
+    show FVarList.MemAbs (i - 1) (FVarList.unbind body.fvars)
+    rw [FVarList.memAbs_unbind_iff, hi1]; exact hi
+  have := h (i - 1) this (by omega); omega
+
+-- Derived BvarsGe for shift's inner per branch, matching the old constructor cases.
+private theorem bvarsGe_shift_mid (k : Nat) (inner : SExpr) (amount cutoff : Nat)
+    (h : BvarsGe (shift k inner) amount cutoff) (hge : k ≥ cutoff) :
+    BvarsGe inner (amount + cutoff - k) 0 := by
+  intro i hi _
+  have : FVarList.MemAbs (i + k) (shift k inner).fvars := by
+    simp only [fvars, FVarList.memAbs_shift_iff]; exact ⟨i, hi, rfl⟩
+  have := h (i + k) this (by omega); omega
+
+private theorem bvarsGe_shift_lt (k : Nat) (inner : SExpr) (amount cutoff : Nat)
+    (h : BvarsGe (shift k inner) amount cutoff) (hlt : k < cutoff) :
+    BvarsGe inner amount (cutoff - k) := by
+  intro i hi hic
+  have : FVarList.MemAbs (i + k) (shift k inner).fvars := by
+    simp only [fvars, FVarList.memAbs_shift_iff]; exact ⟨i, hi, rfl⟩
+  have := h (i + k) this (by omega); omega
 
 theorem adjust_child_erase (e : SExpr) (amount cutoff : Nat)
     (h : BvarsGe e amount cutoff) :
     (adjust_child e amount cutoff).erase.shift amount cutoff = e.erase := by
-  induction h with
-  | bvar_lt i amount cutoff hlt => grind [adjust_child, erase, Expr.shift]
-  | bvar_ge i amount cutoff hge => grind [adjust_child, erase, Expr.shift]
-  | app f a amount cutoff _hf _ha ihf iha => grind [adjust_child, erase, Expr.shift]
-  | lam body amount cutoff _hb ih => grind [adjust_child, erase, Expr.shift]
-  | const_intro id amount cutoff => rfl
-  | shift_ge k inner amount cutoff hka =>
-    simp only [adjust_child, if_pos hka]
-    by_cases hk0 : k - amount = 0
-    · simp only [hk0, ↓reduceIte, erase]
-      have : k = amount := by omega
-      have : cutoff = 0 := by omega
-      grind [Expr.shift_zero]
-    · simp only [hk0, ↓reduceIte, erase]
-      rw [Expr.shift_shift_comm inner.erase (k - amount) amount 0 cutoff (by omega) (by omega)]
-      grind
-  | shift_mid k inner amount cutoff hge hlt hi ih =>
-    simp only [adjust_child, if_neg (show ¬(k ≥ cutoff + amount) from by omega), if_pos hge]
-    by_cases hc0 : cutoff = 0
-    · subst hc0
-      simp only [↓reduceIte]
-      have : amount = (amount + 0 - k) + k := by omega
-      rw [this, ← Expr.shift_shift]; grind [erase]
-    · simp only [hc0, ↓reduceIte, erase]
-      rw [Expr.shift_shift_comm _ cutoff amount 0 cutoff (by omega) (by omega)]
-      have : cutoff + amount = (amount + cutoff - k) + k := by omega
-      rw [this, ← Expr.shift_shift]; grind [erase]
-  | shift_lt k inner amount cutoff hlt hi ih =>
-    simp only [adjust_child, if_neg (show ¬(k ≥ cutoff + amount) from by omega),
-               if_neg (show ¬(k ≥ cutoff) from by omega), erase]
-    rw [Expr.shift_comm_lt _ k amount cutoff (by omega), ih]
+  induction e generalizing amount cutoff with
+  | bvar i =>
+    simp only [adjust_child, erase]
+    by_cases hic : i ≥ cutoff
+    · have := h i (FVarList.MemAbs.head _ _) hic
+      simp only [hic, ↓reduceIte, erase, Expr.shift,
+        show i - amount ≥ cutoff from by omega]; grind
+    · simp only [hic, ↓reduceIte, erase, Expr.shift, hic]
+  | app f a ihf iha =>
+    simp only [adjust_child, erase, Expr.shift,
+      ihf amount cutoff (bvarsGe_app_left f a amount cutoff h),
+      iha amount cutoff (bvarsGe_app_right f a amount cutoff h)]
+  | lam body ih =>
+    simp only [adjust_child, erase, Expr.shift,
+      ih amount (cutoff + 1) (bvarsGe_lam_body body amount cutoff h)]
+  | const id => rfl
+  | shift k inner ih =>
+    simp only [adjust_child]
+    by_cases hka : k ≥ cutoff + amount
+    · simp only [if_pos hka]
+      by_cases hk0 : k - amount = 0
+      · simp only [hk0, ↓reduceIte, erase]
+        have : k = amount := by omega
+        have : cutoff = 0 := by omega
+        grind [Expr.shift_zero]
+      · simp only [hk0, ↓reduceIte, erase]
+        rw [Expr.shift_shift_comm inner.erase (k - amount) amount 0 cutoff (by omega) (by omega)]
+        grind
+    by_cases hkc : k ≥ cutoff
+    · simp only [if_neg hka, if_pos hkc]
+      have hi := bvarsGe_shift_mid k inner amount cutoff h hkc
+      by_cases hc0 : cutoff = 0
+      · subst hc0
+        simp only [↓reduceIte]
+        have : amount = (amount + 0 - k) + k := by omega
+        rw [this, ← Expr.shift_shift]; grind [erase, ih (amount + 0 - k) 0 hi]
+      · simp only [hc0, ↓reduceIte, erase]
+        rw [Expr.shift_shift_comm _ cutoff amount 0 cutoff (by omega) (by omega)]
+        have : cutoff + amount = (amount + cutoff - k) + k := by omega
+        rw [this, ← Expr.shift_shift]; grind [erase, ih (amount + cutoff - k) 0 hi]
+    · simp only [if_neg hka, if_neg hkc, erase]
+      have hi := bvarsGe_shift_lt k inner amount cutoff h (by omega)
+      rw [Expr.shift_comm_lt _ k amount cutoff (by omega), ih amount (cutoff - k) hi]
 
 /-! ### BvarsGe semantic characterisation -/
 
-/-- From an HasFreeVar-based semantic bound, produce a structural BvarsGe. -/
+/-- From an HasFreeVar-based semantic bound, produce a `BvarsGe`. -/
 theorem bvarsGe_of_extSemantic (e : SExpr) (amount cutoff : Nat)
     (h : ∀ i, Expr.HasFreeVar e.erase i → i ≥ cutoff → i ≥ cutoff + amount) :
-    BvarsGe e amount cutoff := by
-  induction e generalizing amount cutoff with
-  | bvar j =>
-    by_cases hjc : j ≥ cutoff
-    · exact BvarsGe.bvar_ge j amount cutoff (h j (Expr.HasFreeVar.bvar j) hjc)
-    · exact BvarsGe.bvar_lt j amount cutoff (by omega)
-  | const n => exact BvarsGe.const_intro n amount cutoff
-  | app f a ihf iha =>
-    refine BvarsGe.app f a amount cutoff (ihf amount cutoff ?_) (iha amount cutoff ?_)
-    · grind [Expr.HasFreeVar.app_left, erase]
-    · grind [Expr.HasFreeVar.app_right, erase]
-  | lam body ih =>
-    refine BvarsGe.lam body amount cutoff (ih amount (cutoff + 1) ?_)
-    intro i hi hic
-    have : Expr.HasFreeVar (lam body).erase (i - 1) := by
-      have : (i - 1) + 1 = i := by omega
-      grind [erase]
-    have := h (i - 1) this (by omega); omega
-  | shift k inner ih =>
-    by_cases hk1 : k ≥ cutoff + amount
-    · exact BvarsGe.shift_ge k inner amount cutoff hk1
-    by_cases hk2 : k ≥ cutoff
-    · refine BvarsGe.shift_mid k inner amount cutoff hk2 (by omega) ?_
-      refine ih (amount + cutoff - k) 0 ?_
-      intro i hi _
-      have hext : Expr.HasFreeVar (inner.erase.shift k 0) (i + k) := by
-        have := Expr.hasFreeVar_shift_bwd inner.erase i hi k 0
-        simp only [show i ≥ 0 from Nat.zero_le _, ↓reduceIte] at this
-        exact this
-      have := h (i + k) hext (by omega)
-      omega
-    · refine BvarsGe.shift_lt k inner amount cutoff (by omega) ?_
-      refine ih amount (cutoff - k) ?_
-      intro i hi hic
-      have hext : Expr.HasFreeVar (inner.erase.shift k 0) (i + k) := by
-        have := Expr.hasFreeVar_shift_bwd inner.erase i hi k 0
-        simp only [show i ≥ 0 from Nat.zero_le _, ↓reduceIte] at this
-        exact this
-      have := h (i + k) hext (by omega)
-      omega
+    BvarsGe e amount cutoff := fun i hi =>
+  h i ((memAbs_fvars_iff_hasFreeVar e i).mp hi)
 
 /-- All external free vars of e.erase are ≥ fvar_lb_val e. -/
 theorem bvarsGe_fvar_lb (e : SExpr) : BvarsGe e (fvar_lb_val e) 0 := by
@@ -566,22 +577,8 @@ def mk_osnf_compound (e : SExpr) : SExpr :=
 /-- BvarsGe implies the semantic extent constraint. -/
 theorem hasFreeVar_of_bvarsGe (e : SExpr) (amount cutoff : Nat)
     (h : BvarsGe e amount cutoff) :
-    ∀ i, Expr.HasFreeVar e.erase i → i ≥ cutoff → i ≥ cutoff + amount := by
-  induction h with
-  | bvar_lt => grind [erase]
-  | bvar_ge => grind [erase]
-  | app _ _ _ _ _ _ ihf iha => grind [erase]
-  | lam body amount cutoff hb ih =>
-    intro i hi hic
-    have := ih (i + 1) (by grind [erase]) (by omega); omega
-  | const_intro => grind [erase]
-  | shift_ge k inner amount cutoff hka =>
-    intro i hi _; have := Expr.hasFreeVar_shift_zero_ge inner.erase k i hi; omega
-  | shift_mid k inner _ _ _ _ _ ih | shift_lt k inner _ _ _ _ ih =>
-    intro i hi_ext hic
-    rcases Expr.hasFreeVar_shift_extract inner.erase k 0 i hi_ext with ⟨hinner, _⟩ | ⟨_, _⟩
-    · have := ih (i - k) hinner (by omega); omega
-    · omega
+    ∀ i, Expr.HasFreeVar e.erase i → i ≥ cutoff → i ≥ cutoff + amount := fun i hi =>
+  h i ((memAbs_fvars_iff_hasFreeVar e i).mpr hi)
 
 /-! ### Semantic characterisation of adjust_child's external free vars -/
 
@@ -701,14 +698,13 @@ theorem adjust_child_preserves_osnf (e : SExpr) (amount cutoff : Nat)
     split <;> grind [IsOSNF.bvar0]
   | const id => exact IsOSNF.const id
   | app f a hf ha hlb ihf iha =>
-    have hbvf : BvarsGe f amount cutoff := by cases hbvars with | app _ _ _ _ hf' _ => exact hf'
-    have hbva : BvarsGe a amount cutoff := by cases hbvars with | app _ _ _ _ _ ha' => exact ha'
-    exact IsOSNF.app _ _ (ihf amount cutoff hbvf) (iha amount cutoff hbva)
+    exact IsOSNF.app _ _
+      (ihf amount cutoff (bvarsGe_app_left f a amount cutoff hbvars))
+      (iha amount cutoff (bvarsGe_app_right f a amount cutoff hbvars))
       (adjust_child_preserves_fvar_lb_zero (app f a) amount cutoff hlb hbvars)
   | lam body hb hlb ih =>
-    have hbvb : BvarsGe body amount (cutoff + 1) := by
-      cases hbvars with | lam _ _ _ hb' => exact hb'
-    exact IsOSNF.lam _ (ih amount (cutoff + 1) hbvb)
+    exact IsOSNF.lam _
+      (ih amount (cutoff + 1) (bvarsGe_lam_body body amount cutoff hbvars))
       (adjust_child_preserves_fvar_lb_zero (lam body) amount cutoff hlb hbvars)
   | shifted n core hn hc hlb_core hfv_core ih_core =>
     show IsOSNF (if n ≥ cutoff + amount then
@@ -717,24 +713,23 @@ theorem adjust_child_preserves_osnf (e : SExpr) (amount cutoff : Nat)
                   (let inner' := adjust_child core (amount + cutoff - n) 0
                    if cutoff = 0 then inner' else shift cutoff inner')
                 else shift n (adjust_child core amount (cutoff - n)))
-    cases hbvars with
-    | shift_ge _ _ _ _ hka =>
-      simp only [if_pos hka]
+    by_cases hka : n ≥ cutoff + amount
+    · simp only [if_pos hka]
       by_cases hk0 : n - amount = 0 <;>
         simp only [hk0, ↓reduceIte] <;>
         first | exact hc |
           exact IsOSNF.shifted (n - amount) core (by omega) hc hlb_core hfv_core
-    | shift_mid _ _ _ _ hge hlt hi =>
-      simp only [if_neg (show ¬(n ≥ cutoff + amount) from by omega), if_pos hge]
+    by_cases hkc : n ≥ cutoff
+    · simp only [if_neg hka, if_pos hkc]
+      have hi := bvarsGe_shift_mid n core amount cutoff hbvars hkc
       by_cases hc0 : cutoff = 0
       · subst hc0; simp only [↓reduceIte]; exact ih_core _ _ hi
       · simp only [hc0, ↓reduceIte]
         exact IsOSNF.shifted cutoff _ (by omega) (ih_core _ _ hi)
           (adjust_child_preserves_fvar_lb_zero core _ 0 hlb_core hi)
           (adjust_child_fvars_nonempty core _ 0 hi hfv_core)
-    | shift_lt _ _ _ _ hlt hi =>
-      simp only [if_neg (show ¬(n ≥ cutoff + amount) from by omega),
-                 if_neg (show ¬(n ≥ cutoff) from by omega)]
+    · simp only [if_neg hka, if_neg hkc]
+      have hi := bvarsGe_shift_lt n core amount cutoff hbvars (by omega)
       exact IsOSNF.shifted n _ hn (ih_core amount (cutoff - n) hi)
         (adjust_child_preserves_fvar_lb_zero core amount (cutoff - n) hlb_core hi)
         (adjust_child_fvars_nonempty core amount (cutoff - n) hi hfv_core)
@@ -785,7 +780,7 @@ theorem mk_osnf_compound_app_isOSNF (f a : SExpr) (hf : IsOSNF f) (ha : IsOSNF a
       intro habs; unfold fvar_lb_val at hlb; rw [habs] at hlb; exact hlb rfl
     have hbvf := bvarsGe_child_app_left f a
     have hbva := bvarsGe_child_app_right f a
-    have hbv_app := BvarsGe.app _ _ _ _ hbvf hbva
+    have hbv_app := bvarsGe_app_of f a _ 0 hbvf hbva
     have h_ext_0 :
         Expr.HasFreeVar (adjust_child (app f a) (fvar_lb_val (app f a)) 0).erase 0 := by
       rw [adjust_child_hasFreeVar_iff (app f a) _ 0 hbv_app 0]
@@ -808,7 +803,7 @@ theorem mk_osnf_compound_lam_isOSNF (body : SExpr) (hb : IsOSNF body) :
     have hne : (lam body).fvars ≠ [] := by
       intro habs; unfold fvar_lb_val at hlb; rw [habs] at hlb; exact hlb rfl
     have hbvb := bvarsGe_child_lam body
-    have hbv_lam := BvarsGe.lam _ _ _ hbvb
+    have hbv_lam := bvarsGe_lam_of body _ 0 hbvb
     have h_ext_0 :
         Expr.HasFreeVar (adjust_child (lam body) (fvar_lb_val (lam body)) 0).erase 0 := by
       rw [adjust_child_hasFreeVar_iff (lam body) _ 0 hbv_lam 0]
