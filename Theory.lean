@@ -423,55 +423,42 @@ def BvarsGe (e : SExpr) (amount cutoff : Nat) : Prop :=
 
 -- Helpers: project / combine `BvarsGe` at app and lam.
 private theorem bvarsGe_app_left (f a : SExpr) (amount cutoff : Nat)
-    (h : BvarsGe (app f a) amount cutoff) : BvarsGe f amount cutoff := fun i hi =>
-  h i (by simp [fvars, FVarList.memAbs_union_iff, hi])
+    (h : BvarsGe (app f a) amount cutoff) : BvarsGe f amount cutoff := by
+  intro i hi; exact h i (by grind [fvars, FVarList.memAbs_union_iff])
 
 private theorem bvarsGe_app_right (f a : SExpr) (amount cutoff : Nat)
-    (h : BvarsGe (app f a) amount cutoff) : BvarsGe a amount cutoff := fun i hi =>
-  h i (by simp [fvars, FVarList.memAbs_union_iff, hi])
+    (h : BvarsGe (app f a) amount cutoff) : BvarsGe a amount cutoff := by
+  intro i hi; exact h i (by grind [fvars, FVarList.memAbs_union_iff])
 
 private theorem bvarsGe_app_of (f a : SExpr) (amount cutoff : Nat)
     (hf : BvarsGe f amount cutoff) (ha : BvarsGe a amount cutoff) :
     BvarsGe (app f a) amount cutoff := by
-  intro i hi hic
-  simp only [fvars, FVarList.memAbs_union_iff] at hi
-  rcases hi with h | h
-  · exact hf i h hic
-  · exact ha i h hic
+  intro i hi hic; grind [BvarsGe, fvars, FVarList.memAbs_union_iff]
 
 private theorem bvarsGe_lam_of (body : SExpr) (amount cutoff : Nat)
     (hb : BvarsGe body amount (cutoff + 1)) :
     BvarsGe (lam body) amount cutoff := by
   intro i hi hic
-  simp only [fvars, FVarList.memAbs_unbind_iff] at hi
-  have := hb (i + 1) hi (by omega); omega
+  have := hb (i + 1) (by grind [fvars, FVarList.memAbs_unbind_iff]) (by omega); omega
 
 private theorem bvarsGe_lam_body (body : SExpr) (amount cutoff : Nat)
     (h : BvarsGe (lam body) amount cutoff) :
     BvarsGe body amount (cutoff + 1) := by
   intro i hi hic
-  have hi1 : (i - 1) + 1 = i := by omega
-  have : FVarList.MemAbs (i - 1) (lam body).fvars := by
-    show FVarList.MemAbs (i - 1) (FVarList.unbind body.fvars)
-    rw [FVarList.memAbs_unbind_iff, hi1]; exact hi
-  have := h (i - 1) this (by omega); omega
+  have := h (i - 1) (by grind [fvars, FVarList.memAbs_unbind_iff]) (by omega); omega
 
 -- Derived BvarsGe for shift's inner per branch, matching the old constructor cases.
 private theorem bvarsGe_shift_mid (k : Nat) (inner : SExpr) (amount cutoff : Nat)
     (h : BvarsGe (shift k inner) amount cutoff) (hge : k ≥ cutoff) :
     BvarsGe inner (amount + cutoff - k) 0 := by
   intro i hi _
-  have : FVarList.MemAbs (i + k) (shift k inner).fvars := by
-    simp only [fvars, FVarList.memAbs_shift_iff]; exact ⟨i, hi, rfl⟩
-  have := h (i + k) this (by omega); omega
+  have := h (i + k) (by grind [fvars, FVarList.memAbs_shift_iff]) (by omega); omega
 
 private theorem bvarsGe_shift_lt (k : Nat) (inner : SExpr) (amount cutoff : Nat)
     (h : BvarsGe (shift k inner) amount cutoff) (hlt : k < cutoff) :
     BvarsGe inner amount (cutoff - k) := by
   intro i hi hic
-  have : FVarList.MemAbs (i + k) (shift k inner).fvars := by
-    simp only [fvars, FVarList.memAbs_shift_iff]; exact ⟨i, hi, rfl⟩
-  have := h (i + k) this (by omega); omega
+  have := h (i + k) (by grind [fvars, FVarList.memAbs_shift_iff]) (by omega); omega
 
 theorem adjust_child_erase (e : SExpr) (amount cutoff : Nat)
     (h : BvarsGe e amount cutoff) :
