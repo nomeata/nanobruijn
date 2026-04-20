@@ -693,6 +693,49 @@ theorem memAbs_fvars_iff_extFreeVar (e : SExpr) (i : Nat) :
         omega
       · omega
 
+/-- `e.fvars = []` iff the erasure has no external free bvars. -/
+theorem fvars_empty_iff_no_extFreeVar (e : SExpr) :
+    e.fvars = [] ↔ ∀ i, ¬ Expr.ExtFreeVar e.erase i := by
+  constructor
+  · intro h i hext
+    have := (memAbs_fvars_iff_extFreeVar e i).mpr hext
+    rw [h] at this
+    exact FVarList.not_memAbs_nil _ this
+  · intro h
+    match hfv : e.fvars with
+    | [] => rfl
+    | d :: rest =>
+      exfalso
+      have : FVarList.MemAbs d e.fvars := by rw [hfv]; exact FVarList.MemAbs.head _ _
+      exact h d ((memAbs_fvars_iff_extFreeVar e d).mp this)
+
+/-- If fvar_lb_val is 0 and fvars is non-empty, 0 is an external free var. -/
+theorem fvar_lb_zero_has_extFreeVar_zero (e : SExpr)
+    (hlb : fvar_lb_val e = 0) (hne : e.fvars ≠ []) :
+    Expr.ExtFreeVar e.erase 0 := by
+  apply (memAbs_fvars_iff_extFreeVar e 0).mp
+  match hfv : e.fvars with
+  | [] => exact absurd hfv hne
+  | d :: rest =>
+    have hd : d = 0 := by
+      unfold fvar_lb_val at hlb
+      rw [hfv] at hlb
+      exact hlb
+    rw [hd]
+    exact FVarList.MemAbs.head _ _
+
+/-- If fvar_lb_val = k, then all external free vars are ≥ k. -/
+theorem extFreeVar_ge_fvar_lb (e : SExpr) (i : Nat)
+    (h : Expr.ExtFreeVar e.erase i) :
+    i ≥ fvar_lb_val e := by
+  have hmem : FVarList.MemAbs i e.fvars := (memAbs_fvars_iff_extFreeVar e i).mpr h
+  match hfv : e.fvars with
+  | [] => rw [hfv] at hmem; exact absurd hmem (FVarList.not_memAbs_nil _)
+  | d :: rest =>
+    unfold fvar_lb_val; rw [hfv]
+    rw [hfv] at hmem
+    exact FVarList.memAbs_ge_head d i rest hmem
+
 /-! ### OSNF definition
 
 `bvar 0` and `const id` are the only leaves. `bvar i` with `i > 0` is
