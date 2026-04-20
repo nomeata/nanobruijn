@@ -553,6 +553,40 @@ theorem extFreeVar_shift_bwd (e : Expr) (j : Nat) (h : ExtFreeVar e j) (n c : Na
       simp only [show ¬(k + 1 ≥ c + 1) from by omega, ↓reduceIte] at ih'
       exact ih'
 
+/-- If all external free vars of e are below c, shift at cutoff c is a no-op. -/
+theorem shift_eq_of_extFreeVars_lt (e : Expr) (k c : Nat)
+    (h : ∀ j, ExtFreeVar e j → j < c) : e.shift k c = e := by
+  induction e generalizing c with
+  | bvar i =>
+    simp only [shift]
+    split
+    · rename_i hic
+      exfalso; exact absurd (h i (ExtFreeVar.bvar _)) (by omega)
+    · rfl
+  | app f a ihf iha =>
+    simp only [shift]
+    rw [ihf c (fun j hj => h j (ExtFreeVar.app_left hj))]
+    rw [iha c (fun j hj => h j (ExtFreeVar.app_right hj))]
+  | lam body ih =>
+    simp only [shift]
+    refine congrArg Expr.lam (ih (c + 1) ?_)
+    intro j hj
+    by_cases hj0 : j = 0
+    · omega
+    · have hj1 : j ≥ 1 := by omega
+      have : ExtFreeVar (Expr.lam body) (j - 1) := by
+        have heq : (j - 1) + 1 = j := by omega
+        rw [← heq] at hj
+        exact ExtFreeVar.lam hj
+      have := h (j - 1) this
+      omega
+  | const _ => rfl
+
+/-- Specialisation: closed (no ExtFreeVar) expression shift at cutoff 0 is a no-op. -/
+theorem shift_eq_of_no_extFreeVar (e : Expr) (k : Nat)
+    (h : ∀ j, ¬ ExtFreeVar e j) : e.shift k 0 = e :=
+  shift_eq_of_extFreeVars_lt e k 0 (fun j hj => absurd hj (h j))
+
 theorem shift_injective (k c : Nat) : ∀ (e₁ e₂ : Expr),
     e₁.shift k c = e₂.shift k c → e₁ = e₂ := by
   intro e₁
@@ -1063,7 +1097,66 @@ proof attempt. -/
 theorem to_osnf_isOSNF (e : SExpr) : IsOSNF (to_osnf e) := sorry
 
 /-- `to_osnf` preserves denotation. -/
-theorem to_osnf_erase (e : SExpr) : (to_osnf e).erase = e.erase := sorry
+theorem to_osnf_erase (e : SExpr) : (to_osnf e).erase = e.erase := by
+  induction e with
+  | bvar i =>
+    simp only [to_osnf]
+    split
+    · rename_i hi0; subst hi0; rfl
+    · rename_i hi0
+      show (Expr.bvar 0).shift i 0 = Expr.bvar i
+      simp only [Expr.shift, show 0 ≥ 0 from Nat.zero_le _, ↓reduceIte, Nat.zero_add]
+  | const id => rfl
+  | app f a ihf iha =>
+    show (mk_osnf_compound (app f.to_osnf a.to_osnf)).erase = Expr.app f.erase a.erase
+    rw [mk_osnf_compound_erase_app]
+    show Expr.app (f.to_osnf).erase (a.to_osnf).erase = Expr.app f.erase a.erase
+    rw [ihf, iha]
+  | lam body ih =>
+    show (mk_osnf_compound (lam body.to_osnf)).erase = Expr.lam body.erase
+    rw [mk_osnf_compound_erase_lam]
+    show Expr.lam (body.to_osnf).erase = Expr.lam body.erase
+    rw [ih]
+  | shift k inner ih =>
+    show (match inner.to_osnf with
+      | shift m core => if k + m = 0 then core else shift (k + m) core
+      | e => if k = 0 then e else match e.fvars with | [] => e | _ => shift k e).erase
+         = inner.erase.shift k 0
+    split
+    · rename_i m core heq
+      have ih' : (shift m core).erase = inner.erase := by rw [← heq]; exact ih
+      split
+      · rename_i hkm
+        have hk0 : k = 0 := by omega
+        have hm0 : m = 0 := by omega
+        subst hk0; subst hm0
+        rw [SExpr.erase, Expr.shift_zero] at ih'
+        rw [ih', Expr.shift_zero]
+      · rename_i hkm
+        rw [SExpr.erase]
+        rw [SExpr.erase] at ih'
+        rw [← ih', Expr.shift_shift]
+        congr 1; omega
+    · rename_i e hnotShift
+      split
+      · rename_i hk0; subst hk0
+        rw [ih, Expr.shift_zero]
+      · rename_i hk0
+        -- e = inner.to_osnf, not a shift. match e.fvars
+        have : ∀ (fvs : FVarList), inner.to_osnf.fvars = fvs →
+            (match fvs with | [] => inner.to_osnf | _ => shift k (inner.to_osnf)).erase
+              = inner.erase.shift k 0 := by
+          intro fvs hfvs
+          match fvs with
+          | [] =>
+            show inner.to_osnf.erase = inner.erase.shift k 0
+            have hclosed := (fvars_empty_iff_no_extFreeVar inner.to_osnf).mp hfvs
+            rw [← ih]
+            exact (Expr.shift_eq_of_no_extFreeVar inner.to_osnf.erase k hclosed).symm
+          | d :: rest =>
+            show (shift k inner.to_osnf).erase = inner.erase.shift k 0
+            rw [SExpr.erase, ih]
+        exact this _ rfl
 
 /-- **Uniqueness of OSNF**: If two expressions in OSNF denote the same term,
     they are syntactically equal. -/
