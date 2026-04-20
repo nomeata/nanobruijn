@@ -1146,6 +1146,28 @@ theorem adjust_child_preserves_fvar_lb_zero (e : SExpr) (amount cutoff : Nat)
         omega
       unfold fvar_lb_val; rw [hfv']; exact hd'
 
+/-- adjust_child preserves fvars non-emptiness. -/
+theorem adjust_child_fvars_nonempty (e : SExpr) (amount cutoff : Nat)
+    (hbv : BvarsGe e amount cutoff) (hne : e.fvars ≠ []) :
+    (adjust_child e amount cutoff).fvars ≠ [] := by
+  intro habs
+  have hclosed := (fvars_empty_iff_no_extFreeVar _).mp habs
+  apply hne
+  apply (fvars_empty_iff_no_extFreeVar _).mpr
+  intro i hi
+  by_cases hic : i ≥ cutoff
+  · have hge := extFreeVar_of_bvarsGe e amount cutoff hbv i hi hic
+    have hext : Expr.ExtFreeVar (adjust_child e amount cutoff).erase (i - amount) := by
+      rw [adjust_child_extFreeVar_iff e amount cutoff hbv (i - amount)]
+      refine Or.inl ⟨by omega, ?_⟩
+      have : i - amount + amount = i := by omega
+      rw [this]; exact hi
+    exact hclosed _ hext
+  · have hext : Expr.ExtFreeVar (adjust_child e amount cutoff).erase i := by
+      rw [adjust_child_extFreeVar_iff e amount cutoff hbv i]
+      exact Or.inr ⟨by omega, hi⟩
+    exact hclosed _ hext
+
 /-! ### mk_osnf_compound preserves erasure -/
 
 theorem mk_osnf_compound_erase_app (f a : SExpr) :
@@ -1185,7 +1207,75 @@ theorem mk_osnf_compound_erase_lam (body : SExpr) :
 theorem adjust_child_preserves_osnf (e : SExpr) (amount cutoff : Nat)
     (h : IsOSNF e) (hbvars : BvarsGe e amount cutoff) :
     IsOSNF (adjust_child e amount cutoff) := by
-  sorry  -- Placeholder; will fill next
+  induction h generalizing amount cutoff with
+  | bvar0 =>
+    -- adjust_child (bvar 0) amount cutoff = bvar 0 regardless
+    show IsOSNF (if 0 ≥ cutoff then bvar (0 - amount) else bvar 0)
+    split
+    · show IsOSNF (bvar (0 - amount))
+      have : 0 - amount = 0 := by omega
+      rw [this]
+      exact IsOSNF.bvar0
+    · exact IsOSNF.bvar0
+  | const id =>
+    show IsOSNF (const id)
+    exact IsOSNF.const id
+  | app f a hf ha hlb ihf iha =>
+    have hbvf : BvarsGe f amount cutoff := by
+      cases hbvars with | app _ _ _ _ hf' _ => exact hf'
+    have hbva : BvarsGe a amount cutoff := by
+      cases hbvars with | app _ _ _ _ _ ha' => exact ha'
+    have hadjf : IsOSNF (adjust_child f amount cutoff) := ihf amount cutoff hbvf
+    have hadja : IsOSNF (adjust_child a amount cutoff) := iha amount cutoff hbva
+    have hlb' : fvar_lb_val (adjust_child (app f a) amount cutoff) = 0 :=
+      adjust_child_preserves_fvar_lb_zero (app f a) amount cutoff hlb hbvars
+    show IsOSNF (app (adjust_child f amount cutoff) (adjust_child a amount cutoff))
+    exact IsOSNF.app _ _ hadjf hadja hlb'
+  | lam body hb hlb ih =>
+    have hbvb : BvarsGe body amount (cutoff + 1) := by
+      cases hbvars with | lam _ _ _ hb' => exact hb'
+    have hadjb : IsOSNF (adjust_child body amount (cutoff + 1)) := ih amount (cutoff + 1) hbvb
+    have hlb' : fvar_lb_val (adjust_child (lam body) amount cutoff) = 0 :=
+      adjust_child_preserves_fvar_lb_zero (lam body) amount cutoff hlb hbvars
+    show IsOSNF (lam (adjust_child body amount (cutoff + 1)))
+    exact IsOSNF.lam _ hadjb hlb'
+  | shifted n core hn hc hlb_core hfv_core ih_core =>
+    -- adjust_child (shift n core) amount cutoff has 3 branches
+    show IsOSNF (if n ≥ cutoff + amount then
+                  (let k' := n - amount; if k' = 0 then core else shift k' core)
+                else if n ≥ cutoff then
+                  (let inner' := adjust_child core (amount + cutoff - n) 0
+                   if cutoff = 0 then inner' else shift cutoff inner')
+                else shift n (adjust_child core amount (cutoff - n)))
+    cases hbvars with
+    | shift_ge _ _ _ _ hka =>
+      simp only [if_pos hka]
+      by_cases hk0 : n - amount = 0
+      · simp only [hk0, ↓reduceIte]
+        exact hc
+      · simp only [hk0, ↓reduceIte]
+        exact IsOSNF.shifted (n - amount) core (by omega) hc hlb_core hfv_core
+    | shift_mid _ _ _ _ hge hlt hi =>
+      simp only [if_neg (show ¬(n ≥ cutoff + amount) from by omega), if_pos hge]
+      by_cases hc0 : cutoff = 0
+      · subst hc0
+        simp only [↓reduceIte]
+        -- Output: adjust_child core (amount + 0 - n) 0
+        exact ih_core _ _ hi
+      · simp only [hc0, ↓reduceIte]
+        -- Output: shift cutoff (adjust_child core (amount + cutoff - n) 0)
+        have hadjc := ih_core _ _ hi
+        have hlb' := adjust_child_preserves_fvar_lb_zero core _ 0 hlb_core hi
+        have hfv' := adjust_child_fvars_nonempty core _ 0 hi hfv_core
+        exact IsOSNF.shifted cutoff _ (by omega) hadjc hlb' hfv'
+    | shift_lt _ _ _ _ hlt hi =>
+      simp only [if_neg (show ¬(n ≥ cutoff + amount) from by omega),
+                 if_neg (show ¬(n ≥ cutoff) from by omega)]
+      -- Output: shift n (adjust_child core amount (cutoff - n))
+      have hadjc := ih_core amount (cutoff - n) hi
+      have hlb' := adjust_child_preserves_fvar_lb_zero core amount (cutoff - n) hlb_core hi
+      have hfv' := adjust_child_fvars_nonempty core amount (cutoff - n) hi hfv_core
+      exact IsOSNF.shifted n _ hn hadjc hlb' hfv'
 
 theorem mk_osnf_compound_app_isOSNF (f a : SExpr) (hf : IsOSNF f) (ha : IsOSNF a) :
     IsOSNF (mk_osnf_compound (app f a)) := by
