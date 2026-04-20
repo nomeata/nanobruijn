@@ -759,7 +759,7 @@ inductive IsOSNF : SExpr → Prop where
 
 /-- Adjust a child expression by subtracting `amount` from free variable
     indices at or above `cutoff`. Recurses into compound expressions (app/lam).
-    Precondition: all free variable indices `≥ cutoff` are also `≥ cutoff + amount`. -/
+    Precondition: `BvarsGe e amount cutoff`. -/
 def adjust_child (e : SExpr) (amount : Nat) (cutoff : Nat) : SExpr :=
   match e with
   | bvar i => if i ≥ cutoff then bvar (i - amount) else bvar i
@@ -767,11 +767,112 @@ def adjust_child (e : SExpr) (amount : Nat) (cutoff : Nat) : SExpr :=
   | lam body => lam (adjust_child body amount (cutoff + 1))
   | const id => const id
   | shift k inner =>
-    if k ≥ cutoff then
+    if k ≥ cutoff + amount then
+      -- strong case: outer shift handles the drop
       let k' := k - amount
       if k' = 0 then inner else shift k' inner
+    else if k ≥ cutoff then
+      -- middle case: absorb part of outer shift, recurse with reduced amount
+      let inner' := adjust_child inner (amount + cutoff - k) 0
+      if cutoff = 0 then inner' else shift cutoff inner'
     else
+      -- weak case: recurse into inner with reduced cutoff
       shift k (adjust_child inner amount (cutoff - k))
+
+/-! ### BvarsGe: precondition for adjust_child -/
+
+inductive BvarsGe : SExpr → Nat → Nat → Prop where
+  | bvar_lt (i amount cutoff : Nat) (h : i < cutoff) : BvarsGe (bvar i) amount cutoff
+  | bvar_ge (i amount cutoff : Nat) (h : i ≥ cutoff + amount) : BvarsGe (bvar i) amount cutoff
+  | app (f a : SExpr) (amount cutoff : Nat)
+    (hf : BvarsGe f amount cutoff) (ha : BvarsGe a amount cutoff) :
+    BvarsGe (app f a) amount cutoff
+  | lam (body : SExpr) (amount cutoff : Nat)
+    (hb : BvarsGe body amount (cutoff + 1)) :
+    BvarsGe (lam body) amount cutoff
+  | const_intro (id amount cutoff : Nat) : BvarsGe (const id) amount cutoff
+  | shift_ge (k : Nat) (inner : SExpr) (amount cutoff : Nat)
+    (hka : k ≥ cutoff + amount) :
+    BvarsGe (shift k inner) amount cutoff
+  | shift_mid (k : Nat) (inner : SExpr) (amount cutoff : Nat)
+    (hge : k ≥ cutoff) (hlt : k < cutoff + amount)
+    (hi : BvarsGe inner (amount + cutoff - k) 0) :
+    BvarsGe (shift k inner) amount cutoff
+  | shift_lt (k : Nat) (inner : SExpr) (amount cutoff : Nat)
+    (hlt : k < cutoff) (hi : BvarsGe inner amount (cutoff - k)) :
+    BvarsGe (shift k inner) amount cutoff
+
+/-! ### adjust_child preserves erasure (under BvarsGe) -/
+
+theorem adjust_child_erase (e : SExpr) (amount cutoff : Nat)
+    (h : BvarsGe e amount cutoff) :
+    (adjust_child e amount cutoff).erase.shift amount cutoff = e.erase := by
+  induction h with
+  | bvar_lt i amount cutoff hlt =>
+    show ((if i ≥ cutoff then bvar (i - amount) else bvar i) : SExpr).erase.shift amount cutoff = _
+    rw [if_neg (show ¬(i ≥ cutoff) by omega)]
+    show (Expr.bvar i).shift amount cutoff = Expr.bvar i
+    simp only [Expr.shift, show ¬(i ≥ cutoff) from by omega, ↓reduceIte]
+  | bvar_ge i amount cutoff hge =>
+    show ((if i ≥ cutoff then bvar (i - amount) else bvar i) : SExpr).erase.shift amount cutoff = _
+    rw [if_pos (show i ≥ cutoff by omega)]
+    show (Expr.bvar (i - amount)).shift amount cutoff = Expr.bvar i
+    simp only [Expr.shift, show i - amount ≥ cutoff from by omega, ↓reduceIte]
+    congr 1; omega
+  | app f a amount cutoff _hf _ha ihf iha =>
+    show (Expr.app (adjust_child f amount cutoff).erase
+          (adjust_child a amount cutoff).erase).shift amount cutoff
+         = Expr.app f.erase a.erase
+    rw [Expr.shift]; congr 1 <;> assumption
+  | lam body amount cutoff _hb ih =>
+    show (Expr.lam (adjust_child body amount (cutoff + 1)).erase).shift amount cutoff
+         = Expr.lam body.erase
+    rw [Expr.shift]; exact congrArg Expr.lam ih
+  | const_intro id amount cutoff =>
+    show (Expr.const id).shift amount cutoff = Expr.const id
+    rfl
+  | shift_ge k inner amount cutoff hka =>
+    simp only [adjust_child, if_pos hka]
+    by_cases hk0 : k - amount = 0
+    · simp only [hk0, ↓reduceIte]
+      have hkeq : k = amount := by omega
+      have hc0 : cutoff = 0 := by omega
+      subst hkeq; subst hc0
+      simp only [erase]
+    · rw [if_neg hk0]
+      show ((inner.erase.shift (k - amount) 0).shift amount cutoff : Expr) = _
+      rw [Expr.shift_shift_comm inner.erase (k - amount) amount 0 cutoff
+            (by omega) (by omega)]
+      congr 1; omega
+  | shift_mid k inner amount cutoff hge hlt hi ih =>
+    simp only [adjust_child, if_neg (show ¬(k ≥ cutoff + amount) from by omega),
+               if_pos hge]
+    by_cases hc0 : cutoff = 0
+    · subst hc0
+      simp only [↓reduceIte]
+      have hshift : amount + 0 - k + k = amount := by omega
+      calc (adjust_child inner (amount + 0 - k) 0).erase.shift amount 0
+          = (adjust_child inner (amount + 0 - k) 0).erase.shift (amount + 0 - k + k) 0 := by
+            rw [hshift]
+        _ = ((adjust_child inner (amount + 0 - k) 0).erase.shift (amount + 0 - k) 0).shift k 0 := by
+            rw [Expr.shift_shift]
+        _ = inner.erase.shift k 0 := by rw [ih]
+    · simp only [hc0, ↓reduceIte]
+      show (((adjust_child inner (amount + cutoff - k) 0).erase.shift cutoff 0).shift amount cutoff : Expr) = _
+      rw [Expr.shift_shift_comm _ cutoff amount 0 cutoff (by omega) (by omega)]
+      have hshift : amount + cutoff - k + k = cutoff + amount := by omega
+      calc (adjust_child inner (amount + cutoff - k) 0).erase.shift (cutoff + amount) 0
+          = (adjust_child inner (amount + cutoff - k) 0).erase.shift (amount + cutoff - k + k) 0 := by
+            rw [hshift]
+        _ = ((adjust_child inner (amount + cutoff - k) 0).erase.shift (amount + cutoff - k) 0).shift k 0 := by
+            rw [Expr.shift_shift]
+        _ = inner.erase.shift k 0 := by rw [ih]
+  | shift_lt k inner amount cutoff hlt hi ih =>
+    simp only [adjust_child, if_neg (show ¬(k ≥ cutoff + amount) from by omega),
+               if_neg (show ¬(k ≥ cutoff) from by omega)]
+    show (((adjust_child inner amount (cutoff - k)).erase.shift k 0).shift amount cutoff : Expr) = _
+    rw [Expr.shift_comm_lt _ k amount cutoff (by omega)]
+    exact congrArg (·.shift k 0) ih
 
 /-! ### mk_osnf_compound: normalize a compound expression whose children are in OSNF -/
 
