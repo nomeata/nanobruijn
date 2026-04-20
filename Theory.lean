@@ -98,8 +98,14 @@ theorem memAbs_cons_cases (i d : Nat) (rest : FVarList) (h : MemAbs i (d :: rest
 @[grind =] theorem memAbs_nil_iff (i : Nat) : MemAbs i [] ↔ False :=
   ⟨not_memAbs_nil _, False.elim⟩
 
-@[grind] theorem memAbs_head_self (d : Nat) (rest : FVarList) : MemAbs d (d :: rest) :=
+theorem memAbs_head_self (d : Nat) (rest : FVarList) : MemAbs d (d :: rest) :=
   MemAbs.head _ _
+
+theorem memAbs_tail_self (i d : Nat) (rest : FVarList) (h : MemAbs i rest) :
+    MemAbs (d + 1 + i) (d :: rest) := MemAbs.tail _ _ _ h
+
+grind_pattern memAbs_head_self => (d :: rest)
+grind_pattern memAbs_tail_self => (d :: rest), MemAbs i rest
 
 @[grind =] theorem memAbs_cons_iff (i d : Nat) (rest : FVarList) :
     MemAbs i (d :: rest) ↔ i = d ∨ ∃ j, i = d + 1 + j ∧ MemAbs j rest := by
@@ -110,7 +116,7 @@ theorem memAbs_cons_cases (i d : Nat) (rest : FVarList) (h : MemAbs i (d :: rest
 
 theorem memAbs_shift_iff (k i : Nat) (xs : FVarList) :
     MemAbs i (shift k xs) ↔ ∃ j, MemAbs j xs ∧ i = j + k := by
-  cases xs <;> simp only [shift, memAbs_cons_iff, memAbs_nil_iff] <;> grind
+  cases xs <;> grind [shift]
 
 private theorem memAbs_union_iff_aux (n : Nat) :
     ∀ (xs ys : FVarList), xs.length + ys.length ≤ n →
@@ -133,17 +139,17 @@ private theorem memAbs_union_iff_aux (n : Nat) :
       · rename_i hxy
         have hlen : xs'.length + ((y - x - 1) :: ys').length ≤ n' := by simp at hn ⊢; omega
         have IH := ih xs' ((y - x - 1) :: ys') hlen
-        simp only [memAbs_cons_iff, IH]; grind
+        grind
       · rename_i hxy
         split
         · rename_i heq
           have hlen : xs'.length + ys'.length ≤ n' := by simp at hn ⊢; omega
           have IH := ih xs' ys' hlen
-          simp only [memAbs_cons_iff, IH]; grind
+          grind
         · rename_i hne
           have hlen : ((x - y - 1) :: xs').length + ys'.length ≤ n' := by simp at hn ⊢; omega
           have IH := ih ((x - y - 1) :: xs') ys' hlen
-          simp only [memAbs_cons_iff, IH]; grind
+          grind
 
 theorem memAbs_union_iff (i : Nat) (xs ys : FVarList) :
     MemAbs i (union xs ys) ↔ MemAbs i xs ∨ MemAbs i ys :=
@@ -152,9 +158,9 @@ theorem memAbs_union_iff (i : Nat) (xs ys : FVarList) :
 theorem memAbs_unbind_iff (i : Nat) (xs : FVarList) :
     MemAbs i (unbind xs) ↔ MemAbs (i + 1) xs := by
   match xs with
-  | [] => simp only [unbind, memAbs_nil_iff]
-  | 0 :: rest => simp only [unbind, memAbs_cons_iff]; grind
-  | (d' + 1) :: rest => simp only [unbind, memAbs_cons_iff]; grind
+  | [] => grind [unbind]
+  | 0 :: rest => grind [unbind]
+  | (d' + 1) :: rest => grind [unbind]
 
 end FVarList
 
