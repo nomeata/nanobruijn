@@ -371,72 +371,14 @@ theorem shift_comm_lt (e : Expr) (k amount cutoff : Nat) (hlt : k < cutoff) :
   have h := shift_comm_lt_gen e k amount cutoff 0 hlt
   simp only [Nat.add_zero] at h; exact h
 
-/-- An expression has a free variable at index `i` above cutoff `c`. -/
-inductive HasFreeVar : Expr → Nat → Nat → Prop where
-  | bvar (i c : Nat) (h : i ≥ c) : HasFreeVar (bvar i) i c
-  | app_left (f a : Expr) (i c : Nat) (h : HasFreeVar f i c) : HasFreeVar (app f a) i c
-  | app_right (f a : Expr) (i c : Nat) (h : HasFreeVar a i c) : HasFreeVar (app f a) i c
-  | lam (body : Expr) (i c : Nat) (h : HasFreeVar body i (c + 1)) : HasFreeVar (lam body) i c
-
-/-- External free-variable predicate: `ExtFreeVar e k` iff, treating `e` as a
-    term at depth 0, there is a bvar whose **external index** (internal name
-    minus the number of binders it sits under) equals `k`. This is the view
-    matched by `SExpr.fvars`: under a lambda, body's external index `k+1`
-    corresponds to `lam body`'s external index `k`. -/
+/-- Free-variable predicate on de Bruijn expressions. `ExtFreeVar e k` iff
+    `e` has a free variable at external index `k` (the standard notion:
+    under `lam`, the body's `k+1` becomes the lambda's `k`). -/
 inductive ExtFreeVar : Expr → Nat → Prop where
   | bvar (i : Nat) : ExtFreeVar (bvar i) i
   | app_left {f a : Expr} {k : Nat} (h : ExtFreeVar f k) : ExtFreeVar (app f a) k
   | app_right {f a : Expr} {k : Nat} (h : ExtFreeVar a k) : ExtFreeVar (app f a) k
   | lam {body : Expr} {k : Nat} (h : ExtFreeVar body (k + 1)) : ExtFreeVar (lam body) k
-
-/-- All free variables of `e` at cutoff `c` are `≥ bound`. -/
-def AllFreeVarsGe (e : Expr) (bound : Nat) (c : Nat := 0) : Prop :=
-  ∀ i, HasFreeVar e i c → i ≥ bound
-
-private theorem allFreeVarsGe_shift_gen (e : Expr) (k c : Nat) :
-    AllFreeVarsGe (e.shift k c) (c + k) c := by
-  intro i hi
-  induction e generalizing c with
-  | bvar j =>
-    simp only [shift] at hi
-    by_cases hj : j ≥ c
-    · simp only [hj, ite_true] at hi; cases hi with | bvar _ _ hge => omega
-    · simp only [hj, ite_false] at hi; cases hi with | bvar _ _ hge => omega
-  | app f a ihf iha =>
-    simp only [shift] at hi
-    cases hi with
-    | app_left _ _ _ _ hf => exact ihf c hf
-    | app_right _ _ _ _ ha => exact iha c ha
-  | lam body ih =>
-    simp only [shift] at hi
-    cases hi with
-    | lam _ _ _ hb => have := ih (c + 1) hb; omega
-  | const _ => simp only [shift] at hi; cases hi
-
-theorem allFreeVarsGe_shift_zero (e : Expr) (k : Nat) :
-    AllFreeVarsGe (e.shift k 0) k 0 := by
-  have := allFreeVarsGe_shift_gen e k 0; simpa using this
-
-theorem no_freevar_zero_in_shifted (e : Expr) (k : Nat) (hk : k > 0) :
-    ¬ HasFreeVar (e.shift k 0) 0 0 := by
-  intro h; have := allFreeVarsGe_shift_zero e k 0 h; omega
-
-theorem shift_eq_of_no_freevars (e : Expr) (k c : Nat)
-    (h : ∀ i, ¬ HasFreeVar e i c) : e.shift k c = e := by
-  induction e generalizing c with
-  | bvar i =>
-    simp only [shift]
-    by_cases hic : i ≥ c
-    · exact absurd (HasFreeVar.bvar i c hic) (h i)
-    · rw [if_neg hic]
-  | app f a ihf iha =>
-    simp only [shift]
-    rw [ihf c (fun i hi => h i (HasFreeVar.app_left _ _ _ _ hi))]
-    rw [iha c (fun i hi => h i (HasFreeVar.app_right _ _ _ _ hi))]
-  | lam body ih =>
-    simp only [shift]
-    rw [ih (c + 1) (fun i hi => h i (HasFreeVar.lam _ _ _ hi))]
-  | const _ => rfl
 
 /-- Stronger forward decomposition of ExtFreeVar on a shift. -/
 theorem extFreeVar_shift_extract (e : Expr) (n c i : Nat) :
