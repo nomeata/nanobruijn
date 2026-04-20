@@ -971,15 +971,32 @@ private theorem memAbs_fvar_lb_val (e : SExpr) (hne : e.fvars ≠ []) :
   match hfv : e.fvars with
   | [] => exact absurd hfv hne
   | d :: rest =>
-    have heq : fvar_lb_val e = d := by
-      unfold fvar_lb_val; rw [hfv]
-    rw [heq]
-    exact FVarList.MemAbs.head _ _
+    have heq : fvar_lb_val e = d := by unfold fvar_lb_val; rw [hfv]
+    rw [heq]; exact FVarList.MemAbs.head _ _
 
 -- Helper: when fvar_lb_val > 0, get HasFreeVar at fvar_lb_val.
 private theorem hasFreeVar_at_fvar_lb_val (e : SExpr) (hne : e.fvars ≠ []) :
     Expr.HasFreeVar e.erase (fvar_lb_val e) :=
   (memAbs_fvars_iff_hasFreeVar _ _).mp (memAbs_fvar_lb_val e hne)
+
+-- Helper: if HasFreeVar (adj e).erase 0, then (adj e).fvar_lb_val = 0.
+private theorem fvar_lb_val_zero_of_hasFreeVar_zero (e' : SExpr)
+    (h : Expr.HasFreeVar e'.erase 0) : fvar_lb_val e' = 0 := by
+  have hmem : FVarList.MemAbs 0 e'.fvars :=
+    (memAbs_fvars_iff_hasFreeVar _ _).mpr h
+  match hfv : e'.fvars with
+  | [] => exact absurd (hfv ▸ hmem) (FVarList.not_memAbs_nil _)
+  | d' :: rest' =>
+    have hge := FVarList.memAbs_ge_head d' 0 rest' (hfv ▸ hmem)
+    have hd'0 : d' = 0 := by omega
+    show (match e'.fvars with | [] => 0 | d :: _ => d) = 0
+    rw [hfv]; exact hd'0
+
+-- Helper: HasFreeVar e.erase i → e.fvars ≠ [].
+private theorem fvars_ne_nil_of_hasFreeVar (e' : SExpr) (i : Nat)
+    (h : Expr.HasFreeVar e'.erase i) : e'.fvars ≠ [] := by
+  intro habs; exact (fvars_empty_iff_no_hasFreeVar _).mp habs i h
+
 
 theorem mk_osnf_compound_app_isOSNF (f a : SExpr) (hf : IsOSNF f) (ha : IsOSNF a) :
     IsOSNF (mk_osnf_compound (app f a)) := by
@@ -988,57 +1005,26 @@ theorem mk_osnf_compound_app_isOSNF (f a : SExpr) (hf : IsOSNF f) (ha : IsOSNF a
                else shift lb (app (adjust_child f lb 0) (adjust_child a lb 0)))
   simp only
   split
+  · rename_i hlb; exact IsOSNF.app _ _ hf ha hlb
   · rename_i hlb
-    exact IsOSNF.app _ _ hf ha hlb
-  · rename_i hlb
-    -- lb = fvar_lb_val (app f a), not zero (from hlb)
     have hlb_pos : fvar_lb_val (app f a) > 0 := by omega
-    -- (app f a).fvars ≠ [] (because lb > 0 implies fvars non-empty)
     have hne : (app f a).fvars ≠ [] := by
-      intro habs
-      unfold fvar_lb_val at hlb
-      rw [habs] at hlb
-      exact hlb rfl
-    have hbvf : BvarsGe f (fvar_lb_val (app f a)) 0 := bvarsGe_child_app_left f a
-    have hbva : BvarsGe a (fvar_lb_val (app f a)) 0 := bvarsGe_child_app_right f a
+      intro habs; unfold fvar_lb_val at hlb; rw [habs] at hlb; exact hlb rfl
+    have hbvf := bvarsGe_child_app_left f a
+    have hbva := bvarsGe_child_app_right f a
     have hbv_app : BvarsGe (app f a) (fvar_lb_val (app f a)) 0 :=
       BvarsGe.app _ _ _ _ hbvf hbva
     have hadjf := adjust_child_preserves_osnf f _ 0 hf hbvf
     have hadja := adjust_child_preserves_osnf a _ 0 ha hbva
-    have h_ext_lb := hasFreeVar_at_fvar_lb_val (app f a) hne
     have h_ext_0 :
         Expr.HasFreeVar
           (adjust_child (app f a) (fvar_lb_val (app f a)) 0).erase 0 := by
       rw [adjust_child_hasFreeVar_iff (app f a) _ 0 hbv_app 0]
-      refine Or.inl ⟨by omega, ?_⟩
-      simpa using h_ext_lb
-    have h_lb_zero :
-        fvar_lb_val (adjust_child (app f a) (fvar_lb_val (app f a)) 0) = 0 := by
-      have h_mem :
-          FVarList.MemAbs 0
-            (adjust_child (app f a) (fvar_lb_val (app f a)) 0).fvars :=
-        (memAbs_fvars_iff_hasFreeVar _ _).mpr h_ext_0
-      match hfv : (adjust_child (app f a) (fvar_lb_val (app f a)) 0).fvars with
-      | [] => exact absurd (hfv ▸ h_mem) (FVarList.not_memAbs_nil _)
-      | d' :: rest' =>
-        have hge := FVarList.memAbs_ge_head d' 0 rest' (hfv ▸ h_mem)
-        have hd'0 : d' = 0 := by omega
-        show (match (adjust_child (app f a) (fvar_lb_val (app f a)) 0).fvars with
-              | [] => 0 | d :: _ => d) = 0
-        rw [hfv]; exact hd'0
-    have h_lb_zero' :
-        fvar_lb_val (app (adjust_child f (fvar_lb_val (app f a)) 0)
-                          (adjust_child a (fvar_lb_val (app f a)) 0)) = 0 :=
-      h_lb_zero
-    have h_fvars_ne :
-        (app (adjust_child f (fvar_lb_val (app f a)) 0)
-             (adjust_child a (fvar_lb_val (app f a)) 0)).fvars ≠ [] := by
-      intro habs
-      have := (fvars_empty_iff_no_hasFreeVar _).mp habs 0
-      exact this h_ext_0
+      exact Or.inl ⟨by omega, by simpa using hasFreeVar_at_fvar_lb_val (app f a) hne⟩
+    have h_lb_zero' := fvar_lb_val_zero_of_hasFreeVar_zero _ h_ext_0
+    have h_fvars_ne := fvars_ne_nil_of_hasFreeVar _ _ h_ext_0
     exact IsOSNF.shifted _ _ hlb_pos
-      (IsOSNF.app _ _ hadjf hadja h_lb_zero')
-      h_lb_zero' h_fvars_ne
+      (IsOSNF.app _ _ hadjf hadja h_lb_zero') h_lb_zero' h_fvars_ne
 
 theorem mk_osnf_compound_lam_isOSNF (body : SExpr) (hb : IsOSNF body) :
     IsOSNF (mk_osnf_compound (lam body)) := by
@@ -1047,51 +1033,24 @@ theorem mk_osnf_compound_lam_isOSNF (body : SExpr) (hb : IsOSNF body) :
                else shift lb (lam (adjust_child body lb 1)))
   simp only
   split
-  · rename_i hlb
-    exact IsOSNF.lam _ hb hlb
+  · rename_i hlb; exact IsOSNF.lam _ hb hlb
   · rename_i hlb
     have hlb_pos : fvar_lb_val (lam body) > 0 := by omega
     have hne : (lam body).fvars ≠ [] := by
-      intro habs
-      unfold fvar_lb_val at hlb
-      rw [habs] at hlb
-      exact hlb rfl
-    have hbvb : BvarsGe body (fvar_lb_val (lam body)) 1 := bvarsGe_child_lam body
+      intro habs; unfold fvar_lb_val at hlb; rw [habs] at hlb; exact hlb rfl
+    have hbvb := bvarsGe_child_lam body
     have hbv_lam : BvarsGe (lam body) (fvar_lb_val (lam body)) 0 :=
       BvarsGe.lam _ _ _ hbvb
     have hadjb := adjust_child_preserves_osnf body _ 1 hb hbvb
-    have h_ext_lb := hasFreeVar_at_fvar_lb_val (lam body) hne
     have h_ext_0 :
         Expr.HasFreeVar
           (adjust_child (lam body) (fvar_lb_val (lam body)) 0).erase 0 := by
       rw [adjust_child_hasFreeVar_iff (lam body) _ 0 hbv_lam 0]
-      refine Or.inl ⟨by omega, ?_⟩
-      simpa using h_ext_lb
-    have h_lb_zero :
-        fvar_lb_val (adjust_child (lam body) (fvar_lb_val (lam body)) 0) = 0 := by
-      have h_mem :
-          FVarList.MemAbs 0
-            (adjust_child (lam body) (fvar_lb_val (lam body)) 0).fvars :=
-        (memAbs_fvars_iff_hasFreeVar _ _).mpr h_ext_0
-      match hfv : (adjust_child (lam body) (fvar_lb_val (lam body)) 0).fvars with
-      | [] => exact absurd (hfv ▸ h_mem) (FVarList.not_memAbs_nil _)
-      | d' :: rest' =>
-        have hge := FVarList.memAbs_ge_head d' 0 rest' (hfv ▸ h_mem)
-        have hd'0 : d' = 0 := by omega
-        show (match (adjust_child (lam body) (fvar_lb_val (lam body)) 0).fvars with
-              | [] => 0 | d :: _ => d) = 0
-        rw [hfv]; exact hd'0
-    have h_lb_zero' :
-        fvar_lb_val (lam (adjust_child body (fvar_lb_val (lam body)) 1)) = 0 :=
-      h_lb_zero
-    have h_fvars_ne :
-        (lam (adjust_child body (fvar_lb_val (lam body)) 1)).fvars ≠ [] := by
-      intro habs
-      have := (fvars_empty_iff_no_hasFreeVar _).mp habs 0
-      exact this h_ext_0
+      exact Or.inl ⟨by omega, by simpa using hasFreeVar_at_fvar_lb_val (lam body) hne⟩
+    have h_lb_zero' := fvar_lb_val_zero_of_hasFreeVar_zero _ h_ext_0
+    have h_fvars_ne := fvars_ne_nil_of_hasFreeVar _ _ h_ext_0
     exact IsOSNF.shifted _ _ hlb_pos
-      (IsOSNF.lam _ hadjb h_lb_zero')
-      h_lb_zero' h_fvars_ne
+      (IsOSNF.lam _ hadjb h_lb_zero') h_lb_zero' h_fvars_ne
 
 /-! ### to_osnf: compute the OSNF of an expression (recursive, bottom-up) -/
 
