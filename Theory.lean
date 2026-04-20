@@ -182,12 +182,12 @@ theorem shift_shift (e : Expr) (j k c : Nat) :
 
 theorem shift_shift_comm (e : Expr) (j k c d : Nat) (hcd : c ≤ d) (hdj : d ≤ c + j) :
     (e.shift j c).shift k d = e.shift (j + k) c := by
-  induction e generalizing c d <;> grind [shift]
+  fun_induction Expr.shift e j c generalizing d <;> grind [shift]
 
 private theorem shift_comm_lt_gen (e : Expr) (k amount cutoff base : Nat) (hlt : k < cutoff) :
     (e.shift k base).shift amount (cutoff + base) =
     (e.shift amount (cutoff - k + base)).shift k base := by
-  induction e generalizing k cutoff base <;> grind [shift]
+  fun_induction Expr.shift e k base generalizing cutoff <;> grind [shift]
 
 theorem shift_comm_lt (e : Expr) (k amount cutoff : Nat) (hlt : k < cutoff) :
     (e.shift k 0).shift amount cutoff = (e.shift amount (cutoff - k)).shift k 0 := by
