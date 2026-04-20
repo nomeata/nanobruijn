@@ -501,10 +501,10 @@ theorem bvarsGe_of_extSemantic (e : SExpr) (amount cutoff : Nat)
   | lam body ih =>
     refine BvarsGe.lam body amount cutoff (ih amount (cutoff + 1) ?_)
     intro i hi hic
-    have hext : Expr.HasFreeVar (lam body).erase (i - 1) := by
+    have : Expr.HasFreeVar (lam body).erase (i - 1) := by
       have : (i - 1) + 1 = i := by omega
-      exact Expr.HasFreeVar.lam (this ▸ hi)
-    have := h (i - 1) hext (by omega); omega
+      grind [erase]
+    have := h (i - 1) this (by omega); omega
   | shift k inner ih =>
     by_cases hk1 : k ≥ cutoff + amount
     · exact BvarsGe.shift_ge k inner amount cutoff hk1
@@ -555,10 +555,10 @@ theorem bvarsGe_child_lam (body : SExpr) :
     BvarsGe body (fvar_lb_val (lam body)) 1 := by
   refine bvarsGe_of_extSemantic body _ 1 ?_
   intro i hi hi1
-  have hext : Expr.HasFreeVar (lam body).erase (i - 1) := by
+  have : Expr.HasFreeVar (lam body).erase (i - 1) := by
     have : (i - 1) + 1 = i := by omega
-    exact Expr.HasFreeVar.lam (this ▸ hi)
-  have := hasFreeVar_ge_fvar_lb (lam body) (i - 1) hext; omega
+    grind [erase]
+  have := hasFreeVar_ge_fvar_lb (lam body) (i - 1) this; omega
 
 /-! ### mk_osnf_compound: normalize a compound expression whose children are in OSNF -/
 
@@ -584,8 +584,7 @@ theorem hasFreeVar_of_bvarsGe (e : SExpr) (amount cutoff : Nat)
   | app _ _ _ _ _ _ ihf iha => grind [erase]
   | lam body amount cutoff hb ih =>
     intro i hi hic
-    change Expr.HasFreeVar (Expr.lam body.erase) i at hi
-    cases hi with | lam h => have := ih (i + 1) h (by omega); omega
+    have := ih (i + 1) (by grind [erase]) (by omega); omega
   | const_intro => grind [erase]
   | shift_ge k inner amount cutoff hka =>
     intro i hi _; have := Expr.hasFreeVar_shift_zero_ge inner.erase k i hi; omega
