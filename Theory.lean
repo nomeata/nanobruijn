@@ -983,6 +983,55 @@ def mk_osnf_compound (e : SExpr) : SExpr :=
       | other => other  -- const/bvar/shift: unchanged (unused by callers)
     shift lb core
 
+/-! ### mk_osnf_compound preserves erasure -/
+
+theorem mk_osnf_compound_erase_app (f a : SExpr) :
+    (mk_osnf_compound (app f a)).erase = (app f a).erase := by
+  show (let lb := (app f a).fvar_lb_val;
+        if lb = 0 then app f a
+        else shift lb (app (adjust_child f lb 0) (adjust_child a lb 0))).erase = _
+  simp only
+  split
+  · rfl
+  · rename_i hlb
+    show (Expr.app (adjust_child f (fvar_lb_val (app f a)) 0).erase
+                    (adjust_child a (fvar_lb_val (app f a)) 0).erase).shift _ 0 = _
+    rw [Expr.shift]
+    congr 1
+    · exact adjust_child_erase f _ 0 (bvarsGe_child_app_left f a)
+    · exact adjust_child_erase a _ 0 (bvarsGe_child_app_right f a)
+
+theorem mk_osnf_compound_erase_lam (body : SExpr) :
+    (mk_osnf_compound (lam body)).erase = (lam body).erase := by
+  show (let lb := (lam body).fvar_lb_val;
+        if lb = 0 then lam body
+        else shift lb (lam (adjust_child body lb 1))).erase = _
+  simp only
+  split
+  · rfl
+  · rename_i hlb
+    show (Expr.lam (adjust_child body (fvar_lb_val (lam body)) 1).erase).shift _ 0 = _
+    rw [Expr.shift]
+    congr 1
+    exact adjust_child_erase body _ 1 (bvarsGe_child_lam body)
+
+/-! ### mk_osnf_compound produces OSNF -/
+
+/-- The `adjust_child` of an OSNF expression is still OSNF (structure preserved),
+    with fvar_lb_val shifted down. -/
+theorem adjust_child_preserves_osnf (e : SExpr) (amount cutoff : Nat)
+    (h : IsOSNF e) (hbvars : BvarsGe e amount cutoff) :
+    IsOSNF (adjust_child e amount cutoff) := by
+  sorry  -- Placeholder; will fill next
+
+theorem mk_osnf_compound_app_isOSNF (f a : SExpr) (hf : IsOSNF f) (ha : IsOSNF a) :
+    IsOSNF (mk_osnf_compound (app f a)) := by
+  sorry
+
+theorem mk_osnf_compound_lam_isOSNF (body : SExpr) (hb : IsOSNF body) :
+    IsOSNF (mk_osnf_compound (lam body)) := by
+  sorry
+
 /-! ### to_osnf: compute the OSNF of an expression (recursive, bottom-up) -/
 
 /-- Compute the OSNF of an expression.
