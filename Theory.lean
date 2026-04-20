@@ -90,7 +90,7 @@ theorem mem_of_lb_val_eq {xs : FVarList} (hne : xs ≠ []) :
 
 @[simp] theorem mem_shift {k i : Nat} {xs : FVarList} :
     i ∈ shift k xs ↔ ∃ j ∈ xs, i = j + k := by
-  unfold shift; grind [List.mem_map]
+  unfold shift; grind
 
 @[simp] theorem mem_union {i : Nat} {xs ys : FVarList} :
     i ∈ union xs ys ↔ i ∈ xs ∨ i ∈ ys := by
@@ -400,49 +400,41 @@ private theorem bvarsGe_shift_lt (k : Nat) (inner : SExpr) (amount cutoff : Nat)
 theorem adjust_child_erase (e : SExpr) (amount cutoff : Nat)
     (h : BvarsGe e amount cutoff) :
     (adjust_child e amount cutoff).erase.shift amount cutoff = e.erase := by
-  induction e generalizing amount cutoff with
-  | bvar i =>
-    simp only [adjust_child, erase]
-    by_cases hic : i ≥ cutoff
-    · have := h i (List.mem_cons_self) hic
-      simp only [hic, ↓reduceIte, erase, Expr.shift,
-        show i - amount ≥ cutoff from by omega]; grind
-    · simp only [hic, ↓reduceIte, erase, Expr.shift, hic]
-  | app f a ihf iha =>
-    simp only [adjust_child, erase, Expr.shift,
-      ihf amount cutoff (bvarsGe_app_left f a amount cutoff h),
-      iha amount cutoff (bvarsGe_app_right f a amount cutoff h)]
-  | lam body ih =>
-    simp only [adjust_child, erase, Expr.shift,
-      ih amount (cutoff + 1) (bvarsGe_lam_body body amount cutoff h)]
-  | const id => rfl
-  | shift k inner ih =>
-    simp only [adjust_child]
-    by_cases hka : k ≥ cutoff + amount
-    · simp only [if_pos hka]
-      by_cases hk0 : k - amount = 0
-      · simp only [hk0, ↓reduceIte, erase]
-        have : k = amount := by omega
-        have : cutoff = 0 := by omega
-        grind [Expr.shift_zero]
-      · simp only [hk0, ↓reduceIte, erase]
-        rw [Expr.shift_shift_comm inner.erase (k - amount) amount 0 cutoff (by omega) (by omega)]
-        grind
-    by_cases hkc : k ≥ cutoff
-    · simp only [if_neg hka, if_pos hkc]
-      have hi := bvarsGe_shift_mid k inner amount cutoff h hkc
-      by_cases hc0 : cutoff = 0
-      · subst hc0
-        simp only [↓reduceIte]
-        have : amount = (amount + 0 - k) + k := by omega
-        rw [this, ← Expr.shift_shift]; grind [erase, ih (amount + 0 - k) 0 hi]
-      · simp only [hc0, ↓reduceIte, erase]
-        rw [Expr.shift_shift_comm _ cutoff amount 0 cutoff (by omega) (by omega)]
-        have : cutoff + amount = (amount + cutoff - k) + k := by omega
-        rw [this, ← Expr.shift_shift]; grind [erase, ih (amount + cutoff - k) 0 hi]
-    · simp only [if_neg hka, if_neg hkc, erase]
-      have hi := bvarsGe_shift_lt k inner amount cutoff h (by omega)
-      rw [Expr.shift_comm_lt _ k amount cutoff (by omega), ih amount (cutoff - k) hi]
+  revert h
+  fun_induction adjust_child e amount cutoff with
+  | case1 amount cutoff i hic => -- bvar, i ≥ cutoff
+    intro h; have := h i List.mem_cons_self hic; grind [erase, Expr.shift]
+  | case3 amount cutoff f a ihf iha => -- app
+    intro h
+    grind [erase, Expr.shift,
+      ihf (bvarsGe_app_left f a amount cutoff h),
+      iha (bvarsGe_app_right f a amount cutoff h)]
+  | case4 amount cutoff body ih => -- lam
+    intro h
+    grind [erase, Expr.shift, ih (bvarsGe_lam_body body amount cutoff h)]
+  | case7 amount cutoff k inner hka hk0 => -- shift_ge, k-amount ≠ 0
+    intro _
+    simp only [erase]
+    rw [Expr.shift_shift_comm inner.erase (k - amount) amount 0 cutoff (by grind) (by grind)]
+    grind
+  | case8 amount k inner hka hkge hlet ih => -- shift_mid, cutoff = 0
+    intro h
+    have hi := bvarsGe_shift_mid k inner amount 0 h hkge
+    have heq : amount = (amount + 0 - k) + k := by grind
+    rw [heq, ← Expr.shift_shift]; grind [erase, ih hi]
+  | case9 amount cutoff k inner hka hkc hlet hc0 ih => -- shift_mid, cutoff ≠ 0
+    intro h
+    have hi := bvarsGe_shift_mid k inner amount cutoff h hkc
+    simp only [erase]
+    rw [Expr.shift_shift_comm _ cutoff amount 0 cutoff (by grind) (by grind)]
+    have : cutoff + amount = (amount + cutoff - k) + k := by grind
+    rw [this, ← Expr.shift_shift]; grind [erase, ih hi]
+  | case10 amount cutoff k inner hka hkc ih => -- shift_lt
+    intro h
+    have hi := bvarsGe_shift_lt k inner amount cutoff h (by grind)
+    simp only [erase]
+    rw [Expr.shift_comm_lt _ k amount cutoff (by grind), ih hi]
+  | _ => intros; grind [erase, Expr.shift, Expr.shift_zero]
 
 /-! ### BvarsGe semantic characterisation -/
 
