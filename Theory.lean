@@ -236,7 +236,7 @@ theorem hasFreeVar_shift_fwd (e : Expr) (n c k : Nat) :
 /-- Specialised to cutoff 0. -/
 theorem hasFreeVar_shift_zero_ge (e : Expr) (n k : Nat)
     (h : HasFreeVar (e.shift n 0) k) : k ≥ n := by
-  have := hasFreeVar_shift_fwd e n 0 k h; omega
+  have := hasFreeVar_shift_fwd e n 0 k h; grind
 
 /-- Shifting back: external bvar j in e gives external bvar j+n (if j ≥ c) in
     e.shift n c. -/
@@ -439,26 +439,26 @@ private theorem bvarsGe_lam_of (body : SExpr) (amount cutoff : Nat)
     (hb : BvarsGe body amount (cutoff + 1)) :
     BvarsGe (lam body) amount cutoff := by
   intro i hi hic
-  have := hb (i + 1) (by grind [fvars, FVarList.memAbs_unbind_iff]) (by omega); omega
+  have := hb (i + 1) (by grind [fvars, FVarList.memAbs_unbind_iff]) (by grind); grind
 
 private theorem bvarsGe_lam_body (body : SExpr) (amount cutoff : Nat)
     (h : BvarsGe (lam body) amount cutoff) :
     BvarsGe body amount (cutoff + 1) := by
   intro i hi hic
-  have := h (i - 1) (by grind [fvars, FVarList.memAbs_unbind_iff]) (by omega); omega
+  have := h (i - 1) (by grind [fvars, FVarList.memAbs_unbind_iff]) (by grind); grind
 
 -- Derived BvarsGe for shift's inner per branch, matching the old constructor cases.
 private theorem bvarsGe_shift_mid (k : Nat) (inner : SExpr) (amount cutoff : Nat)
     (h : BvarsGe (shift k inner) amount cutoff) (hge : k ≥ cutoff) :
     BvarsGe inner (amount + cutoff - k) 0 := by
   intro i hi _
-  have := h (i + k) (by grind [fvars, FVarList.memAbs_shift_iff]) (by omega); omega
+  have := h (i + k) (by grind [fvars, FVarList.memAbs_shift_iff]) (by grind); grind
 
 private theorem bvarsGe_shift_lt (k : Nat) (inner : SExpr) (amount cutoff : Nat)
     (h : BvarsGe (shift k inner) amount cutoff) (hlt : k < cutoff) :
     BvarsGe inner amount (cutoff - k) := by
   intro i hi hic
-  have := h (i + k) (by grind [fvars, FVarList.memAbs_shift_iff]) (by omega); omega
+  have := h (i + k) (by grind [fvars, FVarList.memAbs_shift_iff]) (by grind); grind
 
 theorem adjust_child_erase (e : SExpr) (amount cutoff : Nat)
     (h : BvarsGe e amount cutoff) :
@@ -519,33 +519,26 @@ theorem bvarsGe_of_extSemantic (e : SExpr) (amount cutoff : Nat)
 theorem bvarsGe_fvar_lb (e : SExpr) : BvarsGe e (fvar_lb_val e) 0 := by
   refine bvarsGe_of_extSemantic e (fvar_lb_val e) 0 ?_
   intro i hi _
-  have := hasFreeVar_ge_fvar_lb e i hi
-  omega
+  have := hasFreeVar_ge_fvar_lb e i hi; grind
 
 /-! ### Children of compound satisfy BvarsGe -/
 
 theorem bvarsGe_child_app_left (f a : SExpr) :
-    BvarsGe f (fvar_lb_val (app f a)) 0 := by
-  refine bvarsGe_of_extSemantic f _ 0 ?_
-  intro i hi _
-  have := hasFreeVar_ge_fvar_lb (app f a) i (Expr.HasFreeVar.app_left hi)
-  omega
+    BvarsGe f (fvar_lb_val (app f a)) 0 := fun i hi _ => by
+  have := hasFreeVar_ge_fvar_lb (app f a) i
+    (.app_left ((memAbs_fvars_iff_hasFreeVar _ _).mp hi)); grind
 
 theorem bvarsGe_child_app_right (f a : SExpr) :
-    BvarsGe a (fvar_lb_val (app f a)) 0 := by
-  refine bvarsGe_of_extSemantic a _ 0 ?_
-  intro i hi _
-  have := hasFreeVar_ge_fvar_lb (app f a) i (Expr.HasFreeVar.app_right hi)
-  omega
+    BvarsGe a (fvar_lb_val (app f a)) 0 := fun i hi _ => by
+  have := hasFreeVar_ge_fvar_lb (app f a) i
+    (.app_right ((memAbs_fvars_iff_hasFreeVar _ _).mp hi)); grind
 
 theorem bvarsGe_child_lam (body : SExpr) :
-    BvarsGe body (fvar_lb_val (lam body)) 1 := by
-  refine bvarsGe_of_extSemantic body _ 1 ?_
-  intro i hi hi1
-  have : Expr.HasFreeVar (lam body).erase (i - 1) := by
-    have : (i - 1) + 1 = i := by omega
-    grind [erase]
-  have := hasFreeVar_ge_fvar_lb (lam body) (i - 1) this; omega
+    BvarsGe body (fvar_lb_val (lam body)) 1 := fun i hi hic => by
+  have hlam : Expr.HasFreeVar (lam body).erase (i - 1) := by
+    have : (i - 1) + 1 = i := by grind
+    grind [erase, memAbs_fvars_iff_hasFreeVar]
+  have := hasFreeVar_ge_fvar_lb (lam body) (i - 1) hlam; grind
 
 /-! ### mk_osnf_compound: normalize a compound expression whose children are in OSNF -/
 
@@ -935,8 +928,7 @@ private theorem osnf_nonshift_ne_shifted {e : SExpr} (he : IsOSNF e)
     · have h0 : Expr.HasFreeVar e.erase 0 :=
         fvar_lb_zero_has_hasFreeVar_zero e hlbE hfvE2
       rw [heq] at h0
-      have := Expr.hasFreeVar_shift_zero_ge core.erase n 0 h0
-      omega
+      have := Expr.hasFreeVar_shift_zero_ge core.erase n 0 h0; grind
   · have hnone : ∀ i, ¬ Expr.HasFreeVar e.erase i :=
       (fvars_empty_iff_no_hasFreeVar _).mp hfvE
     rw [heq] at hnone
