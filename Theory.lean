@@ -98,6 +98,9 @@ theorem memAbs_cons_cases (i d : Nat) (rest : FVarList) (h : MemAbs i (d :: rest
 @[grind =] theorem memAbs_nil_iff (i : Nat) : MemAbs i [] ↔ False :=
   ⟨not_memAbs_nil _, False.elim⟩
 
+@[grind] theorem memAbs_head_self (d : Nat) (rest : FVarList) : MemAbs d (d :: rest) :=
+  MemAbs.head _ _
+
 @[grind =] theorem memAbs_cons_iff (i d : Nat) (rest : FVarList) :
     MemAbs i (d :: rest) ↔ i = d ∨ ∃ j, i = d + 1 + j ∧ MemAbs j rest := by
   refine ⟨memAbs_cons_cases i d rest, ?_⟩
@@ -127,26 +130,20 @@ private theorem memAbs_union_iff_aux (n : Nat) :
     | x :: xs', y :: ys' =>
       simp only [union]
       split
-      · -- x < y
-        rename_i hxy
+      · rename_i hxy
         have hlen : xs'.length + ((y - x - 1) :: ys').length ≤ n' := by simp at hn ⊢; omega
         have IH := ih xs' ((y - x - 1) :: ys') hlen
-        simp only [memAbs_cons_iff, IH]
-        grind
+        simp only [memAbs_cons_iff, IH]; grind
       · rename_i hxy
         split
-        · -- x = y
-          rename_i heq
+        · rename_i heq
           have hlen : xs'.length + ys'.length ≤ n' := by simp at hn ⊢; omega
           have IH := ih xs' ys' hlen
-          simp only [memAbs_cons_iff, IH]
-          grind
-        · -- x > y
-          rename_i hne
+          simp only [memAbs_cons_iff, IH]; grind
+        · rename_i hne
           have hlen : ((x - y - 1) :: xs').length + ys'.length ≤ n' := by simp at hn ⊢; omega
           have IH := ih ((x - y - 1) :: xs') ys' hlen
-          simp only [memAbs_cons_iff, IH]
-          grind
+          simp only [memAbs_cons_iff, IH]; grind
 
 theorem memAbs_union_iff (i : Nat) (xs ys : FVarList) :
     MemAbs i (union xs ys) ↔ MemAbs i xs ∨ MemAbs i ys :=
@@ -326,12 +323,10 @@ def fvar_lb_val (e : SExpr) : Nat :=
 theorem memAbs_fvars_iff_hasFreeVar (e : SExpr) (i : Nat) :
     FVarList.MemAbs i e.fvars ↔ Expr.HasFreeVar e.erase i := by
   induction e generalizing i with
-  | bvar j => simp only [fvars, erase, FVarList.memAbs_cons_iff, FVarList.memAbs_nil_iff]; grind
-  | const n =>
-    simp only [fvars, erase, FVarList.memAbs_nil_iff, false_iff]
-    intro h; cases h
-  | app f a ihf iha => simp only [fvars, erase, FVarList.memAbs_union_iff, ihf, iha]; grind
-  | lam body ih => simp only [fvars, erase, FVarList.memAbs_unbind_iff, ih]; grind
+  | bvar j => grind [fvars, erase]
+  | const n => grind [fvars, erase]
+  | app f a ihf iha => grind [fvars, erase, FVarList.memAbs_union_iff]
+  | lam body ih => grind [fvars, erase, FVarList.memAbs_unbind_iff]
   | shift k inner ih =>
     simp only [fvars, erase, FVarList.memAbs_shift_iff]
     constructor
@@ -349,7 +344,7 @@ theorem fvars_empty_iff_no_hasFreeVar (e : SExpr) :
   constructor
   · intro h i hext
     have := (memAbs_fvars_iff_hasFreeVar e i).mpr hext
-    grind [FVarList.memAbs_nil_iff]
+    grind
   · intro h
     match hfv : e.fvars with
     | [] => rfl
