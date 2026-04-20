@@ -1243,85 +1243,58 @@ theorem osnf_unique (e₁ e₂ : SExpr) (h₁ : IsOSNF e₁) (h₂ : IsOSNF e₂
   induction h₁ generalizing e₂ with
   | bvar0 =>
     cases h₂ with
-    | bvar0 => rfl
-    | const id => simp [erase] at heq
-    | app f a hf ha hlb => simp [erase] at heq
-    | lam body hb hlb => simp [erase] at heq
     | shifted n core hn hc hlb hfv =>
-      exfalso
-      refine osnf_nonshift_ne_shifted IsOSNF.bvar0 (Or.inl rfl) hn hc hlb hfv ?_
-      exact heq
+      exact (osnf_nonshift_ne_shifted IsOSNF.bvar0 (Or.inl rfl) hn hc hlb hfv heq).elim
+    | _ => first | rfl | simp [erase] at heq
   | const id =>
     cases h₂ with
-    | bvar0 => simp [erase] at heq
-    | const id' =>
-      simp only [erase, Expr.const.injEq] at heq
-      exact congrArg _ heq
-    | app f a hf ha hlb => simp [erase] at heq
-    | lam body hb hlb => simp [erase] at heq
+    | const id' => simp only [erase, Expr.const.injEq] at heq; exact congrArg _ heq
     | shifted n core hn hc hlb hfv =>
-      exfalso
-      refine osnf_nonshift_ne_shifted (IsOSNF.const id) (Or.inr ?_) hn hc hlb hfv heq
-      rfl
+      exact (osnf_nonshift_ne_shifted (IsOSNF.const id) (Or.inr rfl) hn hc hlb hfv heq).elim
+    | _ => simp [erase] at heq
   | app f₁ a₁ hf₁ ha₁ hlb₁ ihf iha =>
     cases h₂ with
-    | bvar0 => simp [erase] at heq
-    | const id => simp [erase] at heq
     | app f₂ a₂ hf₂ ha₂ hlb₂ =>
       simp only [erase, Expr.app.injEq] at heq
       have hfe := ihf f₂ hf₂ heq.1
       have hae := iha a₂ ha₂ heq.2
       subst hfe; subst hae; rfl
-    | lam body hb hlb => simp [erase] at heq
     | shifted n core hn hc hlb hfv =>
-      exfalso
-      exact osnf_nonshift_ne_shifted
-        (IsOSNF.app f₁ a₁ hf₁ ha₁ hlb₁) (Or.inl hlb₁) hn hc hlb hfv heq
+      exact (osnf_nonshift_ne_shifted (IsOSNF.app f₁ a₁ hf₁ ha₁ hlb₁) (Or.inl hlb₁)
+        hn hc hlb hfv heq).elim
+    | _ => simp [erase] at heq
   | lam body₁ hb₁ hlb₁ ih =>
     cases h₂ with
-    | bvar0 => simp [erase] at heq
-    | const id => simp [erase] at heq
-    | app f a hf ha hlb => simp [erase] at heq
     | lam body₂ hb₂ hlb₂ =>
       simp only [erase, Expr.lam.injEq] at heq
-      have := ih body₂ hb₂ heq
-      subst this; rfl
+      have := ih body₂ hb₂ heq; subst this; rfl
     | shifted n core hn hc hlb hfv =>
-      exfalso
-      exact osnf_nonshift_ne_shifted
-        (IsOSNF.lam body₁ hb₁ hlb₁) (Or.inl hlb₁) hn hc hlb hfv heq
+      exact (osnf_nonshift_ne_shifted (IsOSNF.lam body₁ hb₁ hlb₁) (Or.inl hlb₁)
+        hn hc hlb hfv heq).elim
+    | _ => simp [erase] at heq
   | shifted n₁ core₁ hn₁ hc₁ hlb₁ hfv₁ ih_core =>
     cases h₂ with
     | bvar0 =>
-      exfalso
-      refine osnf_nonshift_ne_shifted IsOSNF.bvar0 (Or.inl rfl) hn₁ hc₁ hlb₁ hfv₁ ?_
-      exact heq.symm
+      exact (osnf_nonshift_ne_shifted IsOSNF.bvar0 (Or.inl rfl) hn₁ hc₁ hlb₁ hfv₁ heq.symm).elim
     | const id =>
-      exfalso
-      refine osnf_nonshift_ne_shifted (IsOSNF.const id) (Or.inr rfl) hn₁ hc₁ hlb₁ hfv₁ ?_
-      exact heq.symm
+      exact (osnf_nonshift_ne_shifted (IsOSNF.const id) (Or.inr rfl) hn₁ hc₁ hlb₁ hfv₁ heq.symm).elim
     | app f a hf ha hlb =>
-      exfalso
-      exact osnf_nonshift_ne_shifted
-        (IsOSNF.app f a hf ha hlb) (Or.inl hlb) hn₁ hc₁ hlb₁ hfv₁ heq.symm
+      exact (osnf_nonshift_ne_shifted (IsOSNF.app f a hf ha hlb) (Or.inl hlb)
+        hn₁ hc₁ hlb₁ hfv₁ heq.symm).elim
     | lam body hb hlb =>
-      exfalso
-      exact osnf_nonshift_ne_shifted
-        (IsOSNF.lam body hb hlb) (Or.inl hlb) hn₁ hc₁ hlb₁ hfv₁ heq.symm
+      exact (osnf_nonshift_ne_shifted (IsOSNF.lam body hb hlb) (Or.inl hlb)
+        hn₁ hc₁ hlb₁ hfv₁ heq.symm).elim
     | shifted n₂ core₂ hn₂ hc₂ hlb₂ hfv₂ =>
       simp only [erase] at heq
       have hs1 := shifted_has_hasFreeVar_n n₁ core₁ hc₁ hlb₁ hfv₁
       have hs2 := shifted_has_hasFreeVar_n n₂ core₂ hc₂ hlb₂ hfv₂
-      rw [heq] at hs1
-      rw [← heq] at hs2
-      have h12 : n₁ ≥ n₂ := Expr.hasFreeVar_shift_zero_ge core₂.erase n₂ n₁ hs1
-      have h21 : n₂ ≥ n₁ := Expr.hasFreeVar_shift_zero_ge core₁.erase n₁ n₂ hs2
+      rw [heq] at hs1; rw [← heq] at hs2
+      have h12 := Expr.hasFreeVar_shift_zero_ge core₂.erase n₂ n₁ hs1
+      have h21 := Expr.hasFreeVar_shift_zero_ge core₁.erase n₁ n₂ hs2
       have hneq : n₁ = n₂ := by omega
       subst hneq
-      have hceq : core₁.erase = core₂.erase :=
-        Expr.shift_injective n₁ 0 _ _ heq
-      have := ih_core core₂ hc₂ hceq
-      subst this; rfl
+      have hceq := Expr.shift_injective n₁ 0 _ _ heq
+      have := ih_core core₂ hc₂ hceq; subst this; rfl
 
 /-- **Corollary**: `to_osnf` is idempotent. -/
 theorem to_osnf_idempotent (e : SExpr) : to_osnf (to_osnf e) = to_osnf e :=
