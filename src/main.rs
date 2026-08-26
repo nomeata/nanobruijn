@@ -37,6 +37,15 @@ fn use_config(config_path: &Path) -> Result<Option<String>, Box<dyn Error>> {
     let (mut export_file, skipped_axioms) = cfg.to_export_file()?;
     // Check the environment
     let panic_count = export_file.check_all_declars();
+    if export_file.config.verify_uf_hits {
+        use std::sync::atomic::Ordering::Relaxed;
+        eprintln!(
+            "UF audit: {} union-find hits checked ({} reached transitively), {} could not be independently confirmed",
+            nanobruijn::tc::UF_HITS_AUDITED.load(Relaxed),
+            nanobruijn::tc::UF_HITS_TRANSITIVE.load(Relaxed),
+            nanobruijn::tc::UF_HITS_UNCONFIRMED.load(Relaxed)
+        );
+    }
     // Pretty print as necessary
     let pp_errs = export_file.pp_selected_declars(pp_destination.as_mut());
     if panic_count > 0 {

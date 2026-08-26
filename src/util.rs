@@ -544,6 +544,9 @@ pub struct TcTrace {
     pub eq_cache_overflow_stores: u64,
     pub eq_cache_overflow_hits: u64,
     pub eq_cache_cross_depth_hits: u64,  // hit where stored_ptr != query_ptr (cross-depth)
+    /// UF hits audited under `verify_uf_hits`, and those the checker could not confirm.
+    pub uf_hits_audited: u64,
+    pub uf_hits_unconfirmed: u64,
     pub fail_cache_overflow_stores: u64,
     pub fail_cache_overflow_hits: u64,
     pub infer_cache_hits: u64,
@@ -674,6 +677,9 @@ impl std::fmt::Display for TcTrace {
                 self.eq_cache_overflow_stores, self.eq_cache_overflow_hits,
                 self.fail_cache_overflow_stores, self.fail_cache_overflow_hits,
                 self.eq_cache_cross_depth_hits)?;
+        }
+        if self.uf_hits_audited > 0 {
+            write!(f, " | uf_audit={} unconfirmed={}", self.uf_hits_audited, self.uf_hits_unconfirmed)?;
         }
         write!(f, " | wnu_st={}/{}/{}/{}", self.wnu_cache_new_inserts, self.wnu_cache_update_lower, self.wnu_cache_update_higher, self.wnu_cache_update_skip)?;
         write!(f, " | mka={}/{} mkp={} mkl={} mklt={} mkv={} mkpr={} mko={} fr={}/{}",
@@ -2050,6 +2056,12 @@ pub struct Config {
     /// Use nanoda's original locally-nameless type checker instead of the shift-based one.
     #[serde(default)]
     pub use_nanoda_tc: bool,
+
+    /// Audit mode. Every time the union-find equality cache reports `x = y`, re-decide
+    /// the pair with the union-find suppressed, and report any hit the checker cannot
+    /// independently confirm. Very slow; for investigating the cache, not for checking.
+    #[serde(default)]
+    pub verify_uf_hits: bool,
 }
 
 impl TryFrom<&Path> for Config {
