@@ -272,4 +272,19 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         let one = self.succ(zero);
         self.leq(one, level)
     }
+
+    /// A level may denote `Prop` unless it is zero under no assignment of its params.
+    pub fn may_be_prop(&self, level: LevelPtr<'t>) -> bool { !self.is_never_zero(level) }
+
+    /// Syntactic, conservative test for a level that is nonzero under every assignment
+    /// of its params. Unlike `is_nonzero` this makes no use of the partial order, so it
+    /// never reports a level as nonzero on the strength of assumptions about params.
+    pub fn is_never_zero(&self, level: LevelPtr<'t>) -> bool {
+        match self.read_level(level) {
+            Zero | Param(..) => false,
+            Succ(..) => true,
+            Max(l, r, ..) => self.is_never_zero(l) || self.is_never_zero(r),
+            IMax(_, r, ..) => self.is_never_zero(r),
+        }
+    }
 }

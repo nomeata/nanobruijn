@@ -809,7 +809,7 @@ impl<'x, 't, 'p> PrettyPrinter<'x, 't, 'p> {
 
         let instd = self.ctx.inst(ExprPtr::closed(val), named_binder_tys.as_slice());
         let pp_val = {
-            let is_prop = self.ctx.with_tc(crate::env::EnvLimit::PpUnlimited, |tc| tc.is_proposition(ExprPtr::closed(declar.info().ty)).0);
+            let is_prop = self.ctx.with_tc(crate::env::EnvLimit::PpUnlimited, |tc| tc.is_prop(ExprPtr::closed(declar.info().ty)).0);
             line()
                 .concat(if is_prop && !self.options().proofs {
                     DocPtr::from("_")
