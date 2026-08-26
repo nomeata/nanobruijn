@@ -223,8 +223,8 @@ pub(crate) struct DepthFrame<'t> {
     pub(crate) infer_check: LazyMap<CorePtr<'t>, ExprPtr<'t>>,
     pub(crate) infer_no_check: LazyMap<CorePtr<'t>, ExprPtr<'t>>,
     pub(crate) defeq_neg: LazyMap<(ExprPtr<'t>, ExprPtr<'t>), (ExprPtr<'t>, ExprPtr<'t>, u16)>,
-    /// Per-depth weighted UF: core → ExprPtr(rep_core, shift_delta).
-    pub(crate) uf: LazyMap<CorePtr<'t>, ExprPtr<'t>>,
+    /// Per-depth positive def_eq cache: the pairs shown equal at this depth.
+    pub(crate) defeq_pos: LazyMap<(ExprPtr<'t>, ExprPtr<'t>), ()>,
 }
 
 impl<'t> DepthFrame<'t> {
@@ -234,7 +234,7 @@ impl<'t> DepthFrame<'t> {
             whnf: LazyMap::new(), wnu: LazyMap::new(),
             infer_check: LazyMap::new(), infer_no_check: LazyMap::new(),
             defeq_neg: LazyMap::new(),
-            uf: LazyMap::new(),
+            defeq_pos: LazyMap::new(),
         }
     }
 }
@@ -544,9 +544,9 @@ pub struct TcTrace {
     pub eq_cache_overflow_stores: u64,
     pub eq_cache_overflow_hits: u64,
     pub eq_cache_cross_depth_hits: u64,  // hit where stored_ptr != query_ptr (cross-depth)
-    /// UF hits audited under `verify_uf_hits`, and those the checker could not confirm.
-    pub uf_hits_audited: u64,
-    pub uf_hits_unconfirmed: u64,
+    /// UF hits audited under `verify_defeq_cache`, and those the checker could not confirm.
+    pub defeq_cache_hits_audited: u64,
+    pub defeq_cache_hits_unconfirmed: u64,
     pub fail_cache_overflow_stores: u64,
     pub fail_cache_overflow_hits: u64,
     pub infer_cache_hits: u64,
@@ -678,8 +678,8 @@ impl std::fmt::Display for TcTrace {
                 self.fail_cache_overflow_stores, self.fail_cache_overflow_hits,
                 self.eq_cache_cross_depth_hits)?;
         }
-        if self.uf_hits_audited > 0 {
-            write!(f, " | uf_audit={} unconfirmed={}", self.uf_hits_audited, self.uf_hits_unconfirmed)?;
+        if self.defeq_cache_hits_audited > 0 {
+            write!(f, " | uf_audit={} unconfirmed={}", self.defeq_cache_hits_audited, self.defeq_cache_hits_unconfirmed)?;
         }
         write!(f, " | wnu_st={}/{}/{}/{}", self.wnu_cache_new_inserts, self.wnu_cache_update_lower, self.wnu_cache_update_higher, self.wnu_cache_update_skip)?;
         write!(f, " | mka={}/{} mkp={} mkl={} mklt={} mkv={} mkpr={} mko={} fr={}/{}",
@@ -1843,6 +1843,22 @@ pub struct NameCache<'p> {
     pub(crate) list_cons: Option<NamePtr<'p>>,
 }
 
+/// A pair of pointers in a canonical order, so `{a, b}` and `{b, a}` are one key.
+/// Used to cache the def_eq results of individual pairs, as opposed to an equivalence
+/// closure over them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct SortedPair<'t>(CorePtr<'t>, CorePtr<'t>);
+
+impl<'t> SortedPair<'t> {
+    pub fn new(a: CorePtr<'t>, b: CorePtr<'t>) -> Self {
+        if a.get_hash() <= b.get_hash() {
+            Self(a, b)
+        } else {
+            Self(b, a)
+        }
+    }
+}
+
 pub(crate) struct TcCache<'t> {
     /// Base caches (bucket 0): closed expressions, depth-independent.
     pub(crate) whnf_base: LazyMap<CorePtr<'t>, ExprPtr<'t>>,
@@ -1850,8 +1866,8 @@ pub(crate) struct TcCache<'t> {
     pub(crate) infer_check_base: LazyMap<CorePtr<'t>, ExprPtr<'t>>,
     pub(crate) infer_no_check_base: LazyMap<CorePtr<'t>, ExprPtr<'t>>,
     pub(crate) defeq_neg_base: LazyMap<(ExprPtr<'t>, ExprPtr<'t>), (ExprPtr<'t>, ExprPtr<'t>, u16)>,
-    /// Depth-stacked weighted UF base (bucket 0): closed expressions.
-    pub(crate) uf_base: LazyMap<CorePtr<'t>, ExprPtr<'t>>,
+    /// Positive def_eq cache base (bucket 0): pairs of closed expressions shown equal.
+    pub(crate) defeq_pos_base: LazyMap<(ExprPtr<'t>, ExprPtr<'t>), ()>,
     /// Per-depth frames: local bindings + open-expression caches.
     /// Frame at index i corresponds to binder depth i+1.
     /// Cache bucket k>0 maps to frames[k-1].
@@ -1868,7 +1884,7 @@ impl<'t> TcCache<'t> {
             whnf_base: LazyMap::new(), wnu_base: LazyMap::new(),
             infer_check_base: LazyMap::new(), infer_no_check_base: LazyMap::new(),
             defeq_neg_base: LazyMap::new(),
-            uf_base: LazyMap::new(),
+            defeq_pos_base: LazyMap::new(),
             frames: Vec::new(),
             depth: 0,
         }
@@ -1963,14 +1979,14 @@ impl<'t> TcCache<'t> {
     pub(crate) fn infer_no_check_get(&self, b: usize, k: &CorePtr<'t>) -> Option<ExprPtr<'t>> { depth_get!(self, b, k, infer_no_check_base, infer_no_check) }
     pub(crate) fn infer_no_check_insert(&mut self, b: usize, k: CorePtr<'t>, v: ExprPtr<'t>) { depth_insert!(self, b, k, v, infer_no_check_base, infer_no_check) }
 
-    /// Raw UF lookup at a specific bucket. Returns stored ExprPtr if present.
-    pub(crate) fn uf_get(&self, bucket: usize, core: &CorePtr<'t>) -> Option<ExprPtr<'t>> {
-        depth_get!(self, bucket, core, uf_base, uf)
+    /// Positive def_eq cache lookup at a specific bucket.
+    pub(crate) fn defeq_pos_get(&self, bucket: usize, key: &(ExprPtr<'t>, ExprPtr<'t>)) -> bool {
+        depth_get!(self, bucket, key, defeq_pos_base, defeq_pos).is_some()
     }
 
-    /// Raw UF insert at a specific bucket.
-    pub(crate) fn uf_insert(&mut self, bucket: usize, core: CorePtr<'t>, rep: ExprPtr<'t>) {
-        depth_insert!(self, bucket, core, rep, uf_base, uf);
+    /// Positive def_eq cache insert at a specific bucket.
+    pub(crate) fn defeq_pos_insert(&mut self, bucket: usize, key: (ExprPtr<'t>, ExprPtr<'t>)) {
+        depth_insert!(self, bucket, key, (), defeq_pos_base, defeq_pos);
     }
 }
 
@@ -2061,7 +2077,7 @@ pub struct Config {
     /// the pair with the union-find suppressed, and report any hit the checker cannot
     /// independently confirm. Very slow; for investigating the cache, not for checking.
     #[serde(default)]
-    pub verify_uf_hits: bool,
+    pub verify_defeq_cache: bool,
 }
 
 impl TryFrom<&Path> for Config {

@@ -5,11 +5,10 @@ use crate::env::ReducibilityHint;
 use crate::env::{ConstructorData, Declar, DeclarInfo, Env, InductiveData, RecRule, RecursorData};
 use crate::expr::Expr;
 use crate::level::Level;
-use crate::union_find::UnionFind;
 use crate::unique_hasher::UniqueHasher;
 use crate::util::{
     nat_div, nat_mod, nat_sub, nat_gcd, nat_land, nat_lor,
-    nat_xor, nat_shr, nat_shl, new_fx_hash_set, CorePtr, FxHashSet,
+    nat_xor, nat_shr, nat_shl, new_fx_hash_set, CorePtr, FxHashSet, SortedPair,
     LevelPtr, LevelsPtr, NamePtr, ExprPtr, TcCtx, StringPtr
 };
 use std::collections::HashMap;
@@ -72,7 +71,7 @@ pub(crate) struct NanodaTcCache<'t> {
     pub(crate) infer_cache_no_check: UniqueHashMap<CorePtr<'t>, ExprPtr<'t>>,
     pub(crate) whnf_cache: UniqueHashMap<CorePtr<'t>, ExprPtr<'t>>,
     pub(crate) whnf_no_unfolding_cache: UniqueHashMap<CorePtr<'t>, ExprPtr<'t>>,
-    pub(crate) eq_cache: UnionFind<CorePtr<'t>>,
+    pub(crate) eq_cache: FxHashSet<SortedPair<'t>>,
     pub(crate) failure_cache: FxHashSet<(CorePtr<'t>, CorePtr<'t>)>,
 }
 
@@ -83,7 +82,7 @@ impl<'t> NanodaTcCache<'t> {
             infer_cache_no_check: new_unique_hash_map(),
             whnf_cache: new_unique_hash_map(),
             whnf_no_unfolding_cache: new_unique_hash_map(),
-            eq_cache: UnionFind::new(),
+            eq_cache: new_fx_hash_set(),
             failure_cache: new_fx_hash_set(),
         }
     }
@@ -885,7 +884,7 @@ impl<'x, 't: 'x, 'p: 't> NanodaTypeChecker<'x, 't, 'p> {
         };
         if result {
             if self.ctx.nlbv(x) == 0 && self.ctx.nlbv(y) == 0 {
-                self.tc_cache.eq_cache.union(x.core, y.core);
+                self.tc_cache.eq_cache.insert(SortedPair::new(x.core, y.core));
             }
         }
         result
@@ -1064,16 +1063,16 @@ impl<'x, 't: 'x, 'p: 't> NanodaTypeChecker<'x, 't, 'p> {
         if x == y {
             return Some(true)
         }
-        if self.ctx.nlbv(x) == 0 && self.ctx.nlbv(y) == 0 && self.tc_cache.eq_cache.check_uf_eq(x.core, y.core) {
+        if self.ctx.nlbv(x) == 0 && self.ctx.nlbv(y) == 0 && self.tc_cache.eq_cache.contains(&SortedPair::new(x.core, y.core)) {
             self.ctx.trace.eq_cache_hits += 1;
             return Some(true)
         }
         if let Some(r) = self.def_eq_sort(x, y) {
-            if r { self.tc_cache.eq_cache.union(x.core, y.core); }
+            if r { self.tc_cache.eq_cache.insert(SortedPair::new(x.core, y.core)); }
             return Some(r)
         }
         if let Some(r) = self.def_eq_binder_multi(x, y) {
-            if r { self.tc_cache.eq_cache.union(x.core, y.core); }
+            if r { self.tc_cache.eq_cache.insert(SortedPair::new(x.core, y.core)); }
             return Some(r)
         }
         None

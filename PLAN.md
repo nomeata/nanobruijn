@@ -583,52 +583,87 @@ Cost of the PR #22–#28 checks together: Init 226.64B → 227.51B instructions
 added — recomputing `is_recursive`, scanning types for a `_nested` prefix, and building
 and comparing recursor name sets.
 
-Deferred, needs a design decision:
 - **PR #27 (`05024bd`, part) — replace the union-find def-eq cache.** Upstream swaps
-  `UnionFind<ExprPtr>` for an `FxHashSet<SortedPair>` so the cache cannot conclude
-  `x = z` from cached `x = y` and `y = z`, and drops `union_find.rs` entirely. The
-  concern is that a transitive cache widens what the checker accepts relative to the
-  reference kernel, which caches pairs: one wrong positive is amplified across a whole
-  equivalence class.
-  The union-find is load-bearing here in a way it is not upstream: it subsumed
-  `eq_cache`, `defeq_pos` and `strong_cache` (see "Cache cleanup"), it is depth-stacked
-  over the local context, and it backs the `cheap_eq` speculative app congruence worth
-  **-16.7% on full Mathlib**. Note also that upstream's replacement cannot be adopted
-  verbatim: a flat `SortedPair` set is safe in nanoda because locally-nameless terms with
-  unique fvar ids denote the same thing everywhere, whereas a nanobruijn `ExprPtr` is
-  `(core, shift)` and means different things at different depths, so any replacement
-  would itself have to be depth-bucketed.
+  `UnionFind` for an `FxHashSet<SortedPair>` so the cache cannot conclude `x = z` from
+  cached `x = y` and `y = z`, and drops `union_find.rs` entirely. Done here too; see
+  below for why and for the nanobruijn-specific shape of the replacement.
 
-### Auditing the union-find (`verify_uf_hits`)
+### Why the union-find had to go
 
-To decide whether the transitivity concern is real here rather than argue it, the
-`verify_uf_hits` config option re-decides every union-find hit with the union-find
-suppressed (`TypeChecker::uf_suppressed`, which also bypasses the negative cache) and
-reports any hit the def-eq algorithm cannot independently confirm. Since the cache
-cleanup left the union-find as the *only* positive def-eq cache — `cheap_eq` is just
-`x == y || uf_check_eq(x, y)` — suppressing it makes the re-decision purely algorithmic.
-`NANOBRUIJN_AUDIT_CONTROL=1` is the self-test: it feeds the audit pairs the checker has
-just judged *un*equal, and every one must come back unconfirmed, otherwise a clean audit
-would mean nothing.
+The problem is not that transitivity concludes *wrong* equalities. Definitional equality
+really is transitive, so a transitive cache is sound exactly when `def_eq` is sound, and
+an audit over all of Init found the union-find never asserting an equality the algorithm
+could not re-derive (1,356,917 hits, 0 unconfirmed).
 
-Results (2026-08-26):
-- **Init** (54475 declarations): 1,356,917 hits, **286,221 (21%) reached transitively**,
-  **0 unconfirmed**. Transitivity is exercised heavily and never asserts an equality the
-  algorithm cannot re-derive from scratch.
-- **Arena suite** (28 tests): 11 unconfirmed hits total, in `proj-of-stuck-prop` and
-  `rec-missing-ih` — both adversarial exports that nanobruijn correctly *rejects*.
-  All 11 are **direct unions, not transitive**, so upstream's sorted-pair cache would
-  return exactly the same answer for them. They indicate that a def-eq result on
-  malformed input is not always reproducible on a second independent attempt, which is a
-  separate question from transitivity.
-- Control: with `NANOBRUIJN_AUDIT_CONTROL=1`, init-prelude reports 10 unconfirmed out of
-  10 known-unequal pairs, and 0 without it.
+The problem is that the union-find makes `def_eq` **non-monotonic in time**: a pair can
+be judged unequal, and then, after unrelated pairs are cached and the equivalence classes
+grow, judged equal. `def_eq` is an incomplete procedure, so a "no" that later becomes
+"yes" is not by itself unsound. It becomes unsound when a decision that has to stay
+*consistent across a check* is derived from it — whether a type is impredicative, whether
+a projection applies. Those must not change answer halfway through. That instability, not
+a fabricated equality, is what made the analogous cache unsound in Lean's own kernel.
+Nobody has engineered that attack against nanoda, but the principle carries over, so the
+cache should not be an equivalence closure regardless of whether an exploit exists today.
 
-So the specific failure mode upstream's change prevents does not reproduce here on any
-input available. This is evidence, not proof: a transitive cache is sound exactly when
-`def_eq` is sound, and what the audit shows is that the union-find is not manufacturing
-equalities beyond what the algorithm confirms. The cost of the audit when disabled is
-within noise (Init 227.51B → 227.71B, +0.09%).
+### The replacement
+
+Upstream's flat `SortedPair` set works for nanoda because locally-nameless terms with
+unique fvar ids denote the same thing everywhere. A nanobruijn `ExprPtr` is
+`(core, shift)` and denotes different things at different depths, so the positive cache is
+**depth-bucketed like every other nanobruijn cache**: `DepthFrame::defeq_pos` plus a
+`defeq_pos_base` for closed pairs, entered through the existing `defeq_normalize_pair` /
+`defeq_canon_key_open` helpers. It is an exact mirror of the negative (`defeq_neg`) cache,
+which already had precisely this shape — normalize the pair's shifts to a bucket, key on
+the hash-ordered pair, store in the frame the pair is anchored to so the entry dies when
+that binder is left. `defeq_canon_key_open` *is* upstream's `SortedPair::new`.
+
+`nanoda_tc.rs` is locally-nameless like upstream, so it takes upstream's change literally:
+a flat `FxHashSet<SortedPair<CorePtr>>`, with `SortedPair` in `util.rs`.
+
+Cost, single-threaded `perf stat`, median of 3 (Init) / 2 (std):
+
+| | union-find | pair cache | |
+|---|---|---|---|
+| Init (54k decls) | 227.64B | **226.56B** | −0.45% |
+| std (10M-line export) | 384.22B | **382.87B** | −0.35% |
+
+So the equivalence closure was not paying for itself: it produced only 0.7% more hits on
+Init (1,356,917 vs 1,348,015) while `uf_find`'s chain-walking cost more than the extra
+hits saved. The `cheap_eq` speculative app congruence (**-16.7% on full Mathlib**) does
+not depend on transitivity — `cheap_eq` is now `x == y || defeq_pos_lookup(x, y)` and
+keeps answering from the pair cache.
+
+An earlier measurement of the union-find's "transitive" hit share (21% on Init) was an
+overestimate: it classified a hit as transitive whenever neither side was the other's
+representative, which path compression and re-parenting make common for directly-unioned
+pairs too. The 0.7% hit-count difference is the honest figure.
+
+### Auditing the def_eq cache (`verify_defeq_cache`)
+
+The `verify_defeq_cache` config option re-decides every positive-cache hit with the
+def_eq caches suppressed (`TypeChecker::defeq_cache_suppressed`, which covers the negative
+cache too) and reports any hit the algorithm cannot independently confirm. Since the cache
+cleanup left this as the *only* positive def_eq cache, suppressing it makes the
+re-decision purely algorithmic. `NANOBRUIJN_AUDIT_CONTROL=1` is the self-test: it feeds
+the audit pairs the checker has just judged *un*equal, and every one must come back
+unconfirmed, otherwise a clean audit would mean nothing (init-prelude: 10 of 10 with the
+control, 0 without).
+
+With the pair cache, Init audits 1,348,015 hits with 0 unconfirmed. Under the union-find
+the same audit found 11 unconfirmed hits across the arena suite, all in `proj-of-stuck-prop`
+and `rec-missing-ih` — adversarial exports that are correctly rejected either way, and all
+of them direct unions rather than transitive. They are gone now, but they were never
+evidence about transitivity; they say a def_eq result on malformed input is not always
+reproducible on a second independent attempt, which is a separate open question.
+
+### Arena results
+
+Checked against the [lean-kernel-arena](https://github.com/leanprover/lean-kernel-arena)
+suite (29 tests built locally; `cedar`, `cslib` and `mathlib` skipped as they pull large
+repos). At `8cd5f61`, before these ports, three soundness tests failed — `extra-rec`,
+`orphan-rec` and `proj-of-subst-prop` were each *accepted*, i.e. a proof of `False` got
+through. PRs #26, #28 and #24 close them respectively. Current status: **28 correct,
+0 incorrect**, 1 `either` (`nested-nonuniform-param`, which the arena accepts either way).
 
 Not applicable:
 - `3e705b3` — nix flake (dev tooling)
@@ -708,6 +743,10 @@ Not applicable:
   - `strong_cache` + `eq_cache`: subsumed by UF. `cheap_eq` is now just
     `x == y || uf_check_eq(x, y)`. Removed.
   - Kept: `mk_app_dm_cache`. See below.
+  - **Superseded 2026-08-26**: the UF is gone (see "Why the union-find had to go") and
+    `defeq_pos` is back, now as the sole positive def_eq cache. `cheap_eq` is
+    `x == y || defeq_pos_lookup(x, y)`. The "0 hits" above was an artifact of the UF
+    being consulted first; standalone it takes 1.35M hits on Init.
 
 ## Current performance
 

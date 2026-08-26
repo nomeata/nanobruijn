@@ -34,7 +34,7 @@ pub(crate) fn test_get_export_file<'p>(config_path: Option<&Path>) -> Result<(Ex
             skip_declarations: 0,
             declaration_timeout_secs: 0,
             use_nanoda_tc: false,
-            verify_uf_hits: false,
+            verify_defeq_cache: false,
             declaration_filter: None,
         },
         Some(config_path) => Config::try_from(config_path)?,

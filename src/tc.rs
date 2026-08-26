@@ -58,12 +58,9 @@ pub(crate) enum InferFlag {
     Check,
 }
 
-/// Totals for `verify_uf_hits`, summed across checker threads and reported at the end.
-pub static UF_HITS_AUDITED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-pub static UF_HITS_UNCONFIRMED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-/// Hits where neither side is the other's representative, so the equality came from
-/// the equivalence class rather than from a single recorded union.
-pub static UF_HITS_TRANSITIVE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+/// Totals for `verify_defeq_cache`, summed across checker threads and reported at the end.
+pub static DEFEQ_CACHE_HITS_AUDITED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub static DEFEQ_CACHE_HITS_UNCONFIRMED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 pub struct TypeChecker<'x, 't, 'p> {
     pub(crate) ctx: &'x mut TcCtx<'t, 'p>,
@@ -85,9 +82,9 @@ pub struct TypeChecker<'x, 't, 'p> {
     /// to make sure that all of the universe paramters actually used in a declaration `d` are
     /// properly represented in the declaration's uparams info.
     pub(crate) declar_info: Option<DeclarInfo<'t>>,
-    /// Set while `verify_uf_hits` is re-deciding a pair the union-find claimed equal.
+    /// Set while `verify_defeq_cache` is re-deciding a pair the union-find claimed equal.
     /// Suppresses the union-find so the re-decision is independent of the cache.
-    pub(crate) uf_suppressed: bool,
+    pub(crate) defeq_cache_suppressed: bool,
     // Local context + per-depth caches are now bundled in tc_cache.frames.
 }
 
@@ -344,22 +341,11 @@ impl<'p> ExportFile<'p> {
 
 impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
     pub fn new(dag: &'x mut TcCtx<'t, 'p>, env: &'x Env<'x, 't>, declar_info: Option<DeclarInfo<'t>>) -> Self {
-        Self { ctx: dag, env, tc_cache: TcCache::new(), declar_info, uf_suppressed: false }
+        Self { ctx: dag, env, tc_cache: TcCache::new(), declar_info, defeq_cache_suppressed: false }
     }
 
     /// Current binding depth.
     fn depth(&self) -> usize { self.tc_cache.depth() }
-
-    /// Look up an ExprPtr in a depth-indexed cache, shifting the result to current depth.
-    /// Encapsulates: bucket = cache_bucket(x), get(bucket, x.core), result.shift_up(x.shift).
-    #[inline(always)]
-    fn expr_cache_get(&self, x: ExprPtr<'t>,
-        get: impl FnOnce(&TcCache<'t>, usize, &CorePtr<'t>) -> Option<ExprPtr<'t>>
-    ) -> Option<ExprPtr<'t>> {
-        let bucket = self.cache_bucket(x);
-        let stored = get(&self.tc_cache, bucket, &x.core)?;
-        Some(stored.shift_up(x.shift))
-    }
 
     /// Cache bucket for an ExprPtr: 0 for closed, depth-shift for open.
     /// This is the depth at which the core's variables are anchored.
@@ -368,80 +354,64 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         if e.is_closed() { 0 } else { self.depth() - e.shift as usize }
     }
 
-    /// Cross-shift depth-stacked UF: find representative ExprPtr at current depth.
-    /// Stored entry: core → ExprPtr(rep, delta). On find(ExprPtr(A, s)):
-    /// look up A at cache_bucket(A), get ExprPtr(R, d), follow with ExprPtr(R, d+s).
-    /// Closed cores always return ExprPtr::closed.
-    fn uf_find(&self, x: ExprPtr<'t>) -> ExprPtr<'t> {
-        if x.is_closed() {
-            // Closed: look up in base bucket, shift is irrelevant
-            let mut cur = x.core;
-            loop {
-                match self.tc_cache.uf_get(0, &cur) {
-                    Some(rep) => cur = rep.core,
-                    None => return ExprPtr::closed(cur),
-                }
-            }
-        }
-        match self.expr_cache_get(x, TcCache::uf_get) {
-            Some(rep) => self.uf_find(rep),
-            None => x,
-        }
-    }
-
-    fn uf_check_eq(&self, x: ExprPtr<'t>, y: ExprPtr<'t>) -> bool {
-        if self.uf_suppressed {
+    /// Look up a pair in the positive def_eq cache. Only pairs that were themselves
+    /// shown equal are recorded, so a hit means exactly "this pair was decided before",
+    /// never "this pair is connected to one that was". See `defeq_pos_store`.
+    fn defeq_pos_lookup(&mut self, x: ExprPtr<'t>, y: ExprPtr<'t>) -> bool {
+        if self.defeq_cache_suppressed {
             return false
         }
-        self.uf_find(x) == self.uf_find(y)
+        let (nx, ny, bucket) = self.defeq_normalize_pair(x, y);
+        let (key, _) = self.defeq_canon_key_open(nx, ny);
+        if self.tc_cache.defeq_pos_get(bucket, &key) {
+            self.ctx.trace.defeq_open_pos_hits += 1;
+            true
+        } else {
+            false
+        }
     }
 
-    /// Audit a union-find hit: re-decide `x = y` with the union-find suppressed, so the
-    /// answer comes from the def-eq algorithm alone. A hit the checker cannot confirm is
-    /// either the cache fabricating an equality (a bug in the bucket/shift arithmetic) or
-    /// transitivity reaching past what the algorithm can prove directly.
-    fn audit_uf_hit(&mut self, x: ExprPtr<'t>, y: ExprPtr<'t>) {
-        if self.uf_suppressed {
+    /// Record that `x` and `y` were shown definitionally equal, in the frame the pair is
+    /// anchored to, so the entry is dropped when that binder is left.
+    ///
+    /// Deliberately *not* an equivalence closure. A union-find would additionally answer
+    /// `x = z` once `x = y` and `y = z` are both known, which makes def_eq non-monotonic
+    /// in time: a pair can be judged unequal and then, after unrelated pairs are cached,
+    /// equal. def_eq is an incomplete procedure, so that is not by itself unsound, but it
+    /// destabilizes decisions that have to stay consistent across a check — whether a type
+    /// is impredicative, whether a projection applies — and that instability is what made
+    /// the analogous cache unsound in Lean's own kernel.
+    fn defeq_pos_store(&mut self, x: ExprPtr<'t>, y: ExprPtr<'t>) {
+        if self.defeq_cache_suppressed {
             return
         }
-        let transitive = self.uf_find(x) != y && self.uf_find(y) != x;
-        self.ctx.trace.uf_hits_audited += 1;
-        UF_HITS_AUDITED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        // `uf_suppressed` also bypasses the negative cache, so the re-decision is not
+        let (nx, ny, bucket) = self.defeq_normalize_pair(x, y);
+        let (key, _) = self.defeq_canon_key_open(nx, ny);
+        self.tc_cache.defeq_pos_insert(bucket, key);
+    }
+
+    /// Audit a positive-cache hit: re-decide `x = y` with the def_eq caches suppressed, so
+    /// the answer comes from the algorithm alone. Any hit the checker cannot confirm means
+    /// the cache is answering for a pair it was not entitled to.
+    fn audit_defeq_cache_hit(&mut self, x: ExprPtr<'t>, y: ExprPtr<'t>) {
+        if self.defeq_cache_suppressed {
+            return
+        }
+        self.ctx.trace.defeq_cache_hits_audited += 1;
+        DEFEQ_CACHE_HITS_AUDITED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        // Suppression covers the negative cache too, so the re-decision is not
         // short-circuited by a previously recorded failure.
-        self.uf_suppressed = true;
+        self.defeq_cache_suppressed = true;
         let confirmed = self.def_eq(x, y);
-        self.uf_suppressed = false;
+        self.defeq_cache_suppressed = false;
         if !confirmed {
-            self.ctx.trace.uf_hits_unconfirmed += 1;
-            UF_HITS_UNCONFIRMED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            self.ctx.trace.defeq_cache_hits_unconfirmed += 1;
+            DEFEQ_CACHE_HITS_UNCONFIRMED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             eprintln!(
-                "UNCONFIRMED UF HIT ({}): {:?}\n                    vs : {:?}",
-                if transitive { "transitive" } else { "direct union" },
+                "UNCONFIRMED DEFEQ CACHE HIT: {:?}\n                        vs : {:?}",
                 self.ctx.core_desc(x.core, 4),
                 self.ctx.core_desc(y.core, 4)
             );
-        }
-    }
-
-    fn uf_union(&mut self, x: ExprPtr<'t>, y: ExprPtr<'t>) {
-        let rx = self.uf_find(x);
-        let ry = self.uf_find(y);
-        if rx == ry { return; }
-        let depth = self.depth();
-        let bx = self.cache_bucket(rx);
-        let by = self.cache_bucket(ry);
-        // Store non-rep at its bucket, pointing to rep.
-        // Rep = lower bucket (survives more pops).
-        // adjust_depth handles closed reps transparently.
-        if bx <= by {
-            // rx is rep. Adjust rx from current depth to ry's bucket depth.
-            let stored = rx.adjust_depth(depth, by);
-            self.tc_cache.uf_insert(by, ry.core, stored);
-        } else {
-            // ry is rep. Adjust ry from current depth to rx's bucket depth.
-            let stored = ry.adjust_depth(depth, bx);
-            self.tc_cache.uf_insert(bx, rx.core, stored);
         }
     }
 
@@ -1365,7 +1335,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
     /// O(1) equality check: pointer eq + UF transitive closure.
     /// Never calls def_eq recursively.
     fn cheap_eq(&mut self, x: ExprPtr<'t>, y: ExprPtr<'t>) -> bool {
-        x == y || self.uf_check_eq(x, y)
+        x == y || self.defeq_pos_lookup(x, y)
     }
 
     fn def_eq_app(&mut self, x: ExprPtr<'t>, y: ExprPtr<'t>) -> bool {
@@ -1436,15 +1406,15 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
     }
     pub fn def_eq(&mut self, x: ExprPtr<'t>, y: ExprPtr<'t>) -> bool {
         let r = self.def_eq_tagged(x, y, "");
-        // Control for the `verify_uf_hits` audit: feed it pairs the checker has just
+        // Control for the `verify_defeq_cache` audit: feed it pairs the checker has just
         // judged *un*equal. Every one of those must come back unconfirmed, otherwise a
         // clean audit would mean nothing.
         if !r
-            && !self.uf_suppressed
-            && self.ctx.export_file.config.verify_uf_hits
+            && !self.defeq_cache_suppressed
+            && self.ctx.export_file.config.verify_defeq_cache
             && std::env::var_os("NANOBRUIJN_AUDIT_CONTROL").is_some()
         {
-            self.audit_uf_hit(x, y);
+            self.audit_defeq_cache_hit(x, y);
         }
         r
     }
@@ -1505,7 +1475,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         if self.ctx.is_app(x) && self.ctx.is_app(y) {
             if let Some(true) = self.spec_app_congruence(x, y) {
                 // Cache the result via UF (subsumes the old eq_cache/defeq_pos).
-                self.uf_union(x, y);
+                self.defeq_pos_store(x, y);
                 return true;
             }
         }
@@ -1548,8 +1518,8 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             };
             if let Some(true) = spec_result {
                 self.ctx.trace.spec_app2_hit += 1;
-                self.uf_union(x, y);
-                self.uf_union(x_n, y_n);
+                self.defeq_pos_store(x, y);
+                self.defeq_pos_store(x_n, y_n);
                 return true;
             }
         }
@@ -1581,7 +1551,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             }
         };
         if result {
-            self.uf_union(x, y);
+            self.defeq_pos_store(x, y);
         }
         result
     }
@@ -1759,25 +1729,19 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         if x == y {
             return Some(true)
         }
-        // Transitive weighted UnionFind (depth-stacked).
-        if self.uf_check_eq(x, y) {
-            self.ctx.trace.eq_cache_uf_hits += 1;
-            if self.ctx.export_file.config.verify_uf_hits {
-                // A pair joined by a direct union has one side as the other's representative;
-                // anything else was reached through the class, i.e. by transitivity.
-                if self.uf_find(x) != y && self.uf_find(y) != x {
-                    UF_HITS_TRANSITIVE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                }
-                self.audit_uf_hit(x, y);
+        // Depth-bucketed positive def_eq cache: this exact pair, decided before.
+        if self.defeq_pos_lookup(x, y) {
+            if self.ctx.export_file.config.verify_defeq_cache {
+                self.audit_defeq_cache_hit(x, y);
             }
             return Some(true)
         }
         if let Some(r) = self.def_eq_sort(x, y) {
-            if r { self.uf_union(x, y); }
+            if r { self.defeq_pos_store(x, y); }
             return Some(r)
         }
         if let Some(r) = self.def_eq_binder_multi(x, y) {
-            if r { self.uf_union(x, y); }
+            if r { self.defeq_pos_store(x, y); }
             return Some(r)
         }
         None
@@ -1828,7 +1792,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
 
     /// Look up in the negative def_eq cache (failure cache).
     fn defeq_neg_lookup(&mut self, x: ExprPtr<'t>, y: ExprPtr<'t>) -> bool {
-        if self.uf_suppressed {
+        if self.defeq_cache_suppressed {
             // A stale "tried and failed" would make an audited pair look unconfirmable.
             return false
         }
