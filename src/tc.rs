@@ -1861,7 +1861,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         // Sort is always closed, so read_expr is equivalent to view_expr but cheaper.
         match self.ctx.read_expr(ty.core) {
             Sort { level, .. } => (self.ctx.is_zero(level), ty),
-            _ => (false, ty),
+            _ => panic!("expected a sort"),
         }
     }
 
@@ -1872,7 +1872,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         let ty = self.infer_then_whnf(e, InferOnly);
         match self.ctx.read_expr(ty.core) {
             Sort { level, .. } => (self.ctx.may_be_prop(level), ty),
-            _ => (false, ty),
+            _ => panic!("expected a sort"),
         }
     }
 
