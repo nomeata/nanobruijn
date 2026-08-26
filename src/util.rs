@@ -406,6 +406,9 @@ pub struct ExportFile<'p> {
     pub config: Config,
     // Information used for setting EnvLimit during inductive checking.
     pub mutual_block_sizes: FxHashMap<NamePtr<'p>, (usize, usize)>,
+    /// The recursor names the export file associates with each inductive type; used
+    /// during inductive checking to require that they match the derived recursors.
+    pub ind_name_to_recursor_names: FxHashMap<NamePtr<'p>, FxHashSet<NamePtr<'p>>>,
     // osnf_core removed: ExprPtr refactor eliminates Shift DAG nodes entirely
 }
 
