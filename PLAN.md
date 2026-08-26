@@ -578,6 +578,11 @@ Applied:
   it is never checked against a derivation. Factored into `ck_recursor_has_inductive`
   since nanobruijn dispatches declarations separately for its two checkers.
 
+Cost of the PR #22–#28 checks together: Init 226.64B → 227.51B instructions
+(**+0.38%**, single-threaded, `perf stat`). Most of it is the per-inductive work these
+added — recomputing `is_recursive`, scanning types for a `_nested` prefix, and building
+and comparing recursor name sets.
+
 Deferred, needs a design decision:
 - **PR #27 (`05024bd`, part) — replace the union-find def-eq cache.** Upstream swaps
   `UnionFind<ExprPtr>` for an `FxHashSet<SortedPair>` so the cache cannot conclude
