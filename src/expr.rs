@@ -1224,6 +1224,51 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         result
     }
 
+    /// Test whether any `Const` or `Proj` in `e` refers to a name whose outermost
+    /// component is the private `_nested` prefix, which the kernel reserves for the
+    /// auxiliary types it creates while checking nested inductives.
+    pub(crate) fn has_nested_pfx(&self, e: CorePtr<'t>, nested_pfx: NamePtr<'t>) -> bool {
+        debug_assert_eq!("_nested", format!("{:?}", self.debug_print(nested_pfx)));
+        self.find_e(e, |eprime| match self.read_expr(eprime) {
+            Const { name, .. } | Proj { ty_name: name, .. } => self.get_pfx(name) == nested_pfx,
+            _ => false,
+        })
+    }
+
+    /// Like `find_const`, but the predicate sees every subterm rather than only
+    /// the names of constants.
+    pub(crate) fn find_e<F>(&self, e: CorePtr<'t>, pred: F) -> bool
+    where
+        F: FnOnce(CorePtr<'t>) -> bool + Copy, {
+        let mut cache = crate::util::new_fx_hash_map();
+        self.find_aux(e, pred, &mut cache)
+    }
+
+    fn find_aux<F>(&self, e: CorePtr<'t>, pred: F, cache: &mut FxHashMap<CorePtr<'t>, bool>) -> bool
+    where
+        F: FnOnce(CorePtr<'t>) -> bool + Copy, {
+        if let Some(cached) = cache.get(&e) {
+            *cached
+        } else {
+            let r = match self.read_expr(e) {
+                Var { .. } | Sort { .. } | NatLit { .. } | StringLit { .. } | Const { .. } => pred(e),
+                App { fun, arg, .. } =>
+                    pred(e) || self.find_aux(fun.core, pred, cache) || self.find_aux(arg.core, pred, cache),
+                Pi { binder_type, body, .. } | Lambda { binder_type, body, .. } =>
+                    pred(e) || self.find_aux(binder_type.core, pred, cache) || self.find_aux(body.core, pred, cache),
+                Let { binder_type, val, body, .. } =>
+                    pred(e)
+                        || self.find_aux(binder_type.core, pred, cache)
+                        || self.find_aux(val.core, pred, cache)
+                        || self.find_aux(body.core, pred, cache),
+                Local { binder_type, .. } => pred(e) || self.find_aux(binder_type, pred, cache),
+                Proj { structure, .. } => pred(e) || self.find_aux(structure.core, pred, cache),
+            };
+            cache.insert(e, r);
+            r
+        }
+    }
+
     pub(crate) fn find_const<F>(&self, e: CorePtr<'t>, pred: F) -> bool
     where
         F: FnOnce(NamePtr<'t>) -> bool + Copy, {
