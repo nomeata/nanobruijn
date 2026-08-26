@@ -118,10 +118,64 @@ impl<'p> ExportFile<'p> {
             }
             Recursor(recursor_data) => {
                 let (r, dag) = self.with_tc_and_declar_reusing(*d.info(), dag, |tc| tc.check_declar_info(d).unwrap());
-                for ind_name in recursor_data.all_inductives.iter() {
-                    assert!(self.declars.get(ind_name).is_some())
-                }
+                self.ck_recursor_has_inductive(recursor_data);
                 (r.1, dag)
+            }
+        }
+    }
+
+    /// Require that a recursor is derived from an inductive declaration that exists and
+    /// was exported before it. This is the flip side of the check that an inductive
+    /// derives exactly the recursors the export file associates with it: without it, a
+    /// recursor naming no inductive, or one exported after it, would never be checked
+    /// against a derivation.
+    fn ck_recursor_has_inductive(&self, recursor_data: &RecursorData<'p>) {
+        use Declar::*;
+        match recursor_data.all_inductives.get(0) {
+            None => self.with_ctx(|ctx| {
+                panic!(
+                    "Recursors must be derived from an associated inductive type, but recursor {:?} had none",
+                    ctx.debug_print(recursor_data.info.name)
+                )
+            }),
+            Some(ind_name) => match self.declars.get(ind_name) {
+                None => self.with_ctx(|ctx| {
+                    panic!(
+                        "Recursors must be derived from an associated inductive declaration. Inductive declaration {:?} does not exist",
+                        ctx.debug_print(*ind_name)
+                    )
+                }),
+                Some(Inductive { .. }) => (),
+                Some(_) => self.with_ctx(|ctx| {
+                    panic!(
+                        "Recursors must be derived from an associated inductive type. Declaration {:?} is not an inductive type",
+                        ctx.debug_print(*ind_name)
+                    )
+                }),
+            },
+        }
+        let recursor_idx = self.declars.get_index_of(&recursor_data.info.name).unwrap();
+        for ind_name in recursor_data.all_inductives.iter() {
+            match self.declars.get_index_of(ind_name) {
+                None => self.with_ctx(|ctx| {
+                    panic!(
+                        "Recursor {:?} references inductive declaration {:?} which does not exist.",
+                        ctx.debug_print(recursor_data.info.name),
+                        ctx.debug_print(*ind_name)
+                    )
+                }),
+                Some(ind_idx) =>
+                    if recursor_idx <= ind_idx {
+                        self.with_ctx(|ctx| {
+                            panic!(
+                                "Inductive declarations must be exported prior to any derived recursors. ({:?}, {}), ({:?}, {})",
+                                ctx.debug_print(recursor_data.info.name),
+                                recursor_idx,
+                                ctx.debug_print(*ind_name),
+                                ind_idx
+                            )
+                        })
+                    },
             }
         }
     }
@@ -153,9 +207,7 @@ impl<'p> ExportFile<'p> {
             }
             Recursor(recursor_data) => {
                 let (r, dag) = self.with_nanoda_tc_and_declar_reusing(*d.info(), dag, |tc| tc.check_declar_info(d).unwrap());
-                for ind_name in recursor_data.all_inductives.iter() {
-                    assert!(self.declars.get(ind_name).is_some())
-                }
+                self.ck_recursor_has_inductive(recursor_data);
                 (r.1, dag)
             }
         }
