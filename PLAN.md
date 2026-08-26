@@ -539,7 +539,7 @@ These approaches were tried and found counterproductive, unsound, or out of scop
 
 ## Upstream nanoda porting
 
-Reviewed all nanoda_lib commits from fork point `68d5ca9` through `6d2f037` (2026-04-07).
+Reviewed all nanoda_lib commits from fork point `68d5ca9` through `0505569` (2026-08-24).
 
 Applied:
 - **`4219437` — Encode DagMarker in bit 31 of Ptr** (by Mark Ruvald Pedersen):
@@ -555,11 +555,56 @@ Applied:
   `InductiveData`/`ConstructorData`/`RecursorData` assert that auxiliary data computed
   while checking inductives matches the export file's assertions, and
   `check_inductive_declar` recomputes `is_recursive` and asserts it matches `isRec`.
+- **PR #23 (`404660c`) — upstream safety checks** (by ammkrn): the private `_nested`
+  name prefix is rejected in the types of a checked inductive, its mutual block, and its
+  constructors (`TcCtx::get_pfx`, `has_nested_pfx`, generic `find_e` traversal);
+  `def_eq_proj` requires equal structure names, not just equal indices.
+- **PR #24 (`78ded44`) — conservative always/never zero** (by ammkrn): `is_proposition`
+  splits into `is_prop` (type whnfs to `Sort l` with `l <= 0`, via the partial order) and
+  `may_be_prop` (`l` not *syntactically* guaranteed nonzero, via the new structural
+  `is_never_zero`, which unlike `is_nonzero` never reasons from assumptions about params).
+  `infer_proj` and `iota_try_eta_struct` guard on `may_be_prop`, so their restrictions
+  apply whenever the type *might* be a proposition.
+- **PR #26 (`f04456a`) — underived recursor checks** (by ammkrn): the parser records
+  `ind_name_to_recursor_names`; `ck_recursor_names_simple` requires set equality between
+  derived and exported recursor names, so extra recursors cannot be smuggled in. For
+  nested inductives the derived set is `mk_base_rec_names` unioned with the unspecialized
+  nested recursor names.
+- **PR #27 (`05024bd`, part) — is_sort guards** (by ammkrn): `is_prop`/`may_be_prop`
+  panic when the argument's type does not whnf to a `Sort`, instead of reporting
+  "not a prop" for a malformed input. See below for the part not taken.
+- **PR #28 (`8a327a1`) — prohibit orphan recursors** (by ammkrn): every recursor must
+  name an inductive that exists, is an inductive, and was exported before it — otherwise
+  it is never checked against a derivation. Factored into `ck_recursor_has_inductive`
+  since nanobruijn dispatches declarations separately for its two checkers.
+
+Deferred, needs a design decision:
+- **PR #27 (`05024bd`, part) — replace the union-find def-eq cache.** Upstream swaps
+  `UnionFind<ExprPtr>` for an `FxHashSet<SortedPair>` so the cache cannot conclude
+  `x = z` from cached `x = y` and `y = z`, and drops `union_find.rs` entirely. The
+  concern is that a transitive cache widens what the checker accepts relative to the
+  reference kernel, which caches pairs: one wrong positive is amplified across a whole
+  equivalence class. That argument applies to nanobruijn as-is — `uf_check_eq` returns
+  `Some(true)` from `uf_find(x) == uf_find(y)` with no verification.
+  But the union-find is load-bearing here in a way it is not upstream: it subsumed
+  `eq_cache`, `defeq_pos` and `strong_cache` (see "Cache cleanup"), it is depth-stacked
+  over the local context, it took 988k hits on Init alone, and it backs the `cheap_eq`
+  speculative app congruence worth **-16.7% on full Mathlib**. Removing it is a change to
+  the design under test, not a mechanical port, so it is left for an explicit decision.
 
 Not applicable:
 - `3e705b3` — nix flake (dev tooling)
 - `7981ff6` / `224b7c1` — README update for JSON export format
 - `514a1a5` / `14bbb5c` — semver bumps
+- `b109108` — README paragraph documenting `unsafe_permit_all_axioms`. nanobruijn's
+  README defers config options to `--help` rather than enumerating them, and the
+  mutual-exclusivity enforcement the paragraph describes is already in `util.rs`.
+- **PR #21 (`698c869`) — exit code 2 for discontiguous backrefs.** Upstream *declines*
+  export files whose `in`/`il`/`ie` indices are not contiguous. nanobruijn deliberately
+  went the other way in `5a42fcc`: the parser resolves references through
+  `name_remap`/`level_remap`/`expr_remap` and *supports* sparse and out-of-order indices,
+  with the arena's `LevelIndexOutOfOrder` and `SparseNameIndex` cases as regression tests.
+  Porting this would remove a tested capability.
 
 ## TODO
 
