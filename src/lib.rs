@@ -5,6 +5,7 @@
 #![allow(clippy::too_many_arguments)]
 
 pub mod debug_printer;
+pub mod canon;
 pub mod env;
 pub mod expr;
 pub mod inductive;

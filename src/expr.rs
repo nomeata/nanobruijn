@@ -92,6 +92,35 @@ pub enum FVarId {
 }
 
 impl<'a> Expr<'a> {
+    /// The same node with every child core replaced by `f(core)` (shifts kept).
+    pub(crate) fn map_cores(&self, mut f: impl FnMut(CorePtr<'a>) -> CorePtr<'a>) -> Self {
+        let mut m = |p: ExprPtr<'a>| ExprPtr { core: f(p.core), shift: p.shift };
+        match *self {
+            Expr::StringLit { .. } | Expr::NatLit { .. } | Expr::Var { .. } | Expr::Sort { .. }
+            | Expr::Const { .. } | Expr::Local { .. } => *self,
+            Expr::Proj { ty_name, idx, structure } => Expr::Proj { ty_name, idx, structure: m(structure) },
+            Expr::App { fun, arg } => Expr::App { fun: m(fun), arg: m(arg) },
+            Expr::Pi { binder_name, binder_style, binder_type, body } =>
+                Expr::Pi { binder_name, binder_style, binder_type: m(binder_type), body: m(body) },
+            Expr::Lambda { binder_name, binder_style, binder_type, body } =>
+                Expr::Lambda { binder_name, binder_style, binder_type: m(binder_type), body: m(body) },
+            Expr::Let { binder_name, binder_type, val, body, nondep } =>
+                Expr::Let { binder_name, binder_type: m(binder_type), val: m(val), body: m(body), nondep },
+        }
+    }
+
+    /// Calls `f` on every child pointer.
+    pub(crate) fn for_each_child(&self, mut f: impl FnMut(ExprPtr<'a>)) {
+        match *self {
+            Expr::StringLit { .. } | Expr::NatLit { .. } | Expr::Var { .. } | Expr::Sort { .. }
+            | Expr::Const { .. } | Expr::Local { .. } => {}
+            Expr::Proj { structure, .. } => f(structure),
+            Expr::App { fun, arg } => { f(fun); f(arg) }
+            Expr::Pi { binder_type, body, .. } | Expr::Lambda { binder_type, body, .. } => { f(binder_type); f(body) }
+            Expr::Let { binder_type, val, body, .. } => { f(binder_type); f(val); f(body) }
+        }
+    }
+
     pub(crate) fn get_hash(&self) -> u64 {
         match self {
             Var { dbj_idx } => hash64!(VAR_HASH, dbj_idx),

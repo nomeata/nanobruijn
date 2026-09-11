@@ -170,3 +170,64 @@ fn hash_test0() -> Result<(), Box<dyn Error>> {
         })
     })
 }
+
+/// The shortest pair that used to have two representations: `λx. x #2` built as the lazily
+/// shifted `(λx. x #1) + 1`, or directly with the shift baked into the body. The binder
+/// constructors now extract the shift through the binder (`Theory.lean`'s `lam` rule,
+/// `canon.rs`), so both routes must yield the same `(core, shift)`.
+#[test]
+fn osnf_canonical_under_binder() -> Result<(), Box<dyn Error>> {
+    test_ctx(None, |ctx| {
+        let zero = ctx.zero();
+        let ty = ctx.mk_sort(zero);
+        let x = ctx.str1("x");
+        let v0 = ctx.mk_var(0);
+        // lazy route: build λx. x #1, then shift the whole term by 1
+        let v1 = ctx.mk_var(1);
+        let body1 = ctx.mk_app(v0, v1);
+        let lam1 = ctx.mk_lambda(x, crate::expr::BinderStyle::Default, ty, body1);
+        let lazy = lam1.shift_up(1);
+        // baked route: build λx. x #2 directly
+        let v2 = ctx.mk_var(2);
+        let body2 = ctx.mk_app(v0, v2);
+        let baked = ctx.mk_lambda(x, crate::expr::BinderStyle::Default, ty, body2);
+        assert_eq!(lazy, baked, "lazy = {} +{}, baked = {} +{}", ctx.core_desc(lazy.core, 6), lazy.shift, ctx.core_desc(baked.core, 6), baked.shift);
+        // and a binder nested inside a binder: under λx. λy., `#2` is the first free variable,
+        // so λx. λy. y x #3 == ((λx. λy. y x #2) + 1)
+        let y = ctx.str1("y");
+        let (v1, v2, v3) = (ctx.mk_var(1), ctx.mk_var(2), ctx.mk_var(3));
+        let inner = ctx.mk_app(v0, v1);
+        let inner1 = ctx.mk_app(inner, v3);
+        let lam_in = ctx.mk_lambda(y, crate::expr::BinderStyle::Default, ty, inner1);
+        let baked2 = ctx.mk_lambda(x, crate::expr::BinderStyle::Default, ty, lam_in);
+        let inner2 = ctx.mk_app(inner, v2);
+        let lam_in2 = ctx.mk_lambda(y, crate::expr::BinderStyle::Default, ty, inner2);
+        let lazy2 = ctx.mk_lambda(x, crate::expr::BinderStyle::Default, ty, lam_in2).shift_up(1);
+        assert_eq!(lazy2, baked2, "nested: lazy = {} +{}, baked = {} +{}", ctx.core_desc(lazy2.core, 8), lazy2.shift, ctx.core_desc(baked2.core, 8), baked2.shift);
+    })
+}
+
+/// Beyond 64 binders the extractable shift comes from the out-of-line bitset tail:
+/// `λx. x #61` built directly, or `λx. x #51` built ten binders shallower and lazily
+/// shifted by 10, must be one pointer, `(λx. x #1) + 60`.
+#[test]
+fn osnf_canonical_beyond_the_head_word() -> Result<(), Box<dyn Error>> {
+    test_ctx(None, |ctx| {
+        let zero = ctx.zero();
+        let ty = ctx.mk_sort(zero);
+        let x = ctx.str1("x");
+        let v0 = ctx.mk_var(0);
+        let (v51, v61, v130) = (ctx.mk_var(51), ctx.mk_var(61), ctx.mk_var(130));
+        let b_direct = ctx.mk_app(v0, v61);
+        let direct = ctx.mk_lambda(x, crate::expr::BinderStyle::Default, ty, b_direct);
+        let b_shallow = ctx.mk_app(v0, v51);
+        let lazy = ctx.mk_lambda(x, crate::expr::BinderStyle::Default, ty, b_shallow).shift_up(10);
+        assert_eq!(direct, lazy, "direct = {} +{}, lazy = {} +{}", ctx.core_desc(direct.core, 6), direct.shift, ctx.core_desc(lazy.core, 6), lazy.shift);
+        assert_eq!(direct.shift, 60);
+        // and well into the tail: λx. x #130 == (λx. x #1) + 129
+        let b_far = ctx.mk_app(v0, v130);
+        let far = ctx.mk_lambda(x, crate::expr::BinderStyle::Default, ty, b_far);
+        assert_eq!(far.shift, 129);
+        assert_eq!(far.core, direct.core);
+    })
+}

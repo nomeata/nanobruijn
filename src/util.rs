@@ -338,6 +338,8 @@ pub(crate) fn nat_lor(x: BigUint, y: BigUint) -> BigUint {
 pub struct ExprCache<'t> {
     /// Caches (e, substs_id, params) |-> output for instantiation.
     pub(crate) inst_cache: Vec<(u64, u64, CorePtr<'t>, ExprPtr<'t>)>,
+    /// Memos for the binder canonicalization (`canon.rs`).
+    pub(crate) canon: crate::canon::CanonMemo<'t>,
     pub(crate) inst_substs_id: u64,
     /// Caches (e, ks, vs) |-> output for level substitution.
     pub(crate) subst_cache: FxHashMap<(CorePtr<'t>, LevelsPtr<'t>, LevelsPtr<'t>), ExprPtr<'t>>,
@@ -364,6 +366,7 @@ impl<'t> ExprCache<'t> {
     fn new() -> Self {
         Self {
             inst_cache: Vec::new(),
+            canon: crate::canon::CanonMemo::new(),
             inst_substs_id: 0,
             abstr_cache: new_fx_hash_map(),
             subst_cache: new_fx_hash_map(),
@@ -538,6 +541,9 @@ pub struct TcTrace {
     pub alloc_expr_calls: u64,
     pub whnf_cache_hits: u64,
     pub eq_cache_hits: u64,
+    /// binder canonicalization: extractions through a binder body that uses its bound variable,
+    /// and nodes rebuilt applying them.
+    pub canon_extract: u64, pub canon_unshift_nodes: u64,
     pub eq_cache_uf_hits: u64,
     pub eq_cache_verify_fail: u64,
     pub fail_cache_verify_fail: u64,
@@ -677,6 +683,9 @@ impl std::fmt::Display for TcTrace {
                 self.eq_cache_overflow_stores, self.eq_cache_overflow_hits,
                 self.fail_cache_overflow_stores, self.fail_cache_overflow_hits,
                 self.eq_cache_cross_depth_hits)?;
+        }
+        if self.canon_extract > 0 {
+            write!(f, " | canon: ex={} unshift={}", self.canon_extract, self.canon_unshift_nodes)?;
         }
         if self.defeq_cache_hits_audited > 0 {
             write!(f, " | uf_audit={} unconfirmed={}", self.defeq_cache_hits_audited, self.defeq_cache_hits_unconfirmed)?;
@@ -821,6 +830,23 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         }
     }
 
+    /// Loose-bvar bitset of a core, as (`head`, `tail`).
+    #[inline]
+    pub(crate) fn core_bvset(&self, c: CorePtr<'t>) -> (u64, &[u64]) {
+        match c.dag_marker() {
+            DagMarker::ExportFile => self.export_file.dag.core_bvset(c.idx()),
+            DagMarker::TcCtx => self.dag.core_bvset(c.idx()),
+        }
+    }
+
+    /// Loose-bvar bitset of a pointer, as the core's `(head, tail)` and the shift; `None` if closed.
+    #[inline]
+    pub(crate) fn bvset_ptr(&self, e: ExprPtr<'t>) -> Option<(u64, &[u64], u16)> {
+        if e.is_closed() { return None; }
+        let (h, t) = self.core_bvset(e.core);
+        Some((h, t, e.shift))
+    }
+
     /// Compute the number of loose bvars of a new Expr from its ExprPtr children.
     /// Reads children's nlbv via expr_nlbv Vec — O(1) per child.
     #[inline]
@@ -847,9 +873,13 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         if let Some(idx) = self.export_file.dag.exprs.get_index_of(&e) {
             Ptr::from(DagMarker::ExportFile, idx)
         } else {
-            let nlbv = self.compute_nlbv(&e);
             let (idx, inserted) = self.dag.exprs.insert_full(e);
-            if inserted { self.dag.expr_nlbv.push(nlbv); }
+            if inserted {
+                // side tables only for a genuinely new core; most calls are hits
+                let nlbv = self.compute_nlbv(&e);
+                let bvset = crate::canon::combine_bvset(&e, |c| self.bvset_ptr(c));
+                self.dag.push_side(nlbv, bvset.head, &bvset.tail);
+            }
             Ptr::from(DagMarker::TcCtx, idx)
         }
     }
@@ -1110,15 +1140,15 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         result
     }
 
-    /// For binders (Pi/Lambda/Let): body's outer contribution to min_shift.
-    /// Returns None if body doesn't contribute (closed or only has Var(0)).
-    /// Otherwise returns body.shift.saturating_sub(1) (the outer fvar_lb from body).
+    /// For binders (Pi/Lambda/Let): the shift the binder can extract through itself from
+    /// the body — `Theory.lean`'s `fvar_lb_val (lam body)`. `None` if the body is closed or
+    /// mentions nothing but its bound variable. See `canon.rs`.
     #[inline]
-    fn body_outer_shift(&self, body: ExprPtr<'t>) -> Option<u16> {
+    fn body_outer_shift(&mut self, body: ExprPtr<'t>) -> Option<u16> {
         if body.is_closed() { return None; }
-        // body contributes iff it has free vars at index > 0 (not just Var(0))
         if self.nlbv(body) <= 1 { return None; }
-        Some(body.shift.saturating_sub(1))
+        if body.shift == 0 { self.trace.canon_extract += 1; }
+        crate::canon::OsnfBuilder::body_lb(self, body)
     }
 
     pub fn mk_lambda(
@@ -1138,7 +1168,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
             (Some(ts), Some(bs)) => ts.min(bs),
         };
         let adj_ty = binder_type.osnf_adj(min_shift);
-        let adj_body = if body_outer.is_some() { body.osnf_adj(min_shift) } else { body };
+        let adj_body = if body_outer.is_some() && min_shift != ExprPtr::CLOSED_SHIFT { crate::canon::OsnfBuilder::unshift(self, body, min_shift, 1) } else { body };
         let lambda_expr = Expr::Lambda { binder_name, binder_style, binder_type: adj_ty, body: adj_body };
         let core = self.alloc_expr(lambda_expr);
         if min_shift == ExprPtr::CLOSED_SHIFT { ExprPtr::closed(core) } else { ExprPtr::new(core, min_shift) }
@@ -1161,7 +1191,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
             (Some(ts), Some(bs)) => ts.min(bs),
         };
         let adj_ty = binder_type.osnf_adj(min_shift);
-        let adj_body = if body_outer.is_some() { body.osnf_adj(min_shift) } else { body };
+        let adj_body = if body_outer.is_some() && min_shift != ExprPtr::CLOSED_SHIFT { crate::canon::OsnfBuilder::unshift(self, body, min_shift, 1) } else { body };
         let pi_expr = Expr::Pi { binder_name, binder_style, binder_type: adj_ty, body: adj_body };
         let core = self.alloc_expr(pi_expr);
         if min_shift == ExprPtr::CLOSED_SHIFT { ExprPtr::closed(core) } else { ExprPtr::new(core, min_shift) }
@@ -1183,7 +1213,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         if let Some(bs) = body_outer { min_shift = min_shift.min(bs); }
         let adj_ty = binder_type.osnf_adj(min_shift);
         let adj_val = val.osnf_adj(min_shift);
-        let adj_body = if body_outer.is_some() { body.osnf_adj(min_shift) } else { body };
+        let adj_body = if body_outer.is_some() && min_shift != ExprPtr::CLOSED_SHIFT { crate::canon::OsnfBuilder::unshift(self, body, min_shift, 1) } else { body };
         let let_expr = Expr::Let { binder_name, binder_type: adj_ty, val: adj_val, body: adj_body, nondep };
         let core = self.alloc_expr(let_expr);
         if min_shift == ExprPtr::CLOSED_SHIFT { ExprPtr::closed(core) } else { ExprPtr::new(core, min_shift) }
@@ -1659,17 +1689,143 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
 
 }
 
+/// Hash-consed expression storage: a `Vec` of cores and an index table over it (`u32`
+/// indices, hashes recomputed from the cores). Unlike an `IndexSet` it can be compacted
+/// in place, which the parser does at the end to drop the cores no declaration reaches.
 #[derive(Debug)]
+pub struct ExprTable<'a> {
+    entries: Vec<Expr<'a>>,
+    index: hashbrown::HashTable<u32>,
+}
+
+impl<'a> ExprTable<'a> {
+    pub fn with_capacity(n: usize) -> Self {
+        Self { entries: Vec::with_capacity(n), index: hashbrown::HashTable::with_capacity(n) }
+    }
+
+    #[inline]
+    pub fn len(&self) -> usize { self.entries.len() }
+    pub fn capacity(&self) -> usize { self.entries.capacity() }
+
+    #[inline]
+    pub fn get_index(&self, i: usize) -> Option<&Expr<'a>> { self.entries.get(i) }
+
+    #[inline]
+    fn find(&self, h: u64, e: &Expr<'a>) -> Option<usize> {
+        let entries = &self.entries;
+        self.index.find(h, |&i| entries[i as usize] == *e).map(|&i| i as usize)
+    }
+
+    #[inline]
+    pub fn get_index_of(&self, e: &Expr<'a>) -> Option<usize> { self.find(e.get_hash(), e) }
+
+    /// Index of `e`, inserting it if new; the flag says whether it was inserted.
+    #[inline]
+    pub fn insert_full(&mut self, e: Expr<'a>) -> (usize, bool) {
+        let h = e.get_hash();
+        if let Some(i) = self.find(h, &e) { return (i, false); }
+        let i = self.entries.len();
+        assert!(i < u32::MAX as usize, "expression table full");
+        self.entries.push(e);
+        let entries = &self.entries;
+        self.index.insert_unique(h, i as u32, |&j| entries[j as usize].get_hash());
+        (i, true)
+    }
+
+    pub fn clear(&mut self) { self.entries.clear(); self.index.clear(); }
+
+    /// Keep the cores flagged in `live`, renumbered densely in their old order, with
+    /// child cores renumbered too (children precede parents). Returns old -> new index.
+    fn compact(&mut self, live: &[bool]) -> Vec<u32> {
+        let n = self.entries.len();
+        let mut remap = vec![u32::MAX; n];
+        let mut j = 0;
+        for i in 0..n {
+            if !live[i] { continue; }
+            let e = self.entries[i].map_cores(|c| {
+                debug_assert_eq!(c.dag_marker(), DagMarker::ExportFile);
+                Ptr::from(DagMarker::ExportFile, remap[c.idx()] as usize)
+            });
+            self.entries[j] = e;
+            remap[i] = j as u32;
+            j += 1;
+        }
+        self.entries.truncate(j);
+        self.entries.shrink_to_fit();
+        self.index = hashbrown::HashTable::with_capacity(j);
+        let entries = &self.entries;
+        for (k, e) in entries.iter().enumerate() {
+            self.index.insert_unique(e.get_hash(), k as u32, |&m| entries[m as usize].get_hash());
+        }
+        remap
+    }
+}
+
 pub struct LeanDag<'a> {
     pub names: UniqueIndexSet<Name<'a>>,
     pub levels: UniqueIndexSet<Level<'a>>,
-    pub exprs: UniqueIndexSet<Expr<'a>>,
+    pub exprs: ExprTable<'a>,
     /// Parallel array: expr_nlbv[i] = exprs[i].num_loose_bvars().
     /// Allows O(1) nlbv lookup without reading the full 48-byte Expr.
     pub expr_nlbv: Vec<u16>,
+    /// Parallel array: expr_bvmask[i] = loose-bvar indices 0..64 of exprs[i] (`canon::BvSet::head`).
+    pub expr_bvmask: Vec<u64>,
+    /// Tails (`canon::BvSet::tail`) of the cores that have loose indices >= 64.
+    pub bvtails: crate::canon::BvTails,
     pub uparams: FxIndexSet<Arc<[LevelPtr<'a>]>>,
     pub strings: FxIndexSet<CowStr<'a>>,
     pub bignums: Option<FxIndexSet<BigUint>>,
+}
+
+impl<'a> LeanDag<'a> {
+    /// Record the side-table entries of the core just inserted at the end of `exprs`.
+    #[inline]
+    pub(crate) fn push_side(&mut self, nlbv: u16, head: u64, tail: &[u64]) {
+        let idx = self.expr_nlbv.len();
+        self.expr_nlbv.push(nlbv);
+        self.expr_bvmask.push(head);
+        if !tail.is_empty() { self.bvtails.push(idx, nlbv, tail); }
+    }
+
+    /// The loose-bvar bitset of a core, as (`head`, `tail`).
+    #[inline]
+    pub(crate) fn core_bvset(&self, idx: usize) -> (u64, &[u64]) {
+        (self.expr_bvmask[idx], self.bvtails.get(idx, self.expr_nlbv[idx]))
+    }
+
+    /// Drop every core not reachable from `roots` and renumber the rest, in place.
+    /// Cores are in dependency order (children before parents), so one downward sweep
+    /// marks and one upward pass compacts. Returns `old index -> new index`.
+    pub(crate) fn compact_exprs(&mut self, roots: impl Iterator<Item = CorePtr<'a>>) -> Vec<u32> {
+        let n = self.exprs.len();
+        let mut live = vec![false; n];
+        for r in roots { debug_assert_eq!(r.dag_marker(), DagMarker::ExportFile); live[r.idx()] = true; }
+        for i in (0..n).rev() {
+            if !live[i] { continue; }
+            self.exprs.get_index(i).unwrap().for_each_child(|c| {
+                debug_assert!(c.core.idx() < i, "export DAG is not in dependency order");
+                live[c.core.idx()] = true;
+            });
+        }
+        let remap = self.exprs.compact(&live);
+        let mut tails = crate::canon::BvTails::default();
+        let mut j = 0;
+        for i in 0..n {
+            if !live[i] { continue; }
+            let nlbv = self.expr_nlbv[i];
+            self.expr_nlbv[j] = nlbv;
+            self.expr_bvmask[j] = self.expr_bvmask[i];
+            let t = self.bvtails.get(i, nlbv);
+            if !t.is_empty() { tails.push(j, nlbv, t); }
+            j += 1;
+        }
+        self.expr_nlbv.truncate(j);
+        self.expr_nlbv.shrink_to_fit();
+        self.expr_bvmask.truncate(j);
+        self.expr_bvmask.shrink_to_fit();
+        self.bvtails = tails;
+        remap
+    }
 }
 
 impl<'a> LeanDag<'a> {
@@ -1689,6 +1845,8 @@ impl<'a> LeanDag<'a> {
         self.levels.clear();
         self.exprs.clear();
         self.expr_nlbv.clear();
+        self.expr_bvmask.clear();
+        self.bvtails.clear();
         self.uparams.clear();
         self.strings.clear();
         if let Some(ref mut bignums) = self.bignums {
@@ -1707,16 +1865,14 @@ impl<'a> LeanDag<'a> {
                 new_unique_index_set()
             },
             levels: new_unique_index_set(),
-            exprs: if expr_capacity > 0 {
-                IndexSet::with_capacity_and_hasher(expr_capacity, Default::default())
-            } else {
-                new_unique_index_set()
-            },
+            exprs: ExprTable::with_capacity(expr_capacity),
             expr_nlbv: if expr_capacity > 0 {
                 Vec::with_capacity(expr_capacity)
             } else {
                 Vec::new()
             },
+            expr_bvmask: if expr_capacity > 0 { Vec::with_capacity(expr_capacity) } else { Vec::new() },
+            bvtails: crate::canon::BvTails::default(),
             uparams: new_fx_index_set(),
             strings: new_fx_index_set(),
             bignums: if config.nat_extension { Some(new_fx_index_set()) } else { None },
@@ -2170,3 +2326,15 @@ struct ExitStatus {
     pp_err: Option<String>
 }
 
+
+impl<'t, 'p: 't> crate::canon::OsnfBuilder<'t> for TcCtx<'t, 'p> {
+    fn c_read(&self, c: CorePtr<'t>) -> Expr<'t> { self.read_expr(c) }
+    fn c_app(&mut self, f: ExprPtr<'t>, a: ExprPtr<'t>) -> ExprPtr<'t> { self.mk_app(f, a) }
+    fn c_lambda(&mut self, n: NamePtr<'t>, st: BinderStyle, ty: ExprPtr<'t>, body: ExprPtr<'t>) -> ExprPtr<'t> { self.mk_lambda(n, st, ty, body) }
+    fn c_pi(&mut self, n: NamePtr<'t>, st: BinderStyle, ty: ExprPtr<'t>, body: ExprPtr<'t>) -> ExprPtr<'t> { self.mk_pi(n, st, ty, body) }
+    fn c_let(&mut self, n: NamePtr<'t>, ty: ExprPtr<'t>, val: ExprPtr<'t>, body: ExprPtr<'t>, nondep: bool) -> ExprPtr<'t> { self.mk_let(n, ty, val, body, nondep) }
+    fn c_proj(&mut self, n: NamePtr<'t>, idx: u32, st: ExprPtr<'t>) -> ExprPtr<'t> { self.mk_proj(n, idx, st) }
+    fn c_memo(&mut self) -> &mut crate::canon::CanonMemo<'t> { &mut self.expr_cache.canon }
+    fn c_core_bvset(&self, c: CorePtr<'t>) -> (u64, &[u64]) { self.core_bvset(c) }
+    fn c_note_unshift(&mut self) { self.trace.canon_unshift_nodes += 1; }
+}

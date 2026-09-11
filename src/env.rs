@@ -184,6 +184,43 @@ impl<'a> Declar<'a> {
             | Opaque { info, .. } => info,
         }
     }
+
+    pub(crate) fn info_mut(&mut self) -> &mut DeclarInfo<'a> {
+        use Declar::*;
+        match self {
+            Axiom { info, .. }
+            | Quot { info, .. }
+            | Theorem { info, .. }
+            | Definition { info, .. }
+            | Inductive(InductiveData { info, .. })
+            | Constructor(ConstructorData { info, .. })
+            | Recursor(RecursorData { info, .. })
+            | Opaque { info, .. } => info,
+        }
+    }
+
+    /// Every expression core the declaration references (type, value, recursor rules).
+    pub(crate) fn for_each_core(&self, mut f: impl FnMut(CorePtr<'a>)) {
+        f(self.info().ty);
+        match self {
+            Declar::Theorem { val, .. } | Declar::Definition { val, .. } | Declar::Opaque { val, .. } => f(*val),
+            Declar::Recursor(RecursorData { rec_rules, .. }) => for r in rec_rules.iter() { f(r.val) },
+            _ => {}
+        }
+    }
+
+    /// Replace every referenced core by `f(core)`.
+    pub(crate) fn map_cores(&mut self, mut f: impl FnMut(CorePtr<'a>) -> CorePtr<'a>) {
+        self.info_mut().ty = f(self.info().ty);
+        match self {
+            Declar::Theorem { val, .. } | Declar::Definition { val, .. } | Declar::Opaque { val, .. } => *val = f(*val),
+            Declar::Recursor(RecursorData { rec_rules, .. }) => {
+                let rules: Vec<RecRule<'a>> = rec_rules.iter().map(|r| RecRule { val: f(r.val), ..*r }).collect();
+                *rec_rules = Arc::from(rules);
+            }
+            _ => {}
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

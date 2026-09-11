@@ -49,6 +49,8 @@ pub struct Parser<'a, R: BufRead> {
     skipped: Vec<String>,
     mutual_block_sizes: FxHashMap<NamePtr<'a>, (usize, usize)>,
     osnf_count: u32,
+    /// Memos for the binder canonicalization (`canon.rs`).
+    canon: crate::canon::CanonMemo<'a>,
     /// Maps export name index → DAG name index. Seeded with `[0]` so that export
     /// index 0 resolves to the anonymous name sentinel. Export indices need not be
     /// dense or in increasing order (the exporter only guarantees that an item is
@@ -60,11 +62,11 @@ pub struct Parser<'a, R: BufRead> {
     /// Maps export expression index → (DAG index, shift). The ExprPtr for export
     /// expression i is ExprPtr::new(Ptr::from(ExportFile, remap.0), remap.1). Export
     /// indices need not be dense or in increasing order; unused slots hold
-    /// `(usize::MAX, 0)` as a sentinel for "not yet defined".
-    expr_remap: Vec<(usize, u16)>,
+    /// `(u32::MAX, 0)` as a sentinel for "not yet defined".
+    expr_remap: Vec<(u32, u16)>,
 }
 
-const EXPR_REMAP_SENTINEL: (usize, u16) = (usize::MAX, 0);
+const EXPR_REMAP_SENTINEL: (u32, u16) = (u32::MAX, 0);
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Deserialize)]
 struct LeanMeta<'a> {
@@ -396,8 +398,24 @@ pub(crate) fn parse_export_file<'p, R: BufRead>(
     }
     
     let dag_size = parser.dag.exprs.len();
-    eprintln!("ExprPtr parse: {} parser entries → {} DAG entries, {} OSNF-shifted",
-        parser.expr_remap.len(), dag_size, parser.osnf_count);
+    let n_parser_entries = parser.expr_remap.len();
+    // Drop the cores no declaration reaches: canonicalizing a binder rebuilds its body,
+    // and the pre-extraction body — interned when its export line was read — stays
+    // behind unreferenced (a third of the DAG on Init, two thirds on con-leche). The
+    // parse-only structures go first, they are the bulk of the peak.
+    parser.canon = crate::canon::CanonMemo::new();
+    parser.expr_remap = Vec::new();
+    let remap = {
+        let mut roots = Vec::new();
+        for d in parser.declars.values() { d.for_each_core(|c| roots.push(c)); }
+        parser.dag.compact_exprs(roots.into_iter())
+    };
+    for d in parser.declars.values_mut() {
+        d.map_cores(|c| crate::util::Ptr::from(DagMarker::ExportFile, remap[c.idx()] as usize));
+    }
+    drop(remap);
+    eprintln!("ExprPtr parse: {} parser entries → {} DAG entries, {} OSNF-shifted, {} live after compaction, {} cores with bvar indices >= 64 ({} tail words)",
+        n_parser_entries, dag_size, parser.osnf_count, parser.dag.exprs.len(), parser.dag.bvtails.count(), parser.dag.bvtails.total_words());
     let name_cache = parser.dag.mk_name_cache();
     // Maps inductive names to exported recursor names. This is later reused in the inductive
     // module to require that the set of derived recursors matches the set of exported recursors,
@@ -445,6 +463,7 @@ impl<'a, R: BufRead> Parser<'a, R> {
             skipped: Vec::new(),
             mutual_block_sizes: new_fx_hash_map(),
             osnf_count: 0,
+            canon: crate::canon::CanonMemo::with_slots(),
             // Export index 0 is the anonymous-name / Zero-level sentinel, which
             // `LeanDag::with_capacity` pre-inserts at DAG index 0.
             name_remap: vec![0],
@@ -463,6 +482,77 @@ impl<'a, R: BufRead> Parser<'a, R> {
     }
 
     /// Find or create Var(0) in the DAG. Returns its CorePtr.
+    /// Effective number of loose bvars of a pointer (0 for closed).
+    fn eff_nlbv(&self, e: ExprPtr<'a>) -> u16 {
+        let n = self.num_loose_bvars(e.core);
+        if n == 0 { 0 } else { n + e.shift }
+    }
+
+    fn ptr_of(&self, core_idx: usize, min_shift: u16) -> ExprPtr<'a> {
+        let core = crate::util::Ptr::from(DagMarker::ExportFile, core_idx);
+        if min_shift == ExprPtr::CLOSED_SHIFT { ExprPtr::closed(core) } else { ExprPtr::new(core, min_shift) }
+    }
+
+    /// OSNF `App`: extract the common shift of the open children.
+    fn p_app(&mut self, fun_e: ExprPtr<'a>, arg_e: ExprPtr<'a>) -> ExprPtr<'a> {
+        let (fun_eff_nlbv, arg_eff_nlbv) = (self.eff_nlbv(fun_e), self.eff_nlbv(arg_e));
+        let min_shift = if fun_eff_nlbv == 0 && arg_eff_nlbv == 0 { ExprPtr::CLOSED_SHIFT }
+            else if fun_eff_nlbv == 0 { arg_e.shift }
+            else if arg_eff_nlbv == 0 { fun_e.shift }
+            else { fun_e.shift.min(arg_e.shift) };
+        if min_shift > 0 && min_shift != ExprPtr::CLOSED_SHIFT { self.osnf_count += 1; }
+        let core_fun = if fun_eff_nlbv == 0 { fun_e } else { ExprPtr::new(fun_e.core, fun_e.shift - min_shift) };
+        let core_arg = if arg_eff_nlbv == 0 { arg_e } else { ExprPtr::new(arg_e.core, arg_e.shift - min_shift) };
+        let (core_idx, _) = self.insert_expr(Expr::App { fun: core_fun, arg: core_arg });
+        self.ptr_of(core_idx, min_shift)
+    }
+
+    /// OSNF `Lambda`/`Pi`: extract the common shift of the binder type and of the body's
+    /// free variables, the latter through the binder (`Theory.lean`'s `lam` rule).
+    fn p_binder(&mut self, is_pi: bool, binder_name: NamePtr<'a>, binder_style: BinderStyle, ty_e: ExprPtr<'a>, body_e: ExprPtr<'a>) -> ExprPtr<'a> {
+        let ty_eff_nlbv = self.eff_nlbv(ty_e);
+        let body_lb = if self.eff_nlbv(body_e) <= 1 { None } else { crate::canon::OsnfBuilder::body_lb(self, body_e) };
+        let min_shift = match (ty_eff_nlbv > 0, body_lb) {
+            (false, None) => ExprPtr::CLOSED_SHIFT,
+            (true, None) => ty_e.shift,
+            (false, Some(bs)) => bs,
+            (true, Some(bs)) => ty_e.shift.min(bs),
+        };
+        if min_shift > 0 && min_shift != ExprPtr::CLOSED_SHIFT { self.osnf_count += 1; }
+        let core_ty = if ty_eff_nlbv == 0 { ty_e } else { ExprPtr::new(ty_e.core, ty_e.shift - min_shift) };
+        let core_body = if body_lb.is_some() && min_shift != ExprPtr::CLOSED_SHIFT { crate::canon::OsnfBuilder::unshift(self, body_e, min_shift, 1) } else { body_e };
+        let e = if is_pi { Expr::Pi { binder_name, binder_style, binder_type: core_ty, body: core_body } }
+                else { Expr::Lambda { binder_name, binder_style, binder_type: core_ty, body: core_body } };
+        let (core_idx, _) = self.insert_expr(e);
+        self.ptr_of(core_idx, min_shift)
+    }
+
+    /// OSNF `Let`: like `p_binder`, with the value alongside the type outside the binder.
+    fn p_let(&mut self, binder_name: NamePtr<'a>, ty_e: ExprPtr<'a>, val_e: ExprPtr<'a>, body_e: ExprPtr<'a>, nondep: bool) -> ExprPtr<'a> {
+        let (ty_eff_nlbv, val_eff_nlbv) = (self.eff_nlbv(ty_e), self.eff_nlbv(val_e));
+        let body_lb = if self.eff_nlbv(body_e) <= 1 { None } else { crate::canon::OsnfBuilder::body_lb(self, body_e) };
+        let mut min_shift = u16::MAX;
+        if ty_eff_nlbv > 0 { min_shift = min_shift.min(ty_e.shift); }
+        if val_eff_nlbv > 0 { min_shift = min_shift.min(val_e.shift); }
+        if let Some(bs) = body_lb { min_shift = min_shift.min(bs); }
+        if min_shift > 0 && min_shift != ExprPtr::CLOSED_SHIFT { self.osnf_count += 1; }
+        let core_ty = if ty_eff_nlbv == 0 { ty_e } else { ExprPtr::new(ty_e.core, ty_e.shift - min_shift) };
+        let core_val = if val_eff_nlbv == 0 { val_e } else { ExprPtr::new(val_e.core, val_e.shift - min_shift) };
+        let core_body = if body_lb.is_some() && min_shift != ExprPtr::CLOSED_SHIFT { crate::canon::OsnfBuilder::unshift(self, body_e, min_shift, 1) } else { body_e };
+        let (core_idx, _) = self.insert_expr(Expr::Let { binder_name, binder_type: core_ty, val: core_val, body: core_body, nondep });
+        self.ptr_of(core_idx, min_shift)
+    }
+
+    /// OSNF `Proj`.
+    fn p_proj(&mut self, ty_name: NamePtr<'a>, idx: u32, struct_e: ExprPtr<'a>) -> ExprPtr<'a> {
+        let struct_eff_nlbv = self.eff_nlbv(struct_e);
+        let min_shift = if struct_eff_nlbv == 0 { ExprPtr::CLOSED_SHIFT } else { struct_e.shift };
+        if min_shift > 0 && min_shift != ExprPtr::CLOSED_SHIFT { self.osnf_count += 1; }
+        let core_struct = if struct_eff_nlbv == 0 { struct_e } else { ExprPtr::new(struct_e.core, struct_e.shift - min_shift) };
+        let (core_idx, _) = self.insert_expr(Expr::Proj { ty_name, idx, structure: core_struct });
+        self.ptr_of(core_idx, min_shift)
+    }
+
     fn find_or_insert_var0(&mut self) -> CorePtr<'a> {
         let (dag_idx, _) = self.insert_expr(Expr::Var { dbj_idx: 0 });
         crate::util::Ptr::from(DagMarker::ExportFile, dag_idx)
@@ -542,25 +632,35 @@ impl<'a, R: BufRead> Parser<'a, R> {
 
     /// Insert an expression and track its nlbv in the parallel Vec.
     fn insert_expr(&mut self, e: Expr<'a>) -> (usize, bool) {
-        let nlbv = self.compute_nlbv(&e);
         let result = self.dag.exprs.insert_full(e);
-        if result.1 { self.dag.expr_nlbv.push(nlbv); }
+        if result.1 {
+            let nlbv = self.compute_nlbv(&e);
+            let bvset = crate::canon::combine_bvset(&e, |c| self.bvset_ptr(c));
+            self.dag.push_side(nlbv, bvset.head, &bvset.tail);
+        }
         result
+    }
+
+    #[inline]
+    fn bvset_ptr(&self, e: ExprPtr<'a>) -> Option<(u64, &[u64], u16)> {
+        if e.is_closed() { return None; }
+        let (h, t) = self.dag.core_bvset(e.core.idx());
+        Some((h, t, e.shift))
     }
 
     fn get_expr_ptr(&self, idx: u32) -> ExprPtr<'a> {
         let (dag_idx, shift) = self.expr_remap.get(idx as usize).copied().unwrap_or(EXPR_REMAP_SENTINEL);
-        assert!(dag_idx != usize::MAX, "export references expression index {} before it is defined", idx);
-        let core = crate::util::Ptr::from(DagMarker::ExportFile, dag_idx);
+        assert!(dag_idx != u32::MAX, "export references expression index {} before it is defined", idx);
+        let core = crate::util::Ptr::from(DagMarker::ExportFile, dag_idx as usize);
         if shift == ExprPtr::CLOSED_SHIFT { ExprPtr::closed(core) } else { ExprPtr::new(core, shift) }
     }
 
     /// Get the CorePtr for a declaration type/value (must be closed, shift == CLOSED_SHIFT).
     fn get_core_ptr(&self, idx: u32) -> CorePtr<'a> {
         let (dag_idx, shift) = self.expr_remap.get(idx as usize).copied().unwrap_or(EXPR_REMAP_SENTINEL);
-        assert!(dag_idx != usize::MAX, "export references expression index {} before it is defined", idx);
+        assert!(dag_idx != u32::MAX, "export references expression index {} before it is defined", idx);
         debug_assert!(shift == ExprPtr::CLOSED_SHIFT, "get_core_ptr: expected CLOSED_SHIFT for declaration expr, got shift={}", shift);
-        crate::util::Ptr::from(DagMarker::ExportFile, dag_idx)
+        crate::util::Ptr::from(DagMarker::ExportFile, dag_idx as usize)
     }
 
     /// Record the DAG index and shift for an export expression, keyed by its export
@@ -568,7 +668,7 @@ impl<'a, R: BufRead> Parser<'a, R> {
     fn record_expr(&mut self, export_idx: u32, dag_idx: usize, shift: u16) {
         let i = export_idx as usize;
         if i >= self.expr_remap.len() { self.expr_remap.resize(i + 1, EXPR_REMAP_SENTINEL); }
-        self.expr_remap[i] = (dag_idx, shift);
+        self.expr_remap[i] = (u32::try_from(dag_idx).unwrap(), shift);
     }
 
     // Used for the axiom whitelist feature.
@@ -709,19 +809,8 @@ impl<'a, R: BufRead> Parser<'a, R> {
             ExprApp {fun, arg} => {
                 let fun_e = self.get_expr_ptr(fun);
                 let arg_e = self.get_expr_ptr(arg);
-                let fun_core_nlbv = self.num_loose_bvars(fun_e.core);
-                let arg_core_nlbv = self.num_loose_bvars(arg_e.core);
-                let fun_eff_nlbv = if fun_core_nlbv == 0 { 0 } else { fun_core_nlbv + fun_e.shift };
-                let arg_eff_nlbv = if arg_core_nlbv == 0 { 0 } else { arg_core_nlbv + arg_e.shift };
-                let min_shift = if fun_eff_nlbv == 0 && arg_eff_nlbv == 0 { ExprPtr::CLOSED_SHIFT }
-                    else if fun_eff_nlbv == 0 { arg_e.shift }
-                    else if arg_eff_nlbv == 0 { fun_e.shift }
-                    else { fun_e.shift.min(arg_e.shift) };
-                if min_shift > 0 && min_shift != ExprPtr::CLOSED_SHIFT { self.osnf_count += 1; }
-                let core_fun = if fun_eff_nlbv == 0 { fun_e } else { ExprPtr::new(fun_e.core, fun_e.shift - min_shift) };
-                let core_arg = if arg_eff_nlbv == 0 { arg_e } else { ExprPtr::new(arg_e.core, arg_e.shift - min_shift) };
-                let (core_idx, _) = self.insert_expr(Expr::App { fun: core_fun, arg: core_arg });
-                self.record_expr(assigned_idx.unwrap().index(), core_idx, min_shift);
+                let r = self.p_app(fun_e, arg_e);
+                self.record_expr(assigned_idx.unwrap().index(), r.core.idx(), r.shift);
             }
             ExprBVar(dbj_idx) => {
                 // Only Var(0) lives in the DAG. BVar(k) is represented as ExprPtr(var0, k).
@@ -732,94 +821,29 @@ impl<'a, R: BufRead> Parser<'a, R> {
                 let binder_name = self.get_name_ptr(binder_name);
                 let ty_e = self.get_expr_ptr(binder_type);
                 let body_e = self.get_expr_ptr(body);
-                let ty_core_nlbv = self.num_loose_bvars(ty_e.core);
-                let body_core_nlbv = self.num_loose_bvars(body_e.core);
-                let ty_eff_nlbv = if ty_core_nlbv == 0 { 0 } else { ty_core_nlbv + ty_e.shift };
-                let body_eff_nlbv = if body_core_nlbv == 0 { 0 } else { body_core_nlbv + body_e.shift };
-                let body_outer_shift = if body_eff_nlbv <= 1 { None }
-                    else { Some(body_e.shift.saturating_sub(1)) };
-                let min_shift = match (ty_eff_nlbv > 0, body_outer_shift) {
-                    (false, None) => ExprPtr::CLOSED_SHIFT,
-                    (true, None) => ty_e.shift,
-                    (false, Some(bs)) => bs,
-                    (true, Some(bs)) => ty_e.shift.min(bs),
-                };
-                if min_shift > 0 && min_shift != ExprPtr::CLOSED_SHIFT { self.osnf_count += 1; }
-                let core_ty = if ty_eff_nlbv == 0 { ty_e } else { ExprPtr::new(ty_e.core, ty_e.shift - min_shift) };
-                let core_body = if body_eff_nlbv > 1 { ExprPtr::new(body_e.core, body_e.shift - min_shift) } else { body_e };
-                let (core_idx, _) = self.insert_expr(Expr::Lambda {
-                    binder_name, binder_style: binder_info, binder_type: core_ty, body: core_body,
-                });
-                self.record_expr(assigned_idx.unwrap().index(), core_idx, min_shift);
+                let r = self.p_binder(false, binder_name, binder_info, ty_e, body_e);
+                self.record_expr(assigned_idx.unwrap().index(), r.core.idx(), r.shift);
             }
             ExprPi {binder_name, binder_type, binder_info, body} => {
                 let binder_name = self.get_name_ptr(binder_name);
                 let ty_e = self.get_expr_ptr(binder_type);
                 let body_e = self.get_expr_ptr(body);
-                let ty_core_nlbv = self.num_loose_bvars(ty_e.core);
-                let body_core_nlbv = self.num_loose_bvars(body_e.core);
-                let ty_eff_nlbv = if ty_core_nlbv == 0 { 0 } else { ty_core_nlbv + ty_e.shift };
-                let body_eff_nlbv = if body_core_nlbv == 0 { 0 } else { body_core_nlbv + body_e.shift };
-                let body_outer_shift = if body_eff_nlbv <= 1 { None }
-                    else { Some(body_e.shift.saturating_sub(1)) };
-                let min_shift = match (ty_eff_nlbv > 0, body_outer_shift) {
-                    (false, None) => ExprPtr::CLOSED_SHIFT,
-                    (true, None) => ty_e.shift,
-                    (false, Some(bs)) => bs,
-                    (true, Some(bs)) => ty_e.shift.min(bs),
-                };
-                if min_shift > 0 && min_shift != ExprPtr::CLOSED_SHIFT { self.osnf_count += 1; }
-                let core_ty = if ty_eff_nlbv == 0 { ty_e } else { ExprPtr::new(ty_e.core, ty_e.shift - min_shift) };
-                let core_body = if body_eff_nlbv > 1 { ExprPtr::new(body_e.core, body_e.shift - min_shift) } else { body_e };
-                let (core_idx, _) = self.insert_expr(Expr::Pi {
-                    binder_name, binder_style: binder_info, binder_type: core_ty, body: core_body,
-                });
-                self.record_expr(assigned_idx.unwrap().index(), core_idx, min_shift);
+                let r = self.p_binder(true, binder_name, binder_info, ty_e, body_e);
+                self.record_expr(assigned_idx.unwrap().index(), r.core.idx(), r.shift);
             }
             ExprLet {name, ty, value, body, nondep} => {
                 let binder_name = self.get_name_ptr(name);
                 let ty_e = self.get_expr_ptr(ty);
                 let val_e = self.get_expr_ptr(value);
                 let body_e = self.get_expr_ptr(body);
-                let ty_core_nlbv = self.num_loose_bvars(ty_e.core);
-                let val_core_nlbv = self.num_loose_bvars(val_e.core);
-                let body_core_nlbv = self.num_loose_bvars(body_e.core);
-                let ty_eff_nlbv = if ty_core_nlbv == 0 { 0 } else { ty_core_nlbv + ty_e.shift };
-                let val_eff_nlbv = if val_core_nlbv == 0 { 0 } else { val_core_nlbv + val_e.shift };
-                let body_eff_nlbv = if body_core_nlbv == 0 { 0 } else { body_core_nlbv + body_e.shift };
-                let body_outer_shift = if body_eff_nlbv <= 1 { None }
-                    else { Some(body_e.shift.saturating_sub(1)) };
-                let mut min_shift = u16::MAX;
-                if ty_eff_nlbv > 0 { min_shift = min_shift.min(ty_e.shift); }
-                if val_eff_nlbv > 0 { min_shift = min_shift.min(val_e.shift); }
-                if let Some(bs) = body_outer_shift { min_shift = min_shift.min(bs); }
-                if min_shift > 0 && min_shift != ExprPtr::CLOSED_SHIFT { self.osnf_count += 1; }
-                let core_ty = if ty_eff_nlbv == 0 { ty_e } else { ExprPtr::new(ty_e.core, ty_e.shift - min_shift) };
-                let core_val = if val_eff_nlbv == 0 { val_e } else { ExprPtr::new(val_e.core, val_e.shift - min_shift) };
-                let core_body = if body_eff_nlbv > 1 { ExprPtr::new(body_e.core, body_e.shift - min_shift) } else { body_e };
-                let (core_idx, _) = self.insert_expr(Expr::Let {
-                    binder_name,
-                    binder_type: core_ty,
-                    val: core_val,
-                    body: core_body,
-                    nondep,
-                });
-                self.record_expr(assigned_idx.unwrap().index(), core_idx, min_shift);
+                let r = self.p_let(binder_name, ty_e, val_e, body_e, nondep);
+                self.record_expr(assigned_idx.unwrap().index(), r.core.idx(), r.shift);
             }
             ExprProj {type_name, idx, structure: struct_} => {
                 let ty_name = self.get_name_ptr(type_name);
                 let struct_e = self.get_expr_ptr(struct_);
-                let struct_core_nlbv = self.num_loose_bvars(struct_e.core);
-                let struct_eff_nlbv = if struct_core_nlbv == 0 { 0 } else { struct_core_nlbv + struct_e.shift };
-                let min_shift = if struct_eff_nlbv == 0 { ExprPtr::CLOSED_SHIFT } else { struct_e.shift };
-                if min_shift > 0 && min_shift != ExprPtr::CLOSED_SHIFT { self.osnf_count += 1; }
-                let core_struct = if struct_eff_nlbv == 0 { struct_e } else { ExprPtr::new(struct_e.core, struct_e.shift - min_shift) };
-                let (core_idx, _) = self.insert_expr(Expr::Proj {
-                    ty_name,
-                    idx,
-                    structure: core_struct,
-                });
-                self.record_expr(assigned_idx.unwrap().index(), core_idx, min_shift);
+                let r = self.p_proj(ty_name, idx, struct_e);
+                self.record_expr(assigned_idx.unwrap().index(), r.core.idx(), r.shift);
             }
             Axiom {name, ty, uparams, is_unsafe} => {
                 assert!(!is_unsafe);
@@ -1014,4 +1038,15 @@ mod semver_tests {
             assert!(check_semver(&mk_meta(v)).is_ok())
         }
     }
+}
+
+impl<'a, R: BufRead> crate::canon::OsnfBuilder<'a> for Parser<'a, R> {
+    fn c_read(&self, c: CorePtr<'a>) -> Expr<'a> { self.dag.exprs.get_index(c.idx()).copied().unwrap() }
+    fn c_app(&mut self, f: ExprPtr<'a>, a: ExprPtr<'a>) -> ExprPtr<'a> { self.p_app(f, a) }
+    fn c_lambda(&mut self, n: NamePtr<'a>, st: BinderStyle, ty: ExprPtr<'a>, body: ExprPtr<'a>) -> ExprPtr<'a> { self.p_binder(false, n, st, ty, body) }
+    fn c_pi(&mut self, n: NamePtr<'a>, st: BinderStyle, ty: ExprPtr<'a>, body: ExprPtr<'a>) -> ExprPtr<'a> { self.p_binder(true, n, st, ty, body) }
+    fn c_let(&mut self, n: NamePtr<'a>, ty: ExprPtr<'a>, val: ExprPtr<'a>, body: ExprPtr<'a>, nondep: bool) -> ExprPtr<'a> { self.p_let(n, ty, val, body, nondep) }
+    fn c_proj(&mut self, n: NamePtr<'a>, idx: u32, st: ExprPtr<'a>) -> ExprPtr<'a> { self.p_proj(n, idx, st) }
+    fn c_memo(&mut self) -> &mut crate::canon::CanonMemo<'a> { &mut self.canon }
+    fn c_core_bvset(&self, c: CorePtr<'a>) -> (u64, &[u64]) { self.dag.core_bvset(c.idx()) }
 }

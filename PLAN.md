@@ -72,6 +72,109 @@ Discipline: prefer `is_*` for tag checks, `view_*_head`/`view_*` for partial vie
 full shift-composed view (e.g., binder body traversal in `infer_pi`/`infer_lambda`,
 Lambda beta reduction in `whnf_no_unfolding`).
 
+### Canonical OSNF under binders (`canon.rs`, 2026-09-11)
+
+`Theory.lean`'s `IsOSNF.lam` requires `fvar_lb_val (lam body) = 0` with the bound
+variable *unbound* — a shift common to the body's free variables is extracted through the
+binder, which needs a cutoff adjustment of the body (`adjust_child body lb 1`). Until
+2026-09-11 the binder constructors only extracted the body pointer's own uniform shift, and
+only when the body did not mention its bound variable, so the same term could be
+`Lam(ty, body)+1` or `Lam(ty, body')+0` with the +1 baked into `body'`; the uniqueness
+theorem covered the model's normal form, not the code's. Pointer equality — the only
+O(1) equality test — then missed alpha-equivalent terms, which is what made con-leche's
+`_datF` lemmas exponential (see "Open bug", below).
+
+Now `mk_lambda`/`mk_pi`/`mk_let` (and the parser's `p_binder`/`p_let`, which build the
+export DAG and must produce identical cores) extract `lb = (smallest free index >= 1) - 1`
+through the binder and apply `unshift(body, lb, 1)` — the theory's `adjust_child`,
+implemented once over the `OsnfBuilder` trait for both builders. `unshift` only descends
+into children whose pointer shift is below the cutoff (the part that mentions a bound
+variable), rebuilds through the canonicalizing constructors, and is memoized per
+`(core, amount, cutoff)`.
+
+The extractable shift is read off a per-core **loose-bvar bitset** (`canon::BvSet`), a
+side-table like `expr_nlbv` computed at allocation from the children: a `u64` head for
+indices `0..64` (`expr_bvmask`) plus, for the cores that have indices `>= 64`, an
+arbitrary-length tail stored out of line in a flat arena (`expr_bvtail` offset into
+`BvTails`; most cores have `NO_TAIL`, 4 bytes). Shift, unbind (leave a binder: drop
+index 0, decrement the rest) and union are exact on it, so `body_lb = min_ge(body, 1) - 1`
+is decided exactly for every binder and the implemented normal form is `Theory.lean`'s
+throughout — one normal form, no window, no policy switch. The children's sets are OR-ed
+shifted straight into the new node's accumulator (`or_shl`/`or_unbind`), so a node whose
+indices stay below 64 never allocates. `canon::tests::bvset_matches_naive_sets` checks the
+word arithmetic against naive sets across word boundaries, and
+`tests::util::osnf_canonical_beyond_the_head_word` pins `λx. x #61` (built directly or as
+`(λx. x #51)+10`) and `λx. x #130` to `(λx. x #1) + 60` / `+ 129`.
+
+History, kept for the lessons: the first version was a 48-bit mask with a 16-bit `lo`
+("the record may be incomplete from `lo`"), which decided binders only within its window
+and by default extracted *nothing* beyond it — not canonical there, and a second, exact
+mode using lazily built per-core sorted index sets cost +54% on con-leche.
+- A single sticky "`>= 63` occurs" bit is **not** sound: after `k` binders it means
+  `>= 63-k`, overlapping the precise range. Sets must be exact under unbind.
+- "Undecidable" must mean "open, extract nothing" (`Some(0)`), not "closed" — conflating
+  them marked binders with far-out free variables as closed and overflowed
+  `nlbv + CLOSED_SHIFT`.
+- A per-`(core, cutoff)` memoized traversal for "smallest free index `>= cutoff`" is
+  O(n·depth) — every enclosing binder asks with a different cutoff — and visited 648 M
+  nodes on one declaration. The bitset answers any cutoff from one per-core record.
+- Per-child `Vec` clones in the allocation path (`from_parts(..).shl(..)` and OR) cost
+  +25 B instructions on con-leche's parse alone (6.8 M cores with tails, 14.8 M tail
+  words); OR-ing into one accumulator and the flat tail arena removed that.
+
+**Memory.** Canonicalization has a memory cost at parse time: a body core is interned
+when its export line is read, and when its binder later extracts a shift through it the
+rebuilt body is a new core — the old one stays, unreferenced by anything but its export
+entry, and it *must* stay until the end because any later line may still reference the
+entry (a census on con-leche found every core reachable from some entry until the end;
+no lookahead, no freeing). A reference-counted lazy-interning parser was tried and
+parked (branch `wip/lazy-parser`): it frees originals early but then re-creates them,
+since 9% of rebuilt-through entries are referenced again, 92% of those as ordinary
+children — 3x the parse instructions. What is done instead:
+
+- **End-of-parse compaction** (`LeanDag::compact_exprs`): mark from the declarations,
+  compact in place, renumber. Init keeps 4.15 M of 5.92 M cores, con-leche 5.26 M of
+  19.1 M (and 276 k instead of 6.8 M tailed cores), Mathlib 60.9 M of 87.4 M (master interns
+  68.4 M). The steady state during checking is then *below* master (Init 301 MB vs 378 MB). The compaction costs the checker a little:
+  dead export cores used to serve as hits for spines the checker rebuilds itself.
+- **`ExprTable`**, a `Vec` of cores plus a `hashbrown::HashTable<u32>` over it, replaces
+  the `IndexSet` for expressions: compaction in place with no transient copy, `u32`
+  indices (half the index memory), hashes recomputed rather than stored.
+- The parse-only structures are shrunk: the rebuild memo is a per-core slot `Vec` (one
+  rebuild per core is the rule: 2.17 M memo entries over 1.92 M cores on Init) with a
+  hash map only for the rest; `expr_remap` is `(u32, u16)`; tails need no offset table
+  since a tail exists iff `nlbv > 64` and its length is `ceil(nlbv/64) - 1`.
+
+Peak RSS (single thread; the peak is the parse in every case): Init 432 MB vs master
+378 MB (+14%; the first bitset build was 570 MB), std 739 MB vs 644 MB, con-leche
+parse 1.54 GB vs 627 MB, con-leche whole export 2.86 GB (first bitset build 4.10 GB). What
+remains above master on Init is the dead cores between their line and the end of the
+parse (1.77 M × ~60 B) plus the memo; on con-leche the rebuilds are the whole story.
+
+Cost and effect, single-threaded `perf stat` against `origin/master` (`79048ed`):
+
+| | master | **this** | |
+|---|---|---|---|
+| Init (54k decls) | 226.3 B, 378 MB | **217.8 B, 432 MB** | −3.8% |
+| std (93k decls) | 384.2 B, 644 MB | **356.3 B, 739 MB** | −7.3% |
+| `perf/fueled-chain` N=6/9/12 | 36 ms / 5.4 s / 263 s (4 600 B) | **1 / 3 / 5 ms** (0.33 B) | exponential → linear (nanoda: 2 / 19 / 34 ms) |
+| `ConLeche.checkIotaThm_datF` | 1 513 s | **25 ms** | (nanoda: 40 ms) |
+| con-leche whole export | killed at 1 h | **562.7 B, 99 s, 2.86 GB** | |
+| `ConLeche.Model.declNative` | — | **15.5 s, 2.49 GB** | 1.1 M → 4.7 M binder builds, 4.2 M → 19.8 M rebuilt nodes |
+| con-leche, arena (4 threads) | killed at 1 h | **42 s, 561 B, 3.4 GB** | (nanoda: 1.1 m) |
+| Mathlib (671k decls, 4 threads) | 9.95 T, 5.80 GB, 338 s wall / 1 172 s user | **7.88 T, 6.44 GB, 299 s / 976 s** | −20.8% instructions, +11% RSS |
+
+Canonicity does not cost, it pays: pointer equality now catches everything it was missing.
+`tests::util::osnf_canonical_under_binder` pins the two shortest cases. What the exact
+form does cost on con-leche is *maintaining* it on thousands-deep let chains: the parser
+extracts through 233 k binders there, and the checker rebuilds after every `inst_beta`
+(`declNative`: 1.1 M → 4.7 M binder builds, 4.2 M → 19.8 M rebuilt nodes). That is the
+price of the theorem holding for the code, and it is paid once per distinct core. The
+only way to have the theory's form on deep terms *without* rebuilds would be to carry a
+cutoff on the pointer — `(core, shift, cutoff)` — so that a shift pulled through a binder
+stays lazy; that is a representation change and OSNF would need redoing for cutoff
+shifts. Not attempted. Arena suite: 33 correct, 1 `either`, no regressions (Init 213 B / 0.46 GB, std 349 B / 0.79 GB at 4 threads).
+
 ### Pointer equality (replacing sem_eq)
 
 All equality checks use pointer equality (`==`). Since expressions are hash-consed into
@@ -113,9 +216,11 @@ entry serves all shifted variants.
 **Infer cache**: Separate check/no-check maps per depth bucket. Check entries serve
 both Check and InferOnly queries.
 
-**DefEq cache**: Per-depth positive/negative maps (keyed on normalized ExprPtr pairs).
-`UnionFind<ExprPtr>` provides transitive equality with depth-stratified unions — unions
-proven at higher depths live in higher buckets and are discarded on pop.
+**DefEq cache**: Per-depth positive/negative maps (`defeq_pos`/`defeq_neg`), keyed on
+normalized ExprPtr pairs and stored in the frame the pair is anchored to, so entries are
+discarded when that binder is left. Deliberately *not* an equivalence closure: it records
+only pairs that were themselves decided, never pairs connected through a third term. See
+"Why the union-find had to go".
 
 ### OSNF (Outermost-Shift Normal Form) — everywhere
 
@@ -679,6 +784,122 @@ Not applicable:
   with the arena's `LevelIndexOutOfOrder` and `SparseNameIndex` cases as regression tests.
   Porting this would remove a tested capability.
 
+## Resolved: con-leche timed out (`checkIotaThm_datF`) — pointer equality missed alpha-equivalent terms
+
+The arena's `con-leche` test (checks con-leche's own consistency proof and
+parser-equivalence theorem) is the one test nanobruijn fails: 73/73 soundness and
+119/120 completeness. **It is a timeout, not a rejection**: the arena's run command
+masks the exit code (`|| exit 1`), the run is killed at exactly the 1 h `timeout` after
+164.9 T instructions, and stderr holds only the `ExprPtr parse:` line, no panic. The
+export is ~1.7x Init and everyone else is fast (nanoda 1.1 m, official 1.8 m, lean4lean
+2.8 m).
+
+**Localised to the `_datF` lemma family.** Serial checking reaches 11 000 of 27 349
+declarations in 7.6 s, then stalls. Same binary, same parsed export, `use_nanoda_tc`
+toggled:
+
+| # | declaration | nanoda | nanobruijn |
+|---|---|---|---|
+| 11833 | `ConLeche.checkIotaThmN_datF` | 100 ms | > 5 min |
+| 11834 | `ConLeche.checkIotaThm_datF` | 40 ms | **1 513 255 ms (25.2 min), 37 800x** |
+| 11837 | `ConLeche.checkIotaRule_datF` | 19 ms | 91 ms |
+| 11843 | `ConLeche.checkProjTy_datF` | 3 ms | 10 ms |
+
+#11834's counters against nanoda's: def_eq 484 M vs 9 278 (52 000x), whnf 1.14 G vs
+12 273, alloc_expr 7.6 G vs 177 774 — while touching only 1.24 M distinct DAG nodes and
+with the caches hitting (whnf 83%, mk_app 32.8 G hits). It is an exponentially branching
+search, not cache loss. Not caused by dropping the union-find: `63fd6b4` and `79048ed`
+hang identically. Reproducer on the arena's built export:
+`{"use_nanoda_tc": false, "num_threads": 1, "skip_declarations": 11833, "max_declarations": 11834}`.
+
+**What the lemmas are.** `f_datF : (f (m := FueledM) args).val F = f (m := CheckM) args`,
+proved by `unfold f; simp only [FueledM.atF_bind, atF_pure, atF_throw, atF_ite, …]`.
+`FueledM α = {p : Nat → CheckM α // ∀ f f' v, f ≤ f' → p f = .ok v → p f' = .ok v}`, and
+`FueledM.bind x k = ⟨fun F => x.val F >>= fun a => (k a).val F, proof⟩`. What the kernel
+has to decide is `f FueledM args ≡ <the unfolded body>` (from `unfold`) and then the two
+monadic programs against each other, under one binder per `bind`.
+
+### Root cause: pointer equality misses alpha-equivalent terms
+
+Tracing every top-level def_eq in both checkers on `checkProjTy_datF`
+(ad-hoc env-gated tracing in `def_eq`, not kept) and diffing the trees:
+
+- nanoda's heaviest root costs 140 nested calls; nanobruijn's costs 1 891 and is the bare
+  comparison `checkProjTy FueledM … $0…$6` vs its unfolding, the `let pty := …; let
+  __do_jp := …` join-point chain.
+- Lazy delta unfolds `checkProjTy` once. In nanoda the result is pointer-identical to the
+  RHS (hash-consing on locally-nameless terms with the same fvars) and the loop stops.
+  In nanobruijn the result is **alpha-equivalent modulo shift placement but not
+  pointer-equal** (`LD d=1 it=2 eq=false sem=true`), so the comparison proceeds
+  structurally into the two FueledM programs. 19 of the 24 lazy-delta steps at depth <= 4
+  in that root are `eq=false sem=true`; across the declaration **75% of all deep def_eq
+  calls (1 913 of 2 559) compare sides that are alpha-equal modulo shifts** (65% on
+  `checkIotaRule_datF`). Each of those should have been an O(1) hit.
+- The exponent: a structural descent through `Bind.bind FueledM …` vs `Bind.bind FueledM …`
+  reaches `try_eq_const_app`, which returns `None` without any argument failing (the heads
+  differ by then), so both sides are unfolded — one to the stuck projection
+  `(Monad.toBind FueledM inst).0 …`, the other (via the whnf cache) all the way to
+  `Subtype.mk (Nat → CheckM Expr) (fun p => monotone…) (fun F => …)`. Lazy delta is then
+  exhausted (proj-headed vs constructor), `rew` unfolds the first side to match, and
+  `⟨p₁, h₁⟩ ≡ ⟨p₂, h₂⟩` compares the monotonicity **proofs**: proof irrelevance compares
+  their types, `∀ f f' v, f ≤ f' → p f = .ok v → p f' = .ok v`, which mention `p f` and
+  `p f'` — so the sub-program is compared again, under three more binders, twice.
+  ~3–4x per bind. nanoda only ever reaches the CheckM binds through `Subtype.val`, which
+  projects the proof away, so it sees `Except.bind` there and stays linear.
+- Confirmed by a distilled reproducer, now an arena perf test
+  (`_tmp/lean-kernel-arena/tests/perf/fueled-chain.lean`, branch `perf-fueled-chain`): a
+  fuel-indexed `Subtype` monad whose property mentions `p` twice under binders (trivially
+  true — the monotonicity proof is not what matters), a `lift`, and `chainN`: N binds each
+  followed by an `unless … throw` guard, with the `_datF` lemma proved exactly as con-leche
+  does. nanoda 2 / 18 / 32 ms and nanobruijn **19 ms / 4.1 s / 256 s** at N = 6 / 9 / 12,
+  i.e. ~4x per guard. Bisecting the ingredients: binds without guards are < 1 ms for both
+  at N = 12; guards as tail `if`s instead of `do` join points give ~x25 at N = 9; and a
+  property whose two mentions of `p` are the *same* subterm (`p f = .ok v → p f = .ok v`)
+  halves the exponent base to ~2, because the second mention hits pointer equality — the
+  base is the number of *distinct* re-comparisons of the rest of the program per level.
+
+Why the representations differ — **the implementation does not compute the theory's normal
+form under binders.** `Theory.lean` proves `osnf_unique` / `equiv_iff_osnf_eq` for a form
+whose `lam` rule is `fvar_lb_val (lam body) = 0` with `fvars (lam body) = unbind body.fvars`:
+the bound variable is dropped and the rest decremented, so a shift common to the body's
+*free* variables is pulled out through the binder, and `mk_osnf_compound` realizes that
+with `adjust_child body lb 1` — a shift with a **cutoff**, which recurses into the body.
+The implementation's `mk_lambda`/`mk_pi` (`body_outer_shift`) instead extract only the
+body pointer's own uniform shift, and only when the body does not mention the bound
+variable at all (`nlbv(body) <= 1 → None`); if the body uses `#0` next to free variables,
+nothing is extracted, because `osnf_adj` is a uniform subtraction and would underflow on
+the `V0+0` child. The shortest pair, built by the real constructors
+(`tests::util::osnf_not_canonical_under_binder`):
+
+    lazy  = Lam(Sort 0, App(V0+0, V0+1)+0) +1      -- (λx. x #1) shifted by 1
+    baked = Lam(Sort 0, App(V0+0, V0+2)+0) +0      -- λx. x #2 built directly
+
+`materialize_expr lazy` prints identically to `baked`; the pointers differ. The theory's
+`to_osnf` of this term is the lazy form (`fvar_lb_val (lam (app (bvar 0) (bvar 2))) = 1`,
+so it becomes `shift 1 (lam (app (bvar 0) (bvar 1)))`); the implementation accepts both as
+normal. So the uniqueness proof covers the model's normal form, not the invariant the
+code maintains; the code's invariant is canonical for `app` and for binders whose body
+does not use the bound variable, and non-canonical otherwise. In con-leche the observed
+pair (dumped by a one-off diagnostic) is exactly this at scale: `App(P+0, A+0)+1` vs `App(P+1, A'+0)+0` with
+`A'` the join-point lambda whose body had the +1 pushed past its `V0+0` children.
+
+This is a gap in the checker's premise, not just a performance bug: pointer equality on
+`(core, shift)` is complete for alpha-equivalent terms only if the representation is
+canonical, and it is not. The theory shows what canonical would cost: extracting a shift
+through a binder needs a cutoff adjustment of the body, i.e. a traversal — the work the
+lazy-shift design set out to avoid. The options are (a) implement `IsOSNF.lam` in the
+binder constructors and pay that traversal at construction (possibly cheap in practice
+if bodies rarely mix `#0` with a common free shift, to be measured), or (b) keep the
+weaker invariant and make `def_eq_quick_check` complete by other means (a
+representation-insensitive equality gated by a shift-invariant hash).
+
+Refuted along the way (each changed no counter): frame-invalidation of the depth-bucketed
+caches; the union-find removal; eager zeta in whnf's `Let` case; cheap-projection whnf
+consuming cached non-cheap results; a dead negative cache (it is narrowly scoped in nanoda
+too).
+
+**Resolution (2026-09-11).** Option (a), implemented in `canon.rs`; see "Canonical OSNF under binders" in the Design section for the mechanism, the two pitfalls, and the measurements. con-leche now checks in 24.1 s on the arena (33/33 correct), Init is 4.0% and std 7.2% cheaper.
+
 ## TODO
 
 - **OSNF everywhere (including TC-generated expressions)**: DONE. Parse-time and
@@ -754,6 +975,7 @@ Local measurements (release build):
 
 | | Init (instructions, single-thread) | Mathlib (8 threads, wall / user) |
 |---|---|---|
+| nanobruijn (2026-09-11, canonical binders + compaction) | 217.8B (std 356.3B) | 4 threads: 7.88T, 299s / 976s, 6.4 GB (master 9.95T, 338s / 1172s, 5.8 GB) |
 | nanobruijn (2026-04-19, post-field-removal) | 225.7B | 3m28s / 20m33s |
 | nanobruijn (2026-04-18) | 242B | — |
 | nanobruijn (pre-CLOSED_SHIFT, 2026-04-15) | 238B | ~11.5T |
