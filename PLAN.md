@@ -644,7 +644,7 @@ These approaches were tried and found counterproductive, unsound, or out of scop
 
 ## Upstream nanoda porting
 
-Reviewed all nanoda_lib commits from fork point `68d5ca9` through `0505569` (2026-08-24).
+Reviewed all nanoda_lib commits from fork point `68d5ca9` through `3a24072` (2026-09-22).
 
 Applied:
 - **`4219437` — Encode DagMarker in bit 31 of Ptr** (by Mark Ruvald Pedersen):
@@ -688,6 +688,30 @@ Cost of the PR #22–#28 checks together: Init 226.64B → 227.51B instructions
 added — recomputing `is_recursive`, scanning types for a `_nested` prefix, and building
 and comparing recursor name sets.
 
+- **PR #31 (`0928383`) — perf improvements from the FLT project** (by ammkrn), 2026-09-28:
+  (1) scratch maps (`abstr_cache`, `abstr_cache_levels`, `subst_cache`) are replaced
+  rather than cleared once they have grown past 1024 entries, since clearing costs the
+  capacity, not the length (`reset_scratch_map`; nanobruijn's `inst_cache` is a
+  direct-mapped `Vec`, so nothing to do there); (2) a per-declaration memo of `def_eq`
+  calls that returned false, keyed by the pair and the eager-mode flag — nanobruijn's
+  depth-bucketed `defeq_neg` cache, so far only fed by congruence failures in the lazy
+  delta step, now also takes every deep `def_eq` failure and carries the eager flag in
+  its key; (3) `try_eq_const_app` compares arguments right to left, the last ones being
+  the most likely to differ. The general memo must stay apart from the congruence
+  failures (the key carries a flag): "arguments differ under the same head" does not
+  make the sides unequal once the head unfolds, and merging the two made Mathlib fail.
+  Effect: Init/std/con-leche within ±0.7% single-threaded, **Mathlib 7.89 T → 4.72 T
+  instructions (−40%)**, 278 s → 231 s wall at 4 threads, RSS unchanged — Mathlib's
+  instance-heavy terms repeat the same failing comparisons over and over.
+- **PR #34 (`c8e5083`) — pretty-printer grouping** (by Scott Hughes): `partition_slice`
+  used `partition_point`, which assumed "same type/style as the first binder" partitions
+  the telescope; it scans to the first nonmatch now, with the four regression tests in
+  `tests/pretty_printer.rs`. Printing only.
+- **PR #36 (`b36e6f3`) — sub-quadratic decimal nat literals** (by lordwilson):
+  `parse_decimal_fast` splits a digit string by `10^(2048·2^j)` and recombines with big
+  multiplications instead of `BigUint::from_str`, which is quadratic in the digit count
+  (a 25 M-digit literal took longer than five minutes to parse). The accompanying
+  num-bigint/rand bumps were not taken.
 - **PR #27 (`05024bd`, part) — replace the union-find def-eq cache.** Upstream swaps
   `UnionFind` for an `FxHashSet<SortedPair>` so the cache cannot conclude `x = z` from
   cached `x = y` and `y = z`, and drops `union_find.rs` entirely. Done here too; see
@@ -975,6 +999,7 @@ Local measurements (release build):
 
 | | Init (instructions, single-thread) | Mathlib (8 threads, wall / user) |
 |---|---|---|
+| nanobruijn (2026-09-28, + upstream PR #31 def_eq failure memo) | 218.5B (std 356.9B) | 4 threads: 4.72T, 231s / 706s, 6.4 GB |
 | nanobruijn (2026-09-11, canonical binders + compaction) | 217.8B (std 356.3B) | 4 threads: 7.88T, 299s / 976s, 6.4 GB (master 9.95T, 338s / 1172s, 5.8 GB) |
 | nanobruijn (2026-04-19, post-field-removal) | 225.7B | 3m28s / 20m33s |
 | nanobruijn (2026-04-18) | 242B | — |

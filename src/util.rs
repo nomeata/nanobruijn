@@ -181,6 +181,13 @@ pub type AppArgs<'a> = SmallVec<[ExprPtr<'a>; 8]>;
 
 pub(crate) fn new_fx_index_map<K, V>() -> FxIndexMap<K, V> { FxIndexMap::with_hasher(Default::default()) }
 
+/// Clearing a hash map costs its capacity, not its length: a scratch map that grew large
+/// for one call would make every later call pay for it. Replace it instead (upstream
+/// nanoda PR #31).
+pub(crate) fn reset_scratch_map<K, V>(m: &mut FxHashMap<K, V>) {
+    if m.capacity() > 1024 { *m = new_fx_hash_map(); } else { m.clear(); }
+}
+
 pub(crate) fn new_fx_hash_map<K, V>() -> FxHashMap<K, V> { FxHashMap::with_hasher(Default::default()) }
 
 pub(crate) fn new_fx_hash_set<K>() -> FxHashSet<K> { FxHashSet::with_hasher(Default::default()) }
@@ -222,7 +229,11 @@ pub(crate) struct DepthFrame<'t> {
     pub(crate) wnu: LazyMap<CorePtr<'t>, ExprPtr<'t>>,
     pub(crate) infer_check: LazyMap<CorePtr<'t>, ExprPtr<'t>>,
     pub(crate) infer_no_check: LazyMap<CorePtr<'t>, ExprPtr<'t>>,
-    pub(crate) defeq_neg: LazyMap<(ExprPtr<'t>, ExprPtr<'t>), (ExprPtr<'t>, ExprPtr<'t>, u16)>,
+    /// Pairs def_eq decided unequal, keyed by the canonical pair, the eager-mode flag (eager
+    /// mode can decide more pairs equal) and whether the entry records only a congruence
+    /// failure in the lazy delta step — arguments differing under the same head does not
+    /// make the sides unequal once the head is unfolded, so those must not answer `def_eq`.
+    pub(crate) defeq_neg: LazyMap<((ExprPtr<'t>, ExprPtr<'t>), bool, bool), (ExprPtr<'t>, ExprPtr<'t>, u16)>,
     /// Per-depth positive def_eq cache: the pairs shown equal at this depth.
     pub(crate) defeq_pos: LazyMap<(ExprPtr<'t>, ExprPtr<'t>), ()>,
 }
@@ -2021,7 +2032,7 @@ pub(crate) struct TcCache<'t> {
     pub(crate) wnu_base: LazyMap<CorePtr<'t>, ExprPtr<'t>>,
     pub(crate) infer_check_base: LazyMap<CorePtr<'t>, ExprPtr<'t>>,
     pub(crate) infer_no_check_base: LazyMap<CorePtr<'t>, ExprPtr<'t>>,
-    pub(crate) defeq_neg_base: LazyMap<(ExprPtr<'t>, ExprPtr<'t>), (ExprPtr<'t>, ExprPtr<'t>, u16)>,
+    pub(crate) defeq_neg_base: LazyMap<((ExprPtr<'t>, ExprPtr<'t>), bool, bool), (ExprPtr<'t>, ExprPtr<'t>, u16)>,
     /// Positive def_eq cache base (bucket 0): pairs of closed expressions shown equal.
     pub(crate) defeq_pos_base: LazyMap<(ExprPtr<'t>, ExprPtr<'t>), ()>,
     /// Per-depth frames: local bindings + open-expression caches.

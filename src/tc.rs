@@ -1469,6 +1469,12 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         }
         self.ctx.trace.def_eq_inner_calls += 1;
 
+        // Pairs already decided unequal in this declaration (upstream nanoda PR #31); the
+        // key carries the eager-mode flag since eager mode can decide more pairs equal.
+        if self.defeq_neg_lookup(x, y, false) {
+            return false;
+        }
+
         // Speculative app congruence: if both sides are applications, try comparing
         // their spines via cheap O(1) checks (ptr_eq + caches) before doing whnf.
         // Avoids expensive whnf/delta steps for cases resolvable by structural congruence.
@@ -1552,6 +1558,8 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         };
         if result {
             self.defeq_pos_store(x, y);
+        } else {
+            self.defeq_neg_store(x, y, false);
         }
         result
     }
@@ -1748,11 +1756,11 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
     }
 
     fn failure_cache_contains(&mut self, x: ExprPtr<'t>, y: ExprPtr<'t>) -> bool {
-        self.defeq_neg_lookup(x, y)
+        self.defeq_neg_lookup(x, y, true)
     }
 
     fn failure_cache_insert(&mut self, x: ExprPtr<'t>, y: ExprPtr<'t>) {
-        self.defeq_neg_store(x, y);
+        self.defeq_neg_store(x, y, true);
     }
 
 
@@ -1790,14 +1798,16 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         }
     }
 
-    /// Look up in the negative def_eq cache (failure cache).
-    fn defeq_neg_lookup(&mut self, x: ExprPtr<'t>, y: ExprPtr<'t>) -> bool {
+    /// Look up in the negative def_eq cache; `congr` selects the congruence-failure entries
+    /// (see `DepthFrame::defeq_neg`).
+    fn defeq_neg_lookup(&mut self, x: ExprPtr<'t>, y: ExprPtr<'t>, congr: bool) -> bool {
         if self.defeq_cache_suppressed {
             // A stale "tried and failed" would make an audited pair look unconfirmable.
             return false
         }
         let (nx, ny, bucket_idx) = self.defeq_normalize_pair(x, y);
         let (key, _) = self.defeq_canon_key_open(nx, ny);
+        let key = (key, self.ctx.eager_mode, congr);
         let result = depth_get!(ref self.tc_cache, bucket_idx, &key, defeq_neg_base, defeq_neg);
         if result.is_some() {
             self.ctx.trace.defeq_open_neg_hits += 1;
@@ -1805,11 +1815,12 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         } else { false }
     }
 
-    /// Store in the negative def_eq cache (failure cache).
-    fn defeq_neg_store(&mut self, x: ExprPtr<'t>, y: ExprPtr<'t>) {
+    /// Store in the negative def_eq cache.
+    fn defeq_neg_store(&mut self, x: ExprPtr<'t>, y: ExprPtr<'t>, congr: bool) {
         let depth = self.depth() as u16;
         let (nx, ny, bucket_idx) = self.defeq_normalize_pair(x, y);
         let (key, swapped) = self.defeq_canon_key_open(nx, ny);
+        let key = (key, self.ctx.eager_mode, congr);
         let (sx, sy) = if swapped { (ny, nx) } else { (nx, ny) };
         let existing = depth_get!(ref self.tc_cache, bucket_idx, &key, defeq_neg_base, defeq_neg);
         if existing.map_or(true, |&(_, _, sd)| depth < sd) {
@@ -1847,7 +1858,8 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                     (Const { levels: l_levels, .. }, Const { levels: r_levels, .. })
                         if l_args.len() == r_args.len()
                             && !self.failure_cache_contains(x, y)
-                            && l_args.iter().copied().zip(r_args.iter().copied()).all(|(x, y)| self.def_eq(x, y))
+                            // last arguments first: they are the ones most likely to differ (upstream PR #31)
+                            && l_args.iter().copied().zip(r_args.iter().copied()).rev().all(|(x, y)| self.def_eq(x, y))
                             && self.ctx.eq_antisymm_many(l_levels, r_levels) =>
                         Some(FoundEqResult(true)),
                     (Const { .. }, Const { .. }) => {

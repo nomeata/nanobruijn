@@ -716,7 +716,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
     /// Abstraction of unique identifiers; replaces free variables with the appropriate
     /// bound variable, if the free variable is in `locals`.
     pub fn abstr(&mut self, e: CorePtr<'t>, locals: &[CorePtr<'t>]) -> ExprPtr<'t> {
-        self.expr_cache.abstr_cache.clear();
+        crate::util::reset_scratch_map(&mut self.expr_cache.abstr_cache);
         self.abstr_aux_core(e, locals, 0u16)
     }
 
@@ -829,7 +829,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
     /// Abstract deBruijn-level free variables back to bound variables.
     /// Used by nanoda's locally-nameless TC.
     pub fn abstr_levels(&mut self, e: CorePtr<'t>, start_pos: u16) -> ExprPtr<'t> {
-        self.expr_cache.abstr_cache_levels.clear();
+        crate::util::reset_scratch_map(&mut self.expr_cache.abstr_cache_levels);
         self.abstr_aux_levels_core(e, start_pos, self.dbj_level_counter)
     }
 
@@ -901,7 +901,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
             return cached;
         }
         self.trace.dsubst_cache_miss += 1;
-        self.expr_cache.subst_cache.clear();
+        crate::util::reset_scratch_map(&mut self.expr_cache.subst_cache);
         assert_eq!(self.read_levels(ks).len(), self.read_levels(vs).len());
         let out = self.subst_aux_core(e, ks, vs);
         self.expr_cache.dsubst_cache.insert((e, ks, vs), out);
@@ -1024,7 +1024,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
             Local { binder_name, binder_style, binder_type, .. } => {
                 // Use abstr_aux to correctly handle body.shift.
                 // abstr(body.core, ...) would drop the shift, producing wrong var indices.
-                self.expr_cache.abstr_cache.clear();
+                crate::util::reset_scratch_map(&mut self.expr_cache.abstr_cache);
                 let body = self.abstr_aux(body, &[binder], 0);
                 self.mk_pi(binder_name, binder_style, ExprPtr::closed(binder_type), body) // binder_type is CorePtr from Local
             }
@@ -1035,7 +1035,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
     pub(crate) fn apply_lambda(&mut self, binder: CorePtr<'t>, body: ExprPtr<'t>) -> ExprPtr<'t> {
         match self.read_expr(binder) {
             Local { binder_name, binder_style, binder_type, .. } => {
-                self.expr_cache.abstr_cache.clear();
+                crate::util::reset_scratch_map(&mut self.expr_cache.abstr_cache);
                 let body = self.abstr_aux(body, &[binder], 0);
                 self.mk_lambda(binder_name, binder_style, ExprPtr::closed(binder_type), body) // binder_type is CorePtr from Local
             }
