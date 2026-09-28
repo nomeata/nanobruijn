@@ -711,7 +711,8 @@ and comparing recursor name sets.
   `parse_decimal_fast` splits a digit string by `10^(2048·2^j)` and recombines with big
   multiplications instead of `BigUint::from_str`, which is quadratic in the digit count
   (a 25 M-digit literal took longer than five minutes to parse). The accompanying
-  num-bigint/rand bumps were not taken.
+  dependency bumps (num-bigint 0.5, rand 0.10, num-integer/num-traits) are taken too;
+  only the tests' rand API use changed.
 - **PR #27 (`05024bd`, part) — replace the union-find def-eq cache.** Upstream swaps
   `UnionFind` for an `FxHashSet<SortedPair>` so the cache cannot conclude `x = z` from
   cached `x = y` and `y = z`, and drops `union_find.rs` entirely. Done here too; see

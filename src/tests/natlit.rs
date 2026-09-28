@@ -1,6 +1,6 @@
 use crate::util::{nat_div, nat_mod, nat_sub};
 use num_bigint::BigUint;
-use num_bigint::RandBigInt;
+use num_bigint::BigRng010;
 use num_traits::{One, Zero};
 
 #[cfg(test)]
@@ -19,10 +19,10 @@ theorem Nat.div_le_self (n : Nat) (k : Nat) : n / k ≤ n
  */
 #[test]
 fn nat_div_le_self() {
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rng();
     for size in 0..1024 {
         for _ in 0..10 {
-            let (n, k) = (rng.gen_biguint(size), rng.gen_biguint(size));
+            let (n, k) = (rng.random_biguint(size), rng.random_biguint(size));
             assert!(nat_div(n.clone(), k) <= n);
         }
     }
@@ -43,10 +43,10 @@ fn nat_div_eq() {
             BigUint::zero()
         }
     }
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rng();
     for size in 0..8 {
         for _ in 0..32 {
-            let (x, y) = (rng.gen_biguint(size), rng.gen_biguint(size));
+            let (x, y) = (rng.random_biguint(size), rng.random_biguint(size));
             assert_eq!(nat_div_eq_f(x.clone(), y.clone()), nat_div(x, y))
         }
     }
@@ -70,10 +70,10 @@ fn nat_shr_eq() {
             nat_shr_eq_f(x, y - BigUint::one()) / BigUint::from(2u8)
         }
     }
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rng();
     for size in 0..8 {
         for _ in 0..32 {
-            let (x, y) = (rng.gen_biguint(size), rng.gen_biguint(size % 6));
+            let (x, y) = (rng.random_biguint(size), rng.random_biguint(size % 6));
             assert_eq!(nat_shr_eq_f(x.clone(), y.clone()), nat_shr(x, y))
         }
     }
@@ -98,10 +98,10 @@ fn nat_shl_eq() {
         }
     }
 
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rng();
     for size in 0..8 {
         for _ in 0..32 {
-            let (x, y) = (rng.gen_biguint(size), rng.gen_biguint(size % 6));
+            let (x, y) = (rng.random_biguint(size), rng.random_biguint(size % 6));
             assert_eq!(nat_shl_eq_f(x.clone(), y.clone()), nat_shl(x, y))
         }
     }
@@ -127,10 +127,10 @@ fn nat_gcd_eq() {
         }
     }
 
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rng();
     for size in 0..8 {
         for _ in 0..32 {
-            let (x, y) = (rng.gen_biguint(size), rng.gen_biguint(size));
+            let (x, y) = (rng.random_biguint(size), rng.random_biguint(size));
             let gcd = nat_gcd(&x, &y);
             assert_eq!(nat_gcd_eq_f(x, y), gcd)
         }
@@ -174,10 +174,10 @@ fn nat_xor_eq() {
     }
 
     use crate::util::nat_xor;
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rng();
     for size in 0..5 {
         for _ in 0..32 {
-            let (x, y) = (rng.gen_biguint(size), rng.gen_biguint(size));
+            let (x, y) = (rng.random_biguint(size), rng.random_biguint(size));
             let rhs = nat_xor(&x, &y);
             eprintln!("{:?} ^ {:?} := {:?}", x, y, rhs);
             assert_eq!(spec_xor(x, y), rhs)
@@ -195,10 +195,10 @@ fn nat_lor_eq() {
     }
 
     use crate::util::nat_lor;
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rng();
     for size in 0..5 {
         for _ in 0..32 {
-            let (x, y) = (rng.gen_biguint(size), rng.gen_biguint(size));
+            let (x, y) = (rng.random_biguint(size), rng.random_biguint(size));
             assert_eq!(spec_lor(x.clone(), y.clone()), nat_lor(x, y))
         }
     }
@@ -214,10 +214,10 @@ fn nat_land_eq() {
     }
 
     use crate::util::nat_land;
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rng();
     for size in 0..5 {
         for _ in 0..32 {
-            let (x, y) = (rng.gen_biguint(size), rng.gen_biguint(size));
+            let (x, y) = (rng.random_biguint(size), rng.random_biguint(size));
             assert_eq!(spec_land(x.clone(), y.clone()), nat_land(x, y))
         }
     }
@@ -232,10 +232,10 @@ fn nat_add_eq() {
             nat_add_eq_f(x, y - BigUint::one()) + BigUint::one()
         }
     }
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rng();
     for size in 0..8 {
         for _ in 0..32 {
-            let (x, y) = (rng.gen_biguint(size), rng.gen_biguint(size));
+            let (x, y) = (rng.random_biguint(size), rng.random_biguint(size));
             assert_eq!(nat_add_eq_f(x.clone(), y.clone()), x + y)
         }
     }
@@ -250,10 +250,10 @@ fn nat_sub_eq() {
             pred(nat_sub_eq_f(x, y - BigUint::one()))
         }
     }
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rng();
     for size in 0..8 {
         for _ in 0..32 {
-            let (x, y) = (rng.gen_biguint(size), rng.gen_biguint(size));
+            let (x, y) = (rng.random_biguint(size), rng.random_biguint(size));
             assert_eq!(nat_sub_eq_f(x.clone(), y.clone()), nat_sub(x, y))
         }
     }
@@ -269,10 +269,10 @@ fn nat_pow_eq() {
             (x.clone().pow(y - BigUint::one())) * x
         }
     }
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rng();
     for size in 0..8 {
         for _ in 0..32 {
-            let (x, y) = (rng.gen_biguint(size), rng.gen_biguint(size));
+            let (x, y) = (rng.random_biguint(size), rng.random_biguint(size));
             assert_eq!(nat_pow_eq_f(x.clone(), y.clone()), x.pow(y))
         }
     }
@@ -287,10 +287,10 @@ fn nat_mul_eq() {
             nat_mul_eq_f(x.clone(), y - BigUint::one()) + x
         }
     }
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rng();
     for size in 0..8 {
         for _ in 0..32 {
-            let (x, y) = (rng.gen_biguint(size), rng.gen_biguint(size));
+            let (x, y) = (rng.random_biguint(size), rng.random_biguint(size));
             assert_eq!(nat_mul_eq_f(x.clone(), y.clone()), x * y)
         }
     }
@@ -310,10 +310,10 @@ fn nat_ble_eq() {
             nat_ble_eq_f(pred(x), pred(y))
         }
     }
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rng();
     for size in 0..8 {
         for _ in 0..32 {
-            let (x, y) = (rng.gen_biguint(size), rng.gen_biguint(size));
+            let (x, y) = (rng.random_biguint(size), rng.random_biguint(size));
             assert_eq!(nat_ble_eq_f(x.clone(), y.clone()), x <= y)
         }
     }
@@ -334,10 +334,10 @@ fn nat_mod_eq() {
             x
         }
     }
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rng();
     for size in 0..8 {
         for _ in 0..32 {
-            let (x, y) = (rng.gen_biguint(size), rng.gen_biguint(size));
+            let (x, y) = (rng.random_biguint(size), rng.random_biguint(size));
             assert_eq!(nat_mod_eq_f(x.clone(), y.clone()), nat_mod(x, y))
         }
     }
@@ -347,10 +347,10 @@ fn nat_mod_eq() {
 //n * (m / n) + m % n = m
 #[test]
 fn nat_div_add_mod() {
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rng();
     for size in 0..128 {
         for _ in 0..32 {
-            let (n, m) = (rng.gen_biguint(size), rng.gen_biguint(size));
+            let (n, m) = (rng.random_biguint(size), rng.random_biguint(size));
             let m_div_n = nat_div(m.clone(), n.clone());
             let m_mod_n = nat_mod(m.clone(), n.clone());
             let nat_mul_div = n.clone() * m_div_n;
@@ -364,11 +364,11 @@ a % b = (a - b) % b
  */
 #[test]
 fn nat_mod_eq_sub_mod() {
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rng();
     for size in 0..128 {
         let mut iterations = 0;
         while iterations < 32 {
-            let (a, b) = (rng.gen_biguint(size), rng.gen_biguint(size));
+            let (a, b) = (rng.random_biguint(size), rng.random_biguint(size));
             if a >= b {
                 iterations += 1;
                 assert_eq!(nat_mod(a.clone(), b.clone()), nat_mod(a.clone() - b.clone(), b))
@@ -388,7 +388,7 @@ fn nat_mod_eq_sub_mod() {
 //    export.with_tc(|tc| {
 //        for size in 0..8 {
 //            for _iteration in 0..100 {
-//                let target = rng.gen_biguint(size);
+//                let target = rng.random_biguint(size);
 //                let of_succ = {
 //                    let mut out = tc.ctx.c_nat_zero();
 //                    let c_succ = tc.ctx.c_nat_succ();
@@ -410,7 +410,7 @@ fn nat_mod_eq_sub_mod() {
 //    export.with_tc(|tc| {
 //        for size in 0..=8 {
 //            for _iteration in 0..100 {
-//                let (n, m) = (rng.gen_biguint(size), rng.gen_biguint(size * 64));
+//                let (n, m) = (rng.random_biguint(size), rng.random_biguint(size * 64));
 //                let of_succ = {
 //                    let mut out = tc.ctx.mk_nat_lit_quick(m.clone());
 //                    let c_succ = tc.ctx.c_nat_succ();
@@ -433,7 +433,7 @@ fn nat_mod_eq_sub_mod() {
 //        for size in 0..1024 {
 //            for _iteration in 0..10 {
 //                tc.tc_cache.clear();
-//                let n = tc.ctx.mk_nat_lit_quick(rng.gen_biguint(size));
+//                let n = tc.ctx.mk_nat_lit_quick(rng.random_biguint(size));
 //                let n_mul_zero = tc.ctx.nat_binop(n, NatBinOp::Mul, zero);
 //                assert!(tc.def_eq(n_mul_zero, zero));
 //            }
@@ -449,7 +449,7 @@ fn nat_mod_eq_sub_mod() {
 //            for _iteration in 0..10 {
 //                tc.tc_cache.clear();
 //                let (n, m) =
-//                    (tc.ctx.mk_nat_lit_quick(rng.gen_biguint(size)), tc.ctx.mk_nat_lit_quick(rng.gen_biguint(size)));
+//                    (tc.ctx.mk_nat_lit_quick(rng.random_biguint(size)), tc.ctx.mk_nat_lit_quick(rng.random_biguint(size)));
 //                let succ_m = tc.ctx.mk_app(c_succ, m);
 //                let n_mul_succ_m = tc.ctx.nat_binop(n, NatBinOp::Mul, succ_m);
 //                let n_mul_m = tc.ctx.nat_binop(n, NatBinOp::Mul, m);
@@ -467,7 +467,7 @@ fn nat_mod_eq_sub_mod() {
 //            for _iteration in 0..10 {
 //                tc.tc_cache.clear();
 //                let (n, m) =
-//                    (tc.ctx.mk_nat_lit_quick(rng.gen_biguint(size)), tc.ctx.mk_nat_lit_quick(rng.gen_biguint(size)));
+//                    (tc.ctx.mk_nat_lit_quick(rng.random_biguint(size)), tc.ctx.mk_nat_lit_quick(rng.random_biguint(size)));
 //                let n_mul_m = tc.ctx.nat_binop(n, NatBinOp::Mul, m);
 //                let m_mul_n = tc.ctx.nat_binop(m, NatBinOp::Mul, n);
 //                assert!(tc.def_eq(n_mul_m, m_mul_n));
@@ -483,7 +483,7 @@ fn nat_mod_eq_sub_mod() {
 //        for size in 0..1024 {
 //            for _iteration in 0..10 {
 //                tc.tc_cache.clear();
-//                let n = tc.ctx.mk_nat_lit_quick(rng.gen_biguint(size));
+//                let n = tc.ctx.mk_nat_lit_quick(rng.random_biguint(size));
 //                let zero_add_n = tc.ctx.nat_binop(zero, NatBinOp::Add, n);
 //                assert!(tc.def_eq(zero_add_n, n));
 //            }
@@ -498,7 +498,7 @@ fn nat_mod_eq_sub_mod() {
 //            for _iteration in 0..10 {
 //                tc.tc_cache.clear();
 //                let (n, m) =
-//                    (tc.ctx.mk_nat_lit_quick(rng.gen_biguint(size)), tc.ctx.mk_nat_lit_quick(rng.gen_biguint(size)));
+//                    (tc.ctx.mk_nat_lit_quick(rng.random_biguint(size)), tc.ctx.mk_nat_lit_quick(rng.random_biguint(size)));
 //                let succ_n = tc.ctx.mk_app(c_succ, n);
 //                #[allow(non_snake_case)]
 //                let succ_n__add_m = tc.ctx.nat_binop(succ_n, NatBinOp::Add, m);
@@ -519,7 +519,7 @@ fn nat_mod_eq_sub_mod() {
 //            for _iteration in 0..10 {
 //                tc.tc_cache.clear();
 //                let (n, k) =
-//                    (tc.ctx.mk_nat_lit_quick(rng.gen_biguint(size)), tc.ctx.mk_nat_lit_quick(rng.gen_biguint(size)));
+//                    (tc.ctx.mk_nat_lit_quick(rng.random_biguint(size)), tc.ctx.mk_nat_lit_quick(rng.random_biguint(size)));
 //                let n_div_k = tc.ctx.nat_binop(n, NatBinOp::Div, k);
 //                let n_div_k_le_n = tc.ctx.nat_binop(n_div_k, NatBinOp::Ble, n);
 //                assert!(tc.def_eq(n_div_k_le_n, bool_true));
@@ -534,7 +534,7 @@ fn nat_mod_eq_sub_mod() {
 //        for size in 0..1024 {
 //            let mut iterations = 0;
 //            while iterations < 10 {
-//                let (a, b) = (rng.gen_biguint(size), rng.gen_biguint(size + 1));
+//                let (a, b) = (rng.random_biguint(size), rng.random_biguint(size + 1));
 //                if a < b {
 //                    iterations += 1;
 //                    tc.tc_cache.clear();
@@ -558,7 +558,7 @@ fn nat_mod_eq_sub_mod() {
 //        for size in 0..1024 {
 //            let mut iterations = 0;
 //            while iterations < 10 {
-//                let (n, k) = (rng.gen_biguint(size + 1), rng.gen_biguint(size + 2));
+//                let (n, k) = (rng.random_biguint(size + 1), rng.random_biguint(size + 2));
 //                if zero < n && one < k {
 //                    iterations += 1;
 //                    let (n, k) = (tc.ctx.mk_nat_lit_quick(n), tc.ctx.mk_nat_lit_quick(k));
@@ -580,7 +580,7 @@ fn nat_mod_eq_sub_mod() {
 //        for size in 0..128 {
 //            let mut iteration = 0;
 //            while iteration < 32 {
-//                let (a, b) = (rng.gen_biguint(size), rng.gen_biguint(size));
+//                let (a, b) = (rng.random_biguint(size), rng.random_biguint(size));
 //                if a >= b {
 //                    iteration += 1;
 //                    tc.tc_cache.clear();
@@ -604,7 +604,7 @@ fn nat_mod_eq_sub_mod() {
 //        let one = tc.ctx.mk_nat_lit_quick(BigUint::one());
 //        for size in 0..512 {
 //            for _ in 0..32 {
-//                let n = tc.ctx.mk_nat_lit_quick(rng.gen_biguint(size));
+//                let n = tc.ctx.mk_nat_lit_quick(rng.random_biguint(size));
 //                let n_pow_zero = tc.ctx.nat_binop(n, NatBinOp::Pow, zero);
 //                assert!(tc.def_eq(n_pow_zero, one));
 //            }
@@ -618,7 +618,7 @@ fn nat_mod_eq_sub_mod() {
 //        let zero = tc.ctx.mk_nat_lit_quick(BigUint::zero());
 //        for size in 0..512 {
 //            for _ in 0..32 {
-//                let n = tc.ctx.mk_nat_lit_quick(rng.gen_biguint(size));
+//                let n = tc.ctx.mk_nat_lit_quick(rng.random_biguint(size));
 //                let n_sub_zero = tc.ctx.nat_binop(n, NatBinOp::Sub, zero);
 //                assert!(tc.def_eq(n_sub_zero, n));
 //            }
@@ -634,7 +634,7 @@ fn nat_mod_eq_sub_mod() {
 //            for _iteration in 0..10 {
 //                tc.tc_cache.clear();
 //                let (n, m) =
-//                    (tc.ctx.mk_nat_lit_quick(rng.gen_biguint(size)), tc.ctx.mk_nat_lit_quick(rng.gen_biguint(size)));
+//                    (tc.ctx.mk_nat_lit_quick(rng.random_biguint(size)), tc.ctx.mk_nat_lit_quick(rng.random_biguint(size)));
 //                let n_sub_m = tc.ctx.nat_binop(n, NatBinOp::Sub, m);
 //                let n_sub_m_le_n = tc.ctx.nat_binop(n_sub_m, NatBinOp::Ble, n);
 //                assert!(tc.def_eq(n_sub_m_le_n, bool_true));
@@ -651,7 +651,7 @@ fn nat_mod_eq_sub_mod() {
 //            for _iteration in 0..10 {
 //                tc.tc_cache.clear();
 //                let (n, m) =
-//                    (tc.ctx.mk_nat_lit_quick(rng.gen_biguint(size)), tc.ctx.mk_nat_lit_quick(rng.gen_biguint(size)));
+//                    (tc.ctx.mk_nat_lit_quick(rng.random_biguint(size)), tc.ctx.mk_nat_lit_quick(rng.random_biguint(size)));
 //                let succ_n = tc.ctx.mk_app(c_succ, n);
 //                let succ_m = tc.ctx.mk_app(c_succ, m);
 //                let succ_n_sub_succ_m = tc.ctx.nat_binop(succ_n, NatBinOp::Sub, succ_m);
@@ -671,7 +671,7 @@ fn nat_mod_eq_sub_mod() {
 //            for _iteration in 0..10 {
 //                tc.tc_cache.clear();
 //                let (n, m) =
-//                    (tc.ctx.mk_nat_lit_quick(rng.gen_biguint(size)), tc.ctx.mk_nat_lit_quick(rng.gen_biguint(size)));
+//                    (tc.ctx.mk_nat_lit_quick(rng.random_biguint(size)), tc.ctx.mk_nat_lit_quick(rng.random_biguint(size)));
 //                let succ_m = tc.ctx.mk_app(c_succ, m);
 //                let n_pow_succ_m = tc.ctx.nat_binop(n, NatBinOp::Pow, succ_m);
 //                let n_pow_m = tc.ctx.nat_binop(n, NatBinOp::Pow, m);
@@ -690,7 +690,7 @@ fn nat_mod_eq_sub_mod() {
 //        for size in 0..512 {
 //            for _iteration in 0..10 {
 //                tc.tc_cache.clear();
-//                let n = tc.ctx.mk_nat_lit_quick(rng.gen_biguint(size));
+//                let n = tc.ctx.mk_nat_lit_quick(rng.random_biguint(size));
 //                let succ_n = tc.ctx.mk_app(c_succ, n);
 //                let n_lt_succ_n = tc.ctx.nat_binop(n, NatBinOp::Ble, succ_n);
 //                assert!(tc.def_eq(n_lt_succ_n, bool_true));
@@ -704,7 +704,7 @@ fn nat_mod_eq_sub_mod() {
 //#[test]
 //fn e_nat_tests() -> Result<(), Box<dyn Error>> {
 //    test_export_file(Some(&Path::new("test_resources/Init/config.json")), |export| {
-//        let mut rng = rand::thread_rng();
+//        let mut rng = rand::rng();
 //        e_succ_zero_eq(export, &mut rng);
 //        e_succ_nat_lit_eq(export, &mut rng);
 //        e_nat_zero_add(export, &mut rng);
