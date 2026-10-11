@@ -644,7 +644,7 @@ These approaches were tried and found counterproductive, unsound, or out of scop
 
 ## Upstream nanoda porting
 
-Reviewed all nanoda_lib commits from fork point `68d5ca9` through `3a24072` (2026-09-22).
+Reviewed all nanoda_lib commits from fork point `68d5ca9` through `0f88b5f` (2026-10-11).
 
 Applied:
 - **`4219437` — Encode DagMarker in bit 31 of Ptr** (by Mark Ruvald Pedersen):
@@ -713,6 +713,53 @@ and comparing recursor name sets.
   (a 25 M-digit literal took longer than five minutes to parse). The accompanying
   dependency bumps (num-bigint 0.5, rand 0.10, num-integer/num-traits) are taken too;
   only the tests' rand API use changed.
+- **PR #45 (`9f2b66c`) — three-valued proof irrelevance and lazy-delta projections**
+  (by ammkrn, from nomeata's patch in nanoda issue #44), 2026-10-11. Two independent
+  changes, both following the reference kernel:
+  (1) `proof_irrel_eq` returns `Option<bool>`, as `is_def_eq_proof_irrel`: once the left
+  side is a proof, the right side's type is inferred (without checking that it is a
+  proposition) and the comparison of the two types *is* the answer, instead of a type
+  mismatch falling through to lazy delta reduction, which unfolds both proofs (upstream:
+  proofs by well-founded recursion unfolded into 10⁵–10⁶ `Acc.rec` steps until the
+  allocator failed). Mathlib 4.725 T → 4.677 T (−1.0%).
+  (2) `Proj`-vs-`Proj` in `def_eq` goes through `lazy_delta_proj_reduction`: lazy-delta
+  steps on the two structures, and once neither unfolds further, compares only the
+  projected fields when both are constructor applications, instead of `def_eq` on the
+  whole structures (which also evaluates the fields the projection discards). Ported
+  literally to `nanoda_tc.rs`; `tc.rs` needs more care, see below. The arena's
+  `perf/proj-lazy-struct` goes from 45.9 G instructions / 9.4 s to 24 M / 4 ms;
+  `proj-cheap-struct`, `proj-stuck-struct` and `irrelevance-before-evaluation` were
+  already fast and stay so.
+  (3) The literal projection change costs **+8.1% on Mathlib** (4.725 T → 5.110 T), both
+  changes together +7.6%, concentrated in instance-heavy declarations
+  (`CategoryTheory.instIsIsoIndCoimageImageComparison` 5 ms → 1.6 s, `def_eq` calls
+  1 175 → 287 376). Mechanism: Mathlib's projections sit on instance chains whose heads
+  are abbreviations (`AddMonoid.toAddZeroClass α inst`, `Functor.obj … F X`), for
+  which the lazy-delta loop skips argument congruence and unfolds, reaching the
+  structures' constructor applications (through `try_unfold_proj_app`, which evaluates
+  the structure with `whnf`, as the reference kernel's does) and comparing one field —
+  an instantiated instance body full of further projections. The old path compared the
+  two *structures* and memoized that fact, so every later projection out of the same
+  pair, and every comparison of terms containing them, was O(1): 99 projection
+  comparisons in that declaration against 8 095 (1 786 distinct pairs, each repeated in
+  up to 34 binder frames). What recovers it: the cheap positive checks `def_eq` would
+  have made before unfolding (pointer equality, positive memo, spine congruence) at the
+  top of `lazy_delta_proj_reduction`, a positive memo entry when the loop decides the
+  structures equal, and — the decisive part — when the loop exhausts without
+  constructor applications, falling back to `def_eq` on the *original* structures
+  rather than the exhausted pair, so the memo covers the pair everything else asks
+  about. With those, **Mathlib 4.725 T → 4.51–4.53 T (−4.3%, two runs)**, 240 s → 219–224 s
+  wall at 4 threads, RSS unchanged at 6.43 GB, although the isolated declaration above stays at 0.86 s: on instance
+  diamonds that do unfold to constructors, field-wise comparison cannot establish the
+  structures' equality and pays per field where the old path paid once. Measured but
+  not taken: comparing the whole structures first and the projections only as a
+  fallback is Mathlib-neutral but leaves `proj-lazy-struct` at 45.9 G (the structures
+  get evaluated before the fallback runs); memoizing the projection pair in
+  `def_eq_proj` never hits (the pairs are open and anchored in binder frames that are
+  left and re-entered); checking the remaining fields with `cheap_eq` after the
+  projected ones never hits either.
+  Init 218.2 B → 218.5 B, std 357.1 B → 357.6 B, con-leche 562.1 B → 562.2 B (all
+  within 0.15%), single-threaded.
 - **PR #27 (`05024bd`, part) — replace the union-find def-eq cache.** Upstream swaps
   `UnionFind` for an `FxHashSet<SortedPair>` so the cache cannot conclude `x = z` from
   cached `x = y` and `y = z`, and drops `union_find.rs` entirely. Done here too; see
@@ -1000,6 +1047,7 @@ Local measurements (release build):
 
 | | Init (instructions, single-thread) | Mathlib (8 threads, wall / user) |
 |---|---|---|
+| nanobruijn (2026-10-11, + upstream PR #45 proof irrelevance / lazy-delta projections) | 218.5B (std 357.6B) | 4 threads: 4.53T, 224s / 688s, 6.4 GB |
 | nanobruijn (2026-09-28, + upstream PR #31 def_eq failure memo) | 218.5B (std 356.9B) | 4 threads: 4.72T, 231s / 706s, 6.4 GB |
 | nanobruijn (2026-09-11, canonical binders + compaction) | 217.8B (std 356.3B) | 4 threads: 7.88T, 299s / 976s, 6.4 GB (master 9.95T, 338s / 1172s, 5.8 GB) |
 | nanobruijn (2026-04-19, post-field-removal) | 225.7B | 3m28s / 20m33s |

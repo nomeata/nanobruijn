@@ -382,7 +382,11 @@ impl<'x, 't: 'x, 'p: 't> NanodaTypeChecker<'x, 't, 'p> {
     }
 
     fn reduce_proj(&mut self, idx: usize, structure: ExprPtr<'t>, cheap: bool) -> Option<ExprPtr<'t>> {
-        let mut structure = if cheap { self.whnf_no_unfolding_cheap_proj(structure) } else { self.whnf(structure) };
+        let structure = if cheap { self.whnf_no_unfolding_cheap_proj(structure) } else { self.whnf(structure) };
+        self.reduce_proj_core(idx, structure)
+    }
+
+    fn reduce_proj_core(&mut self, idx: usize, mut structure: ExprPtr<'t>) -> Option<ExprPtr<'t>> {
         if let StringLit { ptr, .. } = self.ctx.read_expr(structure.core) {
             if let Some(s) = self.str_lit_to_ctor_reducing(ptr) {
                 structure = s;
@@ -391,7 +395,24 @@ impl<'x, 't: 'x, 'p: 't> NanodaTypeChecker<'x, 't, 'p> {
         let (_, name, _, args) = self.ctx.unfold_const_apps(structure)?;
         let ConstructorData { num_params, .. } = self.env.get_constructor(&name)?;
         let i = (*num_params as usize) + idx;
-        Some(args.get(i).copied().unwrap())
+        args.get(i).copied()
+    }
+
+    /// `x.i =?= y.i` by their structures, as the reference kernel's
+    /// `lazy_delta_proj_reduction` (src/kernel/type_checker.cpp): lazy-delta
+    /// steps on the two structures; once neither unfolds any further, project
+    /// both and compare just the projected fields, and only if a side is not a
+    /// constructor application compare the structures themselves.  Comparing the
+    /// whole structures first would also compare (and evaluate) the fields the
+    /// projection discards.
+    fn lazy_delta_proj_reduction(&mut self, x: ExprPtr<'t>, y: ExprPtr<'t>, idx: usize) -> bool {
+        match self.lazy_delta_step(x, y) {
+            FoundEqResult(r) => r,
+            Exhausted(x, y) => match (self.reduce_proj_core(idx, x), self.reduce_proj_core(idx, y)) {
+                (Some(x_i), Some(y_i)) => self.def_eq(x_i, y_i),
+                _ => self.def_eq(x, y),
+            },
+        }
     }
 
     pub(crate) fn infer_then_whnf(&mut self, e: ExprPtr<'t>, flag: InferFlag) -> ExprPtr<'t> {
@@ -781,7 +802,7 @@ impl<'x, 't: 'x, 'p: 't> NanodaTypeChecker<'x, 't, 'p> {
     fn def_eq_proj(&mut self, x: ExprPtr<'t>, y: ExprPtr<'t>) -> bool {
         match self.ctx.view_expr_pair(x, y) {
             (Proj { idx: idx_l, structure: structure_l, .. }, Proj { idx: idx_r, structure: structure_r, .. }) =>
-                idx_l == idx_r && self.def_eq(structure_l, structure_r),
+                idx_l == idx_r && self.lazy_delta_proj_reduction(structure_l, structure_r, idx_l as usize),
             _ => false,
         }
     }
@@ -858,8 +879,8 @@ impl<'x, 't: 'x, 'p: 't> NanodaTypeChecker<'x, 't, 'p> {
             return easy
         }
 
-        let result = if self.proof_irrel_eq(x_n, y_n) {
-            true
+        let result = if let Some(short) = self.proof_irrel_eq(x_n, y_n) {
+            short
         } else {
             match self.lazy_delta_step(x_n, y_n) {
                 FoundEqResult(short) => short,
@@ -1221,13 +1242,18 @@ impl<'x, 't: 'x, 'p: 't> NanodaTypeChecker<'x, 't, 'p> {
         (self.is_proposition(infd).0, infd)
     }
 
-    fn proof_irrel_eq(&mut self, x: ExprPtr<'t>, y: ExprPtr<'t>) -> bool {
+    /// Three-valued, as the reference kernel's `is_def_eq_proof_irrel`: `None`
+    /// when `x` is not a proof (nothing learned), otherwise the answer is decided
+    /// here by comparing the types — `y`'s type is inferred without checking that
+    /// it is a proposition, and a mismatch is final rather than falling through
+    /// to lazy delta reduction.
+    fn proof_irrel_eq(&mut self, x: ExprPtr<'t>, y: ExprPtr<'t>) -> Option<bool> {
         match self.is_proof(x) {
-            (false, _) => false,
-            (true, l_type) => match self.is_proof(y) {
-                (false, _) => false,
-                (true, r_type) => self.def_eq(l_type, r_type),
-            },
+            (false, _) => None,
+            (true, l_type) => {
+                let r_type = self.infer(y, InferOnly);
+                Some(self.def_eq(l_type, r_type))
+            }
         }
     }
 
