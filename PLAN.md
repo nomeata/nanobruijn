@@ -644,7 +644,7 @@ These approaches were tried and found counterproductive, unsound, or out of scop
 
 ## Upstream nanoda porting
 
-Reviewed all nanoda_lib commits from fork point `68d5ca9` through `0f88b5f` (2026-10-11).
+Reviewed all nanoda_lib commits from fork point `68d5ca9` through `e0d76f5` (2026-10-14).
 
 Applied:
 - **`4219437` — Encode DagMarker in bit 31 of Ptr** (by Mark Ruvald Pedersen):
@@ -760,6 +760,21 @@ and comparing recursor name sets.
   projected ones never hits either.
   Init 218.2 B → 218.5 B, std 357.1 B → 357.6 B, con-leche 562.1 B → 562.2 B (all
   within 0.15%), single-threaded.
+- **PR #48 (`ee55844`) — check the projection's type name** (by ammkrn): `infer_proj`
+  panics when the `Proj` node's declared structure name differs from the inferred
+  structure type's name, as the reference kernel does. Not soundness critical.
+  Ported to both `tc.rs` and `nanoda_tc.rs`.
+- **PR #46 (`3cc92e2`) — errors for invalid configurations** (by Muneeb Sheikh):
+  `Config::try_from` propagates the JSON parse error instead of unwrapping. Tests and
+  `test_resources/Config/*.json` ported.
+- **PR #51 (`0e520fd`) — whnf the second Nat operand lazily** (by ammkrn): `do_nat_bin`
+  reduces the second operand only once the first is known to be a literal. Both checkers.
+- **PR #52 (`e8a9606`) — shift-based `nat_shl`/`nat_shr`** (by ammkrn): BigUint shifts
+  instead of multiplying/dividing by `2^y`; zero shifted by any count short-circuits
+  before the count is converted, and a right shift by at least the bit width returns
+  zero. Upstream tests ported.
+  After all four: Init 218.9 B, std 357.4 B, Mathlib (4 threads) 4.53 T, all within
+  0.2% of the PR #45 numbers; 0 errors on Mathlib.
 - **PR #27 (`05024bd`, part) — replace the union-find def-eq cache.** Upstream swaps
   `UnionFind` for an `FxHashSet<SortedPair>` so the cache cannot conclude `x = z` from
   cached `x = y` and `y = z`, and drops `union_find.rs` entirely. Done here too; see
@@ -1048,6 +1063,7 @@ Local measurements (release build):
 | | Init (instructions, single-thread) | Mathlib (8 threads, wall / user) |
 |---|---|---|
 | nanobruijn (2026-10-11, + upstream PR #45 proof irrelevance / lazy-delta projections) | 218.5B (std 357.6B) | 4 threads: 4.53T, 224s / 688s, 6.4 GB |
+| nanobruijn (2026-10-14, + upstream PRs #46/#48/#51/#52: config errors, proj ty_name check, lazy Nat operand, shift-based shl/shr) | 218.9B (std 357.4B) | 4 threads: 4.53T, 232s / 708s |
 | nanobruijn (2026-09-28, + upstream PR #31 def_eq failure memo) | 218.5B (std 356.9B) | 4 threads: 4.72T, 231s / 706s, 6.4 GB |
 | nanobruijn (2026-09-11, canonical binders + compaction) | 217.8B (std 356.3B) | 4 threads: 7.88T, 299s / 976s, 6.4 GB (master 9.95T, 338s / 1172s, 5.8 GB) |
 | nanobruijn (2026-04-19, post-field-removal) | 225.7B | 3m28s / 20m33s |
