@@ -776,14 +776,16 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
     }
 
     #[allow(non_snake_case)]
-    fn infer_proj(&mut self, _ty_name: NamePtr<'t>, idx: u32, structure: ExprPtr<'t>, flag: InferFlag) -> ExprPtr<'t> {
+    fn infer_proj(&mut self, ty_name: NamePtr<'t>, idx: u32, structure: ExprPtr<'t>, flag: InferFlag) -> ExprPtr<'t> {
         let structure_ty = self.infer_then_whnf(structure, flag);
         let structure_ty_may_be_prop = self.may_be_prop(structure_ty).0;
         let (_, struct_ty_name, struct_ty_levels, struct_ty_args) = self.ctx.unfold_const_apps(structure_ty).unwrap();
 
         let InductiveData { info: inductive_info, all_ctor_names, num_params, .. } =
             self.env.get_structure(&struct_ty_name, true).unwrap();
-
+        if inductive_info.name != ty_name {
+            panic!("Invalid projection: {:?} != {:?}", self.ctx.debug_print(inductive_info.name), self.ctx.debug_print(ty_name));
+        }
         let ConstructorData { info: ctor_info, .. } = self.env.get_constructor(&all_ctor_names[0]).unwrap();
         let mut ctor_ty = self.ctx.subst_declar_info_levels(*ctor_info, struct_ty_levels);
         for i in 0..(*num_params) {
@@ -821,7 +823,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                 binder_type
             }
             other => panic!("Ran out of constructor telescope getting field: ty_name={:?}, struct_ty_name={:?}, idx={}, num_params={}, struct_ty={:?}, ctor_ty_whnf={:?}, variant={}",
-                self.ctx.debug_print(_ty_name), self.ctx.debug_print(struct_ty_name),
+                self.ctx.debug_print(ty_name), self.ctx.debug_print(struct_ty_name),
                 idx, num_params, self.ctx.core_desc(structure_ty.core, 5), self.ctx.core_desc(reduced.core, 5),
                 match other { Sort {..} => "Sort", Const {..} => "Const", App {..} => "App", Lambda {..} => "Lambda", _ => "other" })
         }

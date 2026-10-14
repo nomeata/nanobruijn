@@ -421,7 +421,7 @@ impl<'x, 't: 'x, 'p: 't> NanodaTypeChecker<'x, 't, 'p> {
     }
 
     #[allow(non_snake_case)]
-    fn infer_proj(&mut self, _ty_name: NamePtr<'t>, idx: usize, structure: ExprPtr<'t>) -> ExprPtr<'t> {
+    fn infer_proj(&mut self, ty_name: NamePtr<'t>, idx: usize, structure: ExprPtr<'t>) -> ExprPtr<'t> {
         let (structure_ty_is_prop, structure_ty) = {
             let (is_proof, t) = self.is_proof(structure);
             (is_proof, self.whnf(t))
@@ -430,7 +430,9 @@ impl<'x, 't: 'x, 'p: 't> NanodaTypeChecker<'x, 't, 'p> {
 
         let InductiveData { info: inductive_info, all_ctor_names, num_params, .. } =
             self.env.get_inductive(&struct_ty_name).unwrap();
-
+        if inductive_info.name != ty_name {
+            panic!("Invalid projection: {:?} != {:?}", self.ctx.debug_print(inductive_info.name), self.ctx.debug_print(ty_name));
+        }
         let ConstructorData { info: ctor_info, .. } = self.env.get_constructor(&all_ctor_names[0]).unwrap();
         let mut ctor_ty = self.ctx.subst_declar_info_levels(*ctor_info, struct_ty_levels);
         for i in 0..(*num_params) {
