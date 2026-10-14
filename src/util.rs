@@ -7,7 +7,9 @@ use crate::tc::TypeChecker;
 use crate::unique_hasher::UniqueHasher;
 use indexmap::{IndexMap, IndexSet};
 use num_bigint::BigUint;
-use num_traits::{ Pow, identities::Zero };
+use num_traits::{ identities::Zero };
+use std::ops::{ Shl, Shr };
+use std::convert::TryFrom;
 use num_integer::Integer;
 use rustc_hash::FxHasher;
 use std::borrow::Cow;
@@ -332,11 +334,19 @@ pub(crate) fn nat_xor(x: &BigUint, y: &BigUint) -> BigUint {
 }
 
 pub(crate) fn nat_shl(x: BigUint, y: BigUint) -> BigUint {
-    x * BigUint::from(2u8).pow(y)
+    if x.is_zero() {
+        return x;
+    }
+
+    x.shl(u64::try_from(&y).expect("nat_shl: shift count exceeds u64::MAX"))
 }
 
 pub(crate) fn nat_shr(x: BigUint, y: BigUint) -> BigUint {
-    x / BigUint::from(2u8).pow(y)
+    if y >= BigUint::from(x.bits()) {
+        return BigUint::zero();
+    }
+
+    x.shr(u64::try_from(&y).unwrap())
 }
 
 pub(crate) fn nat_land(x: BigUint, y: BigUint) -> BigUint {
