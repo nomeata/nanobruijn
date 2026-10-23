@@ -1726,7 +1726,12 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                     self.assert_def_eq(ExprPtr::closed(old.val), ExprPtr::closed(new.val));
                 }
             }
-            _ => {}
+            // A recursor moved to a later block is hidden by the environment
+            // cutoff; we must find it within the current cutoff.
+            _ => panic!(
+                "expected exported recursor {:?} within the inductive block's environment",
+                self.ctx.debug_print(resolved_rec_name),
+            ),
         }
     }
 
