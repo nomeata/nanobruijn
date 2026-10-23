@@ -668,13 +668,11 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
     }
     
     /// Try to reduce an expression `e` which is an application of `Nat.succ`,
-    /// or an application of a supported binary operation. `e` must have no free
-    /// variables.
+    /// or an application of a supported binary operation. Like the reference
+    /// kernel's `reduce_nat`, this does not care whether `e` mentions bound
+    /// variables: the operands are reduced and must come out as literals.
     pub(crate) fn try_reduce_nat(&mut self, e: ExprPtr<'t>) -> Option<ExprPtr<'t>> {
         if !self.ctx.export_file.config.nat_extension {
-            return None
-        }
-        if self.ctx.nlbv(e) > 0 {
             return None
         }
         let (f, args) = self.ctx.unfold_apps(e);
