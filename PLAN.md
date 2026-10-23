@@ -644,7 +644,7 @@ These approaches were tried and found counterproductive, unsound, or out of scop
 
 ## Upstream nanoda porting
 
-Reviewed all nanoda_lib commits from fork point `68d5ca9` through `e0d76f5` (2026-10-14).
+Reviewed all nanoda_lib commits from fork point `68d5ca9` through `a3ef25a` (2026-10-23).
 
 Applied:
 - **`4219437` — Encode DagMarker in bit 31 of Ptr** (by Mark Ruvald Pedersen):
@@ -775,6 +775,47 @@ and comparing recursor name sets.
   zero. Upstream tests ported.
   After all four: Init 218.9 B, std 357.4 B, Mathlib (4 threads) 4.53 T, all within
   0.2% of the PR #45 numbers; 0 errors on Mathlib.
+- **PR #54 (`233aa4a`) — better panic for a missing constant** (by ammkrn): `infer_const`
+  names the declaration being checked. Both checkers.
+- **PR #58 (`6239144`) — drop the free-variable early-out in `try_reduce_nat`** (by
+  ammkrn): a conformance fix, not a perf one. The reference kernel's `reduce_nat` has
+  no free-variable check (its `has_fvar` gating sits in lazy delta and the `Bool.true`
+  shortcut, lifted in eager mode); nanoda's inner `has_fvars` early-out predates eager
+  mode and silently defeated it, so an open `Nat.add ((fun y => 3) x) 1000000` was
+  unfolded through `Nat.rec` instead of computed. Both checkers follow upstream; the
+  `nlbv(e) > 0` early-out of `tc.rs` goes too. A first attempt kept it in `tc.rs` as
+  "cheap" (std looked 1.3% better in isolation) — wrong framing; with the whole sync
+  the difference is within run-to-run noise (Init 220.6 B vs 221.2 B, std 353.7 B vs
+  354.9 B, Mathlib 4.59 T vs 4.57 T).
+- **PR #59 (`5c0e318`) — quick alpha-equivalence check** (by ammkrn, nanoda issue #55):
+  binder names and styles are part of the hash-consed core (here as upstream), so
+  alpha-equivalent terms can have different pointers and had to be reduced to be found
+  equal. `TcCtx::alpha_eq` decides them structurally, iterating over the shared DAG;
+  called from `def_eq_quick_check` in both checkers. Necessary: without it nanobruijn,
+  like nanoda, runs out of memory on `OAI.SquareDifference.tupleSubLaw_full` from
+  openai/math (75 MB export attached to the issue, kept in `_tmp/scratch/issue55/`;
+  619 B instructions and >16 GB before aborting); with it the export checks in 4.7 s /
+  37 B. The other repro there, `sizeFactor_positive`, likewise went from OOM (300 B) to
+  3 B. Adaptations: children are read through `view_expr` so shifts compose and leaves
+  compare by value; the visited set is only consulted once a walk exceeds 32 pairs
+  (most calls fail within ~5 steps, hit rate on Init ≈ 1 in 20); the work stack is
+  reused; `tc.rs` skips the check while both sides carry a common shift, which
+  `def_eq_inner` peels before re-entering. A first version placed after the negative
+  cache with per-call set clearing cost 1.8% on Init; the final one 1.5% on Init
+  (217.9 B → 221.2 B) but gains 2% on std (362.1 B → 354.9 B). Trace counters
+  `alpha=hit/tried/steps`. Upstream tests plus one for shifted pointers.
+- **PR #63 (`2dbe93c`) — restored nested recursor rules must keep their field count**
+  (by ammkrn, nanoda issue #60): the count steers iota reduction. The arena test
+  `bugs/nested-rec-rule-nfields` (a proof of `False`) was accepted before, now rejected.
+- **PR #65 (`14a85b7`, `8eece76`) — inductive block validation** (by ammkrn): the
+  restored-recursor check panics if the exported recursor is not within the block's
+  environment cutoff instead of silently skipping; the parser checks each inductive
+  block (non-empty, no duplicate names, constructors belong to the block, `all`/`ctors`
+  lists match the block exactly). Upstream's level back-reference assert is already
+  covered by this parser's index remap check.
+  After all five: Init 220.6 B, std 353.7 B, Mathlib (4 threads) 4.59 T (+1.4%, the
+  alpha check; single runs vary by ~1% on this shared machine), 0 errors on Mathlib.
+  Not applicable: version bumps.
 - **PR #27 (`05024bd`, part) — replace the union-find def-eq cache.** Upstream swaps
   `UnionFind` for an `FxHashSet<SortedPair>` so the cache cannot conclude `x = z` from
   cached `x = y` and `y = z`, and drops `union_find.rs` entirely. Done here too; see
@@ -1064,6 +1105,7 @@ Local measurements (release build):
 |---|---|---|
 | nanobruijn (2026-10-11, + upstream PR #45 proof irrelevance / lazy-delta projections) | 218.5B (std 357.6B) | 4 threads: 4.53T, 224s / 688s, 6.4 GB |
 | nanobruijn (2026-10-14, + upstream PRs #46/#48/#51/#52: config errors, proj ty_name check, lazy Nat operand, shift-based shl/shr) | 218.9B (std 357.4B) | 4 threads: 4.53T, 232s / 708s |
+| nanobruijn (2026-10-23, + upstream PRs #54/#58/#59/#63/#65: alpha-eq check, nested rec rule field count, inductive block validation) | 220.6B (std 353.7B) | 4 threads: 4.59T, 254s / 798s (busy machine) |
 | nanobruijn (2026-09-28, + upstream PR #31 def_eq failure memo) | 218.5B (std 356.9B) | 4 threads: 4.72T, 231s / 706s, 6.4 GB |
 | nanobruijn (2026-09-11, canonical binders + compaction) | 217.8B (std 356.3B) | 4 threads: 7.88T, 299s / 976s, 6.4 GB (master 9.95T, 338s / 1172s, 5.8 GB) |
 | nanobruijn (2026-04-19, post-field-removal) | 225.7B | 3m28s / 20m33s |
