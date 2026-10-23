@@ -1791,6 +1791,14 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             }
             return Some(true)
         }
+        // Alpha-equivalent terms (equal up to binder names and styles) are equal without
+        // reduction (upstream nanoda PR #59). Skipped while both sides carry a common
+        // shift: `def_eq_inner` peels it and re-enters here with the smaller shifts.
+        let common_shift = (if x.is_closed() { 0 } else { x.shift }).min(if y.is_closed() { 0 } else { y.shift });
+        if common_shift == 0 && self.ctx.alpha_eq(x, y) {
+            self.defeq_pos_store(x, y);
+            return Some(true)
+        }
         if let Some(r) = self.def_eq_sort(x, y) {
             if r { self.defeq_pos_store(x, y); }
             return Some(r)

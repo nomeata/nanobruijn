@@ -1092,6 +1092,10 @@ impl<'x, 't: 'x, 'p: 't> NanodaTypeChecker<'x, 't, 'p> {
             self.ctx.trace.eq_cache_hits += 1;
             return Some(true)
         }
+        if self.ctx.alpha_eq(x, y) {
+            self.tc_cache.eq_cache.insert(SortedPair::new(x.core, y.core));
+            return Some(true)
+        }
         if let Some(r) = self.def_eq_sort(x, y) {
             if r { self.tc_cache.eq_cache.insert(SortedPair::new(x.core, y.core)); }
             return Some(r)

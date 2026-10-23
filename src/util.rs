@@ -381,6 +381,10 @@ pub struct ExprCache<'t> {
     /// Lazy memoized has_fvars: CorePtr → has-a-Local-in-subtree.
     /// Populated on demand; pure function of core.
     pub(crate) has_fvars_cache: FxHashMap<CorePtr<'t>, bool>,
+    /// Visited pairs of the current `alpha_eq` walk.
+    pub(crate) alpha_eq_visited: FxHashSet<(ExprPtr<'t>, ExprPtr<'t>)>,
+    /// Work stack of `alpha_eq`, kept to reuse its allocation.
+    pub(crate) alpha_eq_todo: Vec<(ExprPtr<'t>, ExprPtr<'t>)>,
 }
 
 impl<'t> ExprCache<'t> {
@@ -399,6 +403,8 @@ impl<'t> ExprCache<'t> {
             mk_app_miss_count: 0,
             var0_ptr: None,
             has_fvars_cache: new_fx_hash_map(),
+            alpha_eq_visited: new_fx_hash_set(),
+            alpha_eq_todo: Vec::new(),
         }
     }
 
@@ -596,6 +602,9 @@ pub struct TcTrace {
     pub spec_app_hit: u64,               // speculative app congruence successes
     pub spec_app2_tried: u64,            // spec_app after whnf_cheap_proj attempts
     pub spec_app2_hit: u64,              // spec_app after whnf_cheap_proj successes
+    pub alpha_eq_tried: u64,             // alpha_eq attempts in def_eq_quick_check
+    pub alpha_eq_hit: u64,               // alpha_eq successes
+    pub alpha_eq_steps: u64,             // node pairs inspected by alpha_eq
     pub push_shift_cache_hits: u64,
     pub infer_cache_hash_hit: u64,
     pub infer_cache_verify_fail: u64,
@@ -688,6 +697,9 @@ impl std::fmt::Display for TcTrace {
         if self.spec_app_tried > 0 {
             write!(f, " | spec={}/{} spec2={}/{}", self.spec_app_hit, self.spec_app_tried,
                 self.spec_app2_hit, self.spec_app2_tried)?;
+        }
+        if self.alpha_eq_tried > 0 {
+            write!(f, " | alpha={}/{}/{}s", self.alpha_eq_hit, self.alpha_eq_tried, self.alpha_eq_steps)?;
         }
         if self.zeta_reductions > 0 || self.whnf_let_reductions > 0 || self.wnu_calls > 0 {
             write!(f, " | zeta={} wlet={} wbeta={} dag={} wnu={}/{}/{} wnu_miss={}/{}/{} wnuov={}/{} peel={}/{}/{}/{}f", self.zeta_reductions, self.whnf_let_reductions, self.whnf_beta_reductions, self.dag_size, self.wnu_calls, self.wnu_cache_hits, self.wnu_shift_peel, self.wnu_cache_no_bucket, self.wnu_cache_no_entry, self.wnu_cache_verify_fail, self.wnu_cache_overflow_stores, self.wnu_cache_overflow_hits, self.infer_shift_peel, self.whnf_shift_peel, self.wnu_shift_peel, self.shift_peel_frames_total)?;

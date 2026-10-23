@@ -1,6 +1,6 @@
 //! Implementation of Lean expressions
 use crate::hash64;
-use crate::util::{AppArgs, BigUintPtr, CorePtr, FxHashMap, LevelPtr, LevelsPtr, NamePtr, ExprPtr, StringPtr, TcCtx};
+use crate::util::{new_fx_hash_set, AppArgs, BigUintPtr, CorePtr, FxHashMap, LevelPtr, LevelsPtr, NamePtr, ExprPtr, StringPtr, TcCtx};
 use num_bigint::BigUint;
 use num_traits::identities::Zero;
 use Expr::*;
@@ -163,7 +163,91 @@ pub enum BinderStyle {
     InstanceImplicit,
 }
 
+/// Canonical order for a pair of `ExprPtr`s, so `{x, y}` and `{y, x}` are one key.
+fn alpha_eq_key<'t>(x: ExprPtr<'t>, y: ExprPtr<'t>) -> (ExprPtr<'t>, ExprPtr<'t>) {
+    if (x.get_hash(), x.shift) <= (y.get_hash(), y.shift) { (x, y) } else { (y, x) }
+}
+
 impl<'t, 'p: 't> TcCtx<'t, 'p> {
+    /// Structural equality up to binder names and binder styles (upstream nanoda PR #59).
+    ///
+    /// Binder names and styles are part of the hash-consed core, so alpha-equivalent
+    /// terms can have different pointers; this decides them without reduction. The walk
+    /// is iterative over the shared DAG, so deep terms do not recurse on the stack.
+    /// Most calls fail within a few steps, so the visited set that keeps the walk linear
+    /// in the DAG (rather than the tree it unfolds to) is only consulted once a walk has
+    /// inspected more than `ALPHA_EQ_SET_AFTER` pairs; a pair seen before that point is
+    /// inspected at most once more. Children are read through `view_expr`, which
+    /// composes the pointer shifts, so leaves are compared by value rather than assumed
+    /// different when the pointers differ.
+    pub(crate) fn alpha_eq(&mut self, x: ExprPtr<'t>, y: ExprPtr<'t>) -> bool {
+        const ALPHA_EQ_SET_AFTER: u64 = 32;
+        self.trace.alpha_eq_tried += 1;
+        let mut todo = std::mem::take(&mut self.expr_cache.alpha_eq_todo);
+        todo.clear();
+        todo.push((x, y));
+        let mut steps = 0u64;
+        let mut result = true;
+        while let Some((x, y)) = todo.pop() {
+            if x == y {
+                continue
+            }
+            steps += 1;
+            if steps > ALPHA_EQ_SET_AFTER {
+                if steps == ALPHA_EQ_SET_AFTER + 1 {
+                    if self.expr_cache.alpha_eq_visited.capacity() > 1024 {
+                        self.expr_cache.alpha_eq_visited = new_fx_hash_set();
+                    } else {
+                        self.expr_cache.alpha_eq_visited.clear();
+                    }
+                }
+                if !self.expr_cache.alpha_eq_visited.insert(alpha_eq_key(x, y)) {
+                    continue
+                }
+            }
+            match self.view_expr_pair(x, y) {
+                (Const { name: a, levels: u, .. }, Const { name: b, levels: v, .. }) => {
+                    if a != b || u != v { result = false; break }
+                }
+                (App { fun: f, arg: a, .. }, App { fun: g, arg: b, .. }) => {
+                    todo.push((f, g));
+                    todo.push((a, b));
+                }
+                (Lambda { binder_type: a, body: b, .. }, Lambda { binder_type: c, body: d, .. })
+                | (Pi { binder_type: a, body: b, .. }, Pi { binder_type: c, body: d, .. }) => {
+                    todo.push((a, c));
+                    todo.push((b, d));
+                }
+                (
+                    Let { binder_type: a, val: v, body: b, nondep: n, .. },
+                    Let { binder_type: c, val: w, body: d, nondep: m, .. },
+                ) if n == m => {
+                    todo.push((a, c));
+                    todo.push((v, w));
+                    todo.push((b, d));
+                }
+                (
+                    Proj { ty_name: a, idx: i, structure: s, .. },
+                    Proj { ty_name: b, idx: j, structure: t, .. },
+                ) if a == b && i == j => todo.push((s, t)),
+                // De Bruijn levels can be reused with different types in the nanoda
+                // checker, so a matching free-variable ID alone is insufficient.
+                (Local { id: i, binder_type: a, .. }, Local { id: j, binder_type: b, .. }) if i == j => {
+                    todo.push((ExprPtr::closed(a), ExprPtr::closed(b)));
+                }
+                (Sort { level: a, .. }, Sort { level: b, .. }) => if a != b { result = false; break },
+                (Var { dbj_idx: a, .. }, Var { dbj_idx: b, .. }) => if a != b { result = false; break },
+                (NatLit { ptr: a, .. }, NatLit { ptr: b, .. }) => if a != b { result = false; break },
+                (StringLit { ptr: a, .. }, StringLit { ptr: b, .. }) => if a != b { result = false; break },
+                _ => { result = false; break }
+            }
+        }
+        self.trace.alpha_eq_steps += steps;
+        if result { self.trace.alpha_eq_hit += 1; }
+        self.expr_cache.alpha_eq_todo = todo;
+        result
+    }
+
     pub(crate) fn inst_forall_params(&mut self, mut e: ExprPtr<'t>, n: usize, all_args: &[ExprPtr<'t>]) -> ExprPtr<'t> {
         for _ in 0..n {
             match self.read_expr(e.core) {
